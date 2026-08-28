@@ -1,0 +1,44 @@
+# Build products
+/build/
+/build-*/
+/cmake-build-*/
+/.cache/
+/.qt/
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+
+# Flatpak products
+/.flatpak-builder/
+/repo/
+/bundle-build-dir/
+*.flatpak
+*.flatpakref
+
+# Packages and generated artifacts
+/dist/
+/artifacts/
+*.AppImage
+*.appimage
+*.o
+*.a
+*.so
+
+# IDE and local files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Grok run state
+.grok/*.log
+.grok/*.status
+.grok/*.pid
+
+# Test/runtime state
+Testing/
+coverage/
+*.gcda
+*.gcno
