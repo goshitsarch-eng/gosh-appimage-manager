@@ -26,6 +26,7 @@ public:
     static QString canonicalExisting(const QString &path, QString *error = nullptr);
     static bool mkdir0700(const QString &path, QString *error = nullptr);
     static bool atomicWrite(const QString &path, const QByteArray &data, QString *error = nullptr, int mode = 0600);
+    static bool destinationExistsNoFollow(const QString &path);
     static bool copyBounded(const QString &from,
                             const QString &to,
                             qint64 maxBytes,
@@ -35,6 +36,7 @@ public:
     static bool fsyncPath(const QString &path, QString *error = nullptr);
     static bool chmodPath(const QString &path, int mode, QString *error = nullptr);
     static bool renameOver(const QString &from, const QString &to, QString *error = nullptr);
+    static bool renameNoReplace(const QString &from, const QString &to, QString *error = nullptr);
     static bool removeFileNoFollow(const QString &path, QString *error = nullptr);
     static bool removeTreeNoFollow(const QString &path, QString *error = nullptr);
     static bool isForbiddenPermanentTarget(const QString &canonicalPath);

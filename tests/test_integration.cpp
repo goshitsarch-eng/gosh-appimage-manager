@@ -1,10 +1,14 @@
 #include "ElfFixtures.h"
 #include "FakeSeams.h"
 #include "core/AppImageInspector.h"
+#include "core/AppImageLibrary.h"
 #include "core/DesktopIntegration.h"
 #include "core/IntegrationService.h"
 #include "core/ManagedRegistry.h"
 #include "core/SettingsStore.h"
+#include "core/UpdateService.h"
+#include "core/ProcessTable.h"
+#include "core/RemovalLaunch.h"
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -377,6 +381,89 @@ private Q_SLOTS:
         QCOMPARE(fileBytes(first.app.desktopPath), desktopBefore);
         QVERIFY(QFile::exists(src2));
         QVERIFY(noOrphans());
+    }
+    void keepBothRefusesUnownedDestRace()
+    {
+        const QString src = TestFixt::writeFile(m_home.path(), QStringLiteral("Race.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2));
+        IntegrateRequest req;
+        req.sourcePath = src;
+        req.conflict = ConflictPolicy::KeepBoth;
+        QByteArray planted = QByteArrayLiteral("unowned-dest");
+        QString plantedPath;
+        m_service->setBeforeCommitHook([&](const QString &destPath) {
+            plantedPath = destPath;
+            QFile file(destPath);
+            QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            file.write(planted);
+        });
+        const IntegrateResult result = m_service->integrate(req);
+        m_service->setBeforeCommitHook({});
+        QVERIFY(!result.ok);
+        QVERIFY(QFile::exists(src));
+        QCOMPARE(fileBytes(plantedPath), planted);
+        QVERIFY(noOrphans());
+    }
+    void adoptLeavesForeignDesktopUntouched()
+    {
+        const QByteArray payload = TestFixt::makeElf64(Architecture::X86_64, 2);
+        const QString appPath = TestFixt::writeFile(m_home.path(), QStringLiteral("Foreign.AppImage"), payload);
+        const QString foreignDesktop = m_home.path() + QStringLiteral("/foreign.desktop");
+        const QByteArray foreignBytes = QByteArrayLiteral("[Desktop Entry]\nName=Gear Lever App\nExec=")
+            + appPath.toUtf8() + "\nTryExec=" + appPath.toUtf8() + "\n";
+        QVERIFY(QFile(foreignDesktop).open(QIODevice::WriteOnly));
+        {
+            QFile file(foreignDesktop);
+            QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            file.write(foreignBytes);
+        }
+        InstalledApp external;
+        external.uuid = QStringLiteral("external:foreign.desktop");
+        external.name = QStringLiteral("Gear Lever App");
+        external.managedPath = appPath;
+        external.desktopPath = foreignDesktop;
+        external.owned = false;
+        AppImageLibrary library(m_settings, m_registry, m_desktop);
+        QString error;
+        QVERIFY2(library.adopt(external, &error), qPrintable(error));
+        QCOMPARE(fileBytes(foreignDesktop), foreignBytes);
+        const InstalledApp adopted = m_registry->apps().last();
+        QVERIFY(adopted.owned);
+        QVERIFY(adopted.adopted);
+        QVERIFY(adopted.desktopPath.contains(QLatin1String("gosh-appimage-")));
+        QVERIFY(adopted.desktopPath != foreignDesktop);
+        QFile gosh(adopted.desktopPath);
+        QVERIFY(gosh.open(QIODevice::ReadOnly));
+        const QByteArray goshBytes = gosh.readAll();
+        QVERIFY(goshBytes.contains("X-Gosh-AppImage-Manager=true"));
+        QVERIFY(goshBytes.contains(adopted.uuid.toUtf8()));
+
+        FakeNetworkClient network;
+        FakeProcessTable processes;
+        UpdateService updates(m_settings, m_registry, m_inspector, m_desktop, &network, &processes, &m_runner);
+        const QByteArray next = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(8, 'N'));
+        FakeNetworkClient::Rule rule;
+        rule.hostContains = QStringLiteral("example.com");
+        rule.result.ok = true;
+        rule.result.status = 200;
+        rule.result.body = next;
+        rule.result.contentLength = next.size() + 1;
+        network.rules.append(rule);
+        InstalledApp toUpdate = adopted;
+        toUpdate.updateManager = QStringLiteral("static");
+        toUpdate.updateConfig.insert(QStringLiteral("url"), QStringLiteral("https://example.com/App.AppImage"));
+        toUpdate.size = payload.size();
+        m_registry->upsert(toUpdate);
+        updates.apply(toUpdate, true);
+        QCOMPARE(fileBytes(foreignDesktop), foreignBytes);
+
+        RemovalService removal(m_settings, m_registry, m_desktop, &processes, &m_runner);
+        removal.setTrashHook([](const QString &, QString *) { return true; });
+        RemovalRequest req;
+        req.pathOrUuid = adopted.uuid;
+        req.mode = RemovalMode::Trash;
+        QVERIFY(removal.remove(req, &error));
+        QCOMPARE(fileBytes(foreignDesktop), foreignBytes);
+        QVERIFY(!QFile::exists(adopted.desktopPath));
     }
 };
 

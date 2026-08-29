@@ -2,6 +2,7 @@
 
 #include "Types.h"
 
+#include <QMutex>
 #include <QObject>
 #include <QString>
 
@@ -29,23 +30,23 @@ public:
 
     QString managedFolder() const;
     void setManagedFolder(const QString &path);
-    bool moveSource() const { return m_moveSource; }
+    bool moveSource() const;
     void setMoveSource(bool value);
-    bool manageOutsideFolder() const { return m_manageOutsideFolder; }
+    bool manageOutsideFolder() const;
     void setManageOutsideFolder(bool value);
-    bool terminalOmitSuffix() const { return m_terminalOmitSuffix; }
+    bool terminalOmitSuffix() const;
     void setTerminalOmitSuffix(bool value);
-    bool backgroundUpdateChecks() const { return m_backgroundUpdateChecks; }
+    bool backgroundUpdateChecks() const;
     void setBackgroundUpdateChecks(bool value);
-    bool unsafeExtractionFallback() const { return m_unsafeExtractionFallback; }
+    bool unsafeExtractionFallback() const;
     void setUnsafeExtractionFallback(bool value);
-    Appearance appearance() const { return m_appearance; }
+    Appearance appearance() const;
     QString appearanceName() const;
     void setAppearance(Appearance appearance);
     void setAppearanceName(const QString &name);
-    bool debugLogging() const { return m_debugLogging; }
+    bool debugLogging() const;
     void setDebugLogging(bool value);
-    qint64 maxAppImageBytes() const { return m_maxAppImageBytes; }
+    qint64 maxAppImageBytes() const;
     void setMaxAppImageBytes(qint64 bytes);
 
     QString applicationsDir() const;
@@ -63,6 +64,8 @@ Q_SIGNALS:
 
 private:
     void load();
+    void saveLocked();
+    mutable QMutex m_mutex;
     QString m_configPath;
     QString m_managedFolder;
     bool m_moveSource = false;

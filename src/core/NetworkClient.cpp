@@ -1,7 +1,5 @@
 #include "NetworkClient.h"
 
-#include "SafeFs.h"
-
 #include <QAbstractSocket>
 #include <QEventLoop>
 #include <QFile>
@@ -10,12 +8,83 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QTimer>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace GoshAim {
 
 namespace {
+
+class QtFileSink final : public FileSink
+{
+public:
+    bool open(const QString &path, QString *error) override
+    {
+        m_path = path;
+        const int fd = ::open(path.toLocal8Bit().constData(),
+                              O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
+                              0600);
+        if (fd < 0) {
+            if (error) {
+                *error = QStringLiteral("Cannot open download destination");
+            }
+            return false;
+        }
+        if (!m_file.open(fd, QIODevice::WriteOnly, QFileDevice::AutoCloseHandle)) {
+            ::close(fd);
+            if (error) {
+                *error = QStringLiteral("Cannot open download destination");
+            }
+            return false;
+        }
+        ::fchmod(m_file.handle(), 0600);
+        return true;
+    }
+
+    qint64 write(const char *data, qint64 size) override
+    {
+        qint64 off = 0;
+        while (off < size) {
+            const qint64 n = m_file.write(data + off, size - off);
+            if (n <= 0) {
+                return -1;
+            }
+            off += n;
+        }
+        return off;
+    }
+
+    bool flush() override
+    {
+        return m_file.flush();
+    }
+
+    bool sync() override
+    {
+        const int fd = m_file.handle();
+        if (fd < 0) {
+            return false;
+        }
+        return ::fsync(fd) == 0;
+    }
+
+    void close() override
+    {
+        if (m_file.isOpen()) {
+            m_file.close();
+        }
+    }
+
+    QString path() const override
+    {
+        return m_path;
+    }
+
+private:
+    QFile m_file;
+    QString m_path;
+};
 
 bool isDowngrade(const QUrl &from, const QUrl &to)
 {
@@ -58,6 +127,12 @@ QByteArray hostHeaderValue(const QUrl &url)
     return (host + QLatin1Char(':') + QString::number(port)).toUtf8();
 }
 
+bool schemeSupportsHead(const QUrl &url)
+{
+    const QString scheme = url.scheme().toLower();
+    return scheme == QLatin1String("http") || scheme == QLatin1String("https");
+}
+
 } // namespace
 
 QtNetworkClient::QtNetworkClient(HostResolver *resolver)
@@ -68,6 +143,11 @@ QtNetworkClient::QtNetworkClient(HostResolver *resolver)
 void QtNetworkClient::setResolver(HostResolver *resolver)
 {
     m_resolver = resolver;
+}
+
+void QtNetworkClient::setFileSinkFactory(FileSinkFactory factory)
+{
+    m_sinkFactory = std::move(factory);
 }
 
 NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<bool> *cancel)
@@ -83,6 +163,7 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
     QNetworkAccessManager manager;
     QUrl logical = request.url;
     int redirects = 0;
+    bool usedHead = false;
     while (true) {
         if (cancel && cancel->load()) {
             result.cancelled = true;
@@ -121,7 +202,12 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
         }
         req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("GoshAppImageManager/0.1"));
 
-        QNetworkReply *reply = manager.get(req);
+        const bool wantHead = request.metadataOnly && schemeSupportsHead(logical) && !usedHead;
+        m_lastMetadataOnly = request.metadataOnly;
+        m_lastMethod = wantHead ? QStringLiteral("HEAD") : QStringLiteral("GET");
+        result.method = m_lastMethod;
+
+        QNetworkReply *reply = wantHead ? manager.head(req) : manager.get(req);
         QEventLoop loop;
         QTimer timer;
         timer.setSingleShot(true);
@@ -137,16 +223,35 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
         bool peerReady = logical.scheme().toLower() != QLatin1String("https");
         bool streaming = false;
         bool isRedirect = false;
-        QFile outFile;
+        bool metadataAbort = false;
+        bool writeFailed = false;
+        QString writeError;
+        std::unique_ptr<FileSink> sink;
         bool destOpen = false;
 
         auto abortWrite = [&]() {
-            if (destOpen) {
-                outFile.close();
+            if (destOpen && sink) {
+                sink->close();
                 QFile::remove(request.destinationPath);
                 destOpen = false;
             }
             held.clear();
+        };
+
+        auto writeChunk = [&](const QByteArray &chunk) -> bool {
+            if (chunk.isEmpty()) {
+                return true;
+            }
+            if (destOpen && sink) {
+                if (sink->write(chunk.constData(), chunk.size()) != chunk.size()) {
+                    writeFailed = true;
+                    writeError = QStringLiteral("Short write to download destination");
+                    return false;
+                }
+            } else {
+                result.body += chunk;
+            }
+            return true;
         };
 
         auto beginStreaming = [&]() -> bool {
@@ -157,15 +262,24 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
                 return true;
             }
             streaming = true;
+            if (request.metadataOnly) {
+                if (!schemeSupportsHead(logical) || usedHead) {
+                    metadataAbort = true;
+                    reply->abort();
+                }
+                held.clear();
+                return true;
+            }
             if (!request.destinationPath.isEmpty() && !destOpen) {
-                outFile.setFileName(request.destinationPath);
-                if (!outFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                    result.error = QStringLiteral("Cannot open download destination");
+                sink = m_sinkFactory ? m_sinkFactory() : std::make_unique<QtFileSink>();
+                if (!sink || !sink->open(request.destinationPath, &result.error)) {
+                    if (result.error.isEmpty()) {
+                        result.error = QStringLiteral("Cannot open download destination");
+                    }
                     reply->abort();
                     return false;
                 }
                 destOpen = true;
-                ::fchmod(outFile.handle(), 0600);
             }
             if (!held.isEmpty()) {
                 written += held.size();
@@ -174,10 +288,9 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
                     reply->abort();
                     return false;
                 }
-                if (destOpen) {
-                    outFile.write(held);
-                } else {
-                    result.body += held;
+                if (!writeChunk(held)) {
+                    reply->abort();
+                    return false;
                 }
                 held.clear();
             }
@@ -205,6 +318,9 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
                 return;
             }
             const QByteArray chunk = reply->readAll();
+            if (request.metadataOnly) {
+                return;
+            }
             if (!peerReady || isRedirect || !streaming) {
                 held += chunk;
                 if (held.size() > request.maxBytes) {
@@ -219,10 +335,9 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
                 reply->abort();
                 return;
             }
-            if (destOpen) {
-                outFile.write(chunk);
-            } else {
-                result.body += chunk;
+            if (!writeChunk(chunk)) {
+                reply->abort();
+                return;
             }
             if (request.progress) {
                 const qint64 total = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
@@ -242,15 +357,28 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
         result.etag = QString::fromUtf8(reply->rawHeader("ETag"));
         result.lastModified = QString::fromUtf8(reply->rawHeader("Last-Modified"));
         result.contentLength = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
+        if (result.contentLength <= 0) {
+            const QByteArray rawLength = reply->rawHeader("Content-Length");
+            if (!rawLength.isEmpty()) {
+                result.contentLength = rawLength.toLongLong();
+            }
+        }
         result.digest = QString::fromUtf8(reply->rawHeader("Digest"));
         if (result.digest.isEmpty()) {
             result.digest = QString::fromUtf8(reply->rawHeader("X-Checksum-Sha256"));
         }
         result.finalUrl = logical;
+        result.bytesTransferred = written;
         const QVariant redir = reply->attribute(QNetworkRequest::RedirectionTargetAttribute);
-        if (truncated) {
+        if (truncated && !request.metadataOnly) {
             result.truncated = true;
             result.error = QStringLiteral("Download exceeded size bound");
+            abortWrite();
+            reply->deleteLater();
+            return result;
+        }
+        if (writeFailed) {
+            result.error = writeError;
             abortWrite();
             reply->deleteLater();
             return result;
@@ -281,27 +409,58 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
             abortWrite();
             result.body.clear();
             written = 0;
+            usedHead = false;
             reply->deleteLater();
             continue;
         }
-        if (reply->error() != QNetworkReply::NoError) {
+        const QNetworkReply::NetworkError netError = reply->error();
+        const bool metadataCanceled = request.metadataOnly && metadataAbort
+            && (netError == QNetworkReply::OperationCanceledError || netError == QNetworkReply::NoError);
+        if (wantHead && (result.status == 405 || result.status == 501)) {
+            usedHead = true;
+            abortWrite();
+            result.body.clear();
+            written = 0;
+            reply->deleteLater();
+            continue;
+        }
+        if (netError != QNetworkReply::NoError && !metadataCanceled) {
             result.error = reply->errorString();
             abortWrite();
             reply->deleteLater();
             return result;
         }
-        if (!streaming) {
+        if (!streaming && !request.metadataOnly) {
             beginStreaming();
         }
-        if (destOpen) {
-            outFile.flush();
-            if (outFile.handle() >= 0) {
-                ::fsync(outFile.handle());
+        if (destOpen && sink) {
+            if (!sink->flush() || !sink->sync()) {
+                result.error = QStringLiteral("Failed to flush download destination");
+                abortWrite();
+                reply->deleteLater();
+                return result;
             }
-            outFile.close();
+            sink->close();
             result.savedPath = request.destinationPath;
+            if (result.contentLength > 0 && written != result.contentLength) {
+                result.error = QStringLiteral("Download size does not match Content-Length");
+                QFile::remove(request.destinationPath);
+                result.savedPath.clear();
+                reply->deleteLater();
+                return result;
+            }
         }
+        result.bytesTransferred = written;
         reply->deleteLater();
+        if (request.metadataOnly) {
+            result.ok = (result.status >= 200 && result.status < 300) || result.status == 0;
+            result.body.clear();
+            result.bytesTransferred = 0;
+            if (!result.ok && result.error.isEmpty()) {
+                result.error = QStringLiteral("HTTP status %1").arg(result.status);
+            }
+            return result;
+        }
         result.ok = result.status >= 200 && result.status < 300;
         if (!result.ok && result.error.isEmpty()) {
             result.error = QStringLiteral("HTTP status %1").arg(result.status);

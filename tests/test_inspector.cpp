@@ -227,6 +227,59 @@ private Q_SLOTS:
         QVERIFY(sawExtract);
         QVERIFY(!result.warnings.isEmpty());
     }
+    void largeListingIngestsDesktopName()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        SettingsStore settings(nullptr, home.path() + QStringLiteral("/cfg"));
+        ManagedRegistry registry(&settings);
+        class ExtractDesktopRunner : public FakeProcessRunner
+        {
+        public:
+            ProcessResult run(const ProcessRequest &request, std::atomic<bool> *cancel = nullptr) override
+            {
+                ProcessResult result = FakeProcessRunner::run(request, cancel);
+                const int destIdx = request.arguments.indexOf(QStringLiteral("-d"));
+                if (request.arguments.contains(QStringLiteral("-e")) && destIdx >= 0 && destIdx + 1 < request.arguments.size()) {
+                    const QString dest = request.arguments.at(destIdx + 1);
+                    QDir().mkpath(dest);
+                    QFile desktop(dest + QStringLiteral("/demo.desktop"));
+                    if (desktop.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                        desktop.write("[Desktop Entry]\nName=Demo App\nExec=demo\nType=Application\n");
+                    }
+                }
+                return result;
+            }
+        };
+        ExtractDesktopRunner runner;
+        QByteArray listing = QByteArrayLiteral("-rw-r--r-- user/group 80 2020-01-01 00:00 squashfs-root/demo.desktop\n");
+        listing += QByteArrayLiteral("lrwxrwxrwx user/group 0 2020-01-01 00:00 squashfs-root/usr/bin/foo -> ../lib/foo\n");
+        for (int i = 0; i < 200; ++i) {
+            listing += QByteArrayLiteral("-rw-r--r-- user/group 10 2020-01-01 00:00 squashfs-root/usr/lib/file")
+                + QByteArray::number(i) + "\n";
+        }
+        FakeProcessRunner::Rule list;
+        list.contains = QStringList{QStringLiteral("unsquashfs")};
+        list.result.exitCode = 0;
+        list.result.standardOutput = listing;
+        runner.rules.append(list);
+        AppImageInspector inspector(&runner, &settings, &registry);
+        const QString path = TestFixt::writeFile(home.path(), QStringLiteral("Demo.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2));
+        InspectOptions options;
+        const InspectionResult result = inspector.inspect(path, options);
+        QVERIFY(result.magicValid);
+        QCOMPARE(result.metadata.name, QStringLiteral("Demo App"));
+        bool sawExtract = false;
+        for (const auto &call : runner.calls) {
+            if (call.second.contains(QStringLiteral("-e"))) {
+                sawExtract = true;
+                QVERIFY(call.second.contains(QStringLiteral("demo.desktop")));
+                QVERIFY(!call.second.contains(QStringLiteral("usr/bin/foo")));
+                QVERIFY(!call.second.contains(QStringLiteral("usr/lib/file0")));
+            }
+        }
+        QVERIFY(sawExtract);
+    }
 };
 
 QTEST_GUILESS_MAIN(TestInspector)

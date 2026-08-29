@@ -33,6 +33,8 @@ public:
     static QString escapeExecArg(const QString &token);
     static QString buildExecLine(const QString &program, const QStringList &arguments, const QVector<EnvPair> &environment);
     static QString sanitizeFileBase(const QString &name);
+    static bool hasExactKeyValue(const QString &text, const QString &key, const QString &value);
+    static QString exactKeyValue(const QString &text, const QString &key);
 };
 
 class ArchiveGuard

@@ -312,9 +312,15 @@ IntegrateResult UpdateService::apply(const InstalledApp &app, bool force, std::a
     }
 
     InstalledApp updated = app;
+    const InstalledApp latest = m_registry->byUuid(app.uuid);
+    if (!latest.uuid.isEmpty()) {
+        updated.arguments = latest.arguments;
+        updated.environment = latest.environment;
+        updated.updateConfig = latest.updateConfig;
+    }
     updated.sha256 = inspection.identity.sha256;
     updated.size = inspection.identity.size;
-    updated.version = inspection.metadata.version.isEmpty() ? checked.version : inspection.metadata.version;
+    updated.version = inspection.metadata.version.isEmpty() ? app.version : inspection.metadata.version;
     updated.name = inspection.metadata.name.isEmpty() ? app.name : inspection.metadata.name;
     updated.comment = inspection.metadata.comment.isEmpty() ? app.comment : inspection.metadata.comment;
     updated.type = inspection.type;
@@ -333,6 +339,12 @@ IntegrateResult UpdateService::apply(const InstalledApp &app, bool force, std::a
     updated.updateConfig.insert(QStringLiteral("_applied_url"), checked.url);
     updated.updateConfig.insert(QStringLiteral("_applied_modified"), checked.lastModified);
     updated.actions = app.actions;
+    if (!updated.desktopPath.isEmpty() && QFile::exists(updated.desktopPath)
+        && !m_desktop->hasOwnershipMarkers(updated.desktopPath, updated.uuid)) {
+        updated.desktopId = m_desktop->desktopFileName(updated.uuid);
+        updated.desktopPath = m_desktop->desktopPath(updated.uuid);
+        desktopBackup.clear();
+    }
     const QString stagedDesktop = SafeFs::siblingTemp(updated.desktopPath, QStringLiteral(".gosh-desk-"));
     temps.append(stagedDesktop);
     if (m_failPoint == UpdateFailPoint::DesktopInstall

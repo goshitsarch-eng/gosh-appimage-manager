@@ -4,6 +4,7 @@
 #include "FakeSeams.h"
 #include "core/ManagedRegistry.h"
 #include "core/ProcessTable.h"
+#include "core/RemovalLaunch.h"
 #include "core/UpdateNotifier.h"
 
 #include <QJsonArray>
@@ -299,6 +300,73 @@ private Q_SLOTS:
         QFile still(dest);
         QVERIFY(still.open(QIODevice::ReadOnly));
         QCOMPARE(still.readAll(), next);
+    }
+    void integrateYesDoesNotEatPath()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable table;
+        AppController controller(nullptr, &runner, &network, &table, true);
+        const QString path = TestFixt::writeFile(home.path(), QStringLiteral("Yes.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2));
+        QCOMPARE(runCli(controller,
+                        {QStringLiteral("--integrate"), QStringLiteral("--yes"), QStringLiteral("--keep-both"), path},
+                        false),
+                 0);
+        QVERIFY(!controller.registry()->apps().isEmpty());
+        QVERIFY(controller.registry()->apps().first().managedPath.contains(QLatin1String("Yes")));
+    }
+    void removeAllDefaultsToTrash()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable table;
+        AppController controller(nullptr, &runner, &network, &table, true);
+        QDir().mkpath(controller.settings()->managedFolder());
+        QStringList paths;
+        for (int i = 0; i < 2; ++i) {
+            const QByteArray payload = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(4, char('A' + i)));
+            const QString dest = TestFixt::writeFile(controller.settings()->managedFolder(),
+                                                    QStringLiteral("App%1.AppImage").arg(i),
+                                                    payload);
+            InstalledApp app;
+            app.uuid = QStringLiteral("rm-%1").arg(i);
+            app.owned = true;
+            app.name = QStringLiteral("App%1").arg(i);
+            app.managedPath = dest;
+            controller.registry()->upsert(app);
+            paths.append(dest);
+        }
+        controller.registry()->save();
+        QStringList trashed;
+        controller.removal()->setTrashHook([&](const QString &path, QString *error) {
+            Q_UNUSED(error);
+            trashed.append(path);
+            return true;
+        });
+        QCOMPARE(runCli(controller, {QStringLiteral("--remove-all"), QStringLiteral("--yes")}, false), 0);
+        QCOMPARE(controller.removal()->lastMode(), RemovalMode::Trash);
+        QCOMPARE(trashed.size(), 2);
+        for (const QString &path : paths) {
+            QVERIFY(QFile::exists(path));
+        }
+        QStringList remaining = paths;
+        for (int i = 0; i < 2; ++i) {
+            InstalledApp app;
+            app.uuid = QStringLiteral("rmd-%1").arg(i);
+            app.owned = true;
+            app.name = QStringLiteral("AppD%1").arg(i);
+            app.managedPath = remaining.at(i);
+            controller.registry()->upsert(app);
+        }
+        QCOMPARE(runCli(controller, {QStringLiteral("--remove-all"), QStringLiteral("--delete"), QStringLiteral("--yes")}, false), 0);
+        QCOMPARE(controller.removal()->lastMode(), RemovalMode::Permanent);
+        for (const QString &path : remaining) {
+            QVERIFY(!QFile::exists(path));
+        }
     }
 };
 

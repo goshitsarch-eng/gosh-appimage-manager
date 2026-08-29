@@ -1,5 +1,8 @@
 #include "TaskQueue.h"
 
+#include "Limits.h"
+
+#include <QDateTime>
 #include <QMetaObject>
 
 namespace GoshAim {
@@ -78,6 +81,20 @@ QString TaskQueue::enqueue(TaskKind kind, const QString &title, const QString &t
     item->cancel = new std::atomic<bool>(false);
     m_queue.append(item);
     m_history.append(item->task);
+    while (m_history.size() > kMaxTaskHistory) {
+        int drop = -1;
+        for (int i = 0; i < m_history.size(); ++i) {
+            if (m_history[i].state == TaskState::Succeeded || m_history[i].state == TaskState::Cancelled
+                || m_history[i].state == TaskState::Failed) {
+                drop = i;
+                break;
+            }
+        }
+        if (drop < 0) {
+            break;
+        }
+        m_history.removeAt(drop);
+    }
     locker.unlock();
     m_cv.wakeOne();
     Q_EMIT tasksChanged();
@@ -156,6 +173,7 @@ void TaskQueue::setProgress(const QString &id, int progress, const QString &stat
         return;
     }
     const int bounded = qBound(0, progress, 100);
+    bool emitNow = bounded >= 100;
     {
         QMutexLocker locker(&m_mutex);
         if (m_currentItem && m_currentItem->task.id == id) {
@@ -174,6 +192,12 @@ void TaskQueue::setProgress(const QString &id, int progress, const QString &stat
             }
             break;
         }
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const qint64 last = m_lastProgressEmit.value(id, 0);
+        if (!emitNow && now - last < kProgressEmitIntervalMs) {
+            return;
+        }
+        m_lastProgressEmit.insert(id, now);
     }
     Q_EMIT progressChanged(id, bounded);
     Q_EMIT tasksChanged();

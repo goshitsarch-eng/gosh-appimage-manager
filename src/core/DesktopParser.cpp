@@ -377,6 +377,32 @@ ParsedDesktop DesktopParser::parse(const QByteArray &data)
     return parsed;
 }
 
+bool DesktopParser::hasExactKeyValue(const QString &text, const QString &key, const QString &value)
+{
+    return exactKeyValue(text, key) == value;
+}
+
+QString DesktopParser::exactKeyValue(const QString &text, const QString &key)
+{
+    const QStringList lines = text.split(QLatin1Char('\n'));
+    for (QString line : lines) {
+        if (line.endsWith(QLatin1Char('\r'))) {
+            line.chop(1);
+        }
+        if (line.startsWith(QLatin1Char('#')) || line.startsWith(QLatin1Char('['))) {
+            continue;
+        }
+        const int eq = line.indexOf(QLatin1Char('='));
+        if (eq <= 0) {
+            continue;
+        }
+        if (line.left(eq) == key) {
+            return line.mid(eq + 1);
+        }
+    }
+    return {};
+}
+
 bool ArchiveGuard::isSafeEntry(const QString &entry, QString *error)
 {
     if (entry.isEmpty() || entry.contains(QChar(0))) {
@@ -525,29 +551,30 @@ QStringList ArchiveGuard::filterExtractable(const QStringList &entries, QString 
 QStringList ArchiveGuard::filterExtractable(const QVector<ArchiveEntry> &entries, QString *error)
 {
     QStringList out;
-    if (entries.size() > kMaxArchiveEntries) {
-        if (error) {
-            *error = QStringLiteral("Archive listing exceeded entry bound");
-        }
-        return {};
-    }
     qint64 total = 0;
     for (const ArchiveEntry &entry : entries) {
+        const bool wanted = isWantedMetadata(entry.path);
         QString itemError;
         if (entry.kind == ArchiveEntryKind::Device || entry.kind == ArchiveEntryKind::Other) {
-            if (error) {
-                *error = QStringLiteral("Archive contains a device or special node");
+            if (wanted) {
+                if (error) {
+                    *error = QStringLiteral("Archive contains a device or special node");
+                }
+                return {};
             }
-            return {};
+            continue;
         }
         if (!isSafeEntry(entry.path, &itemError)) {
-            if (error) {
-                *error = itemError;
+            if (wanted) {
+                if (error) {
+                    *error = itemError;
+                }
+                return {};
             }
-            return {};
+            continue;
         }
         if (entry.kind == ArchiveEntryKind::Symlink) {
-            if (!isSafeLinkTarget(entry.path, entry.linkTarget, &itemError)) {
+            if (wanted && !isSafeLinkTarget(entry.path, entry.linkTarget, &itemError)) {
                 if (error) {
                     *error = itemError;
                 }
@@ -558,13 +585,14 @@ QStringList ArchiveGuard::filterExtractable(const QVector<ArchiveEntry> &entries
         if (entry.kind == ArchiveEntryKind::Directory) {
             continue;
         }
-        if (entry.size < 0 || entry.size > kMaxExtractedBytes) {
-            if (entry.size > kMaxExtractedBytes) {
-                if (error) {
-                    *error = QStringLiteral("Archive member exceeds per-file bound");
-                }
-                return {};
+        if (!wanted) {
+            continue;
+        }
+        if (entry.size > kMaxExtractedBytes) {
+            if (error) {
+                *error = QStringLiteral("Archive member exceeds per-file bound");
             }
+            return {};
         }
         total += qMax<qint64>(0, entry.size);
         if (total > kMaxExtractedBytes) {
@@ -573,9 +601,7 @@ QStringList ArchiveGuard::filterExtractable(const QVector<ArchiveEntry> &entries
             }
             return {};
         }
-        if (isWantedMetadata(entry.path)) {
-            out.append(entry.path);
-        }
+        out.append(entry.path);
         if (out.size() > kMaxExtractedFiles) {
             if (error) {
                 *error = QStringLiteral("Too many extractable files");
@@ -630,7 +656,7 @@ QVector<ArchiveEntry> ArchiveGuard::parseUnsquashfsList(const QByteArray &listin
             continue;
         }
         out.append(entry);
-        if (out.size() > kMaxArchiveEntries + 1) {
+        if (out.size() > kMaxArchiveListingEntries) {
             if (error) {
                 *error = QStringLiteral("Archive listing exceeded entry bound");
             }
@@ -682,7 +708,7 @@ QVector<ArchiveEntry> ArchiveGuard::parse7zList(const QByteArray &listing, QStri
                 current.kind = ArchiveEntryKind::Device;
             }
         }
-        if (out.size() > kMaxArchiveEntries + 1) {
+        if (out.size() > kMaxArchiveListingEntries) {
             if (error) {
                 *error = QStringLiteral("Archive listing exceeded entry bound");
             }
@@ -739,7 +765,7 @@ QVector<ArchiveEntry> ArchiveGuard::parseDwarfsList(const QByteArray &listing, Q
             continue;
         }
         out.append(entry);
-        if (out.size() > kMaxArchiveEntries + 1) {
+        if (out.size() > kMaxArchiveListingEntries) {
             if (error) {
                 *error = QStringLiteral("Archive listing exceeded entry bound");
             }

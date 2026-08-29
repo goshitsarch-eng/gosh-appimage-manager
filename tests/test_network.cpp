@@ -1,5 +1,7 @@
 #include "QtWarnGuard.h"
+#include "FakeSeams.h"
 #include "core/NetworkClient.h"
+#include "core/UpdateSources.h"
 #include "core/UrlGuard.h"
 
 #include <QFile>
@@ -10,6 +12,7 @@
 #include <QThread>
 #include <QtTest>
 #include <atomic>
+#include <memory>
 
 using namespace GoshAim;
 
@@ -32,6 +35,7 @@ public:
     int status = 200;
     bool hang = false;
     qint64 extraBytes = 0;
+    QByteArray lastMethod;
     bool start()
     {
         return server.listen(QHostAddress::LocalHost, 0);
@@ -45,7 +49,9 @@ public:
                 if (hang) {
                     return;
                 }
-                Q_UNUSED(sock->readAll());
+                const QByteArray request = sock->readAll();
+                lastMethod = request.split(' ').value(0);
+                const bool isHead = lastMethod == QByteArrayLiteral("HEAD");
                 QByteArray body = payload;
                 if (extraBytes > 0) {
                     body += QByteArray(int(extraBytes), 'x');
@@ -56,10 +62,12 @@ public:
                     redirect.clear();
                 } else {
                     header = "HTTP/1.1 " + QByteArray::number(status) + " OK\r\nContent-Length: "
-                        + QByteArray::number(body.size()) + "\r\nETag: \"abc\"\r\nLast-Modified: now\r\n\r\n";
+                        + QByteArray::number(body.size()) + "\r\nETag: \"abc\"\r\nLast-Modified: now\r\nDigest: sha256:dead\r\n\r\n";
                 }
                 sock->write(header);
-                sock->write(body);
+                if (!isHead) {
+                    sock->write(body);
+                }
                 sock->flush();
                 sock->disconnectFromHost();
             });
@@ -207,6 +215,144 @@ private Q_SLOTS:
             QVERIFY(!file.readAll().contains("PWNED"));
         }
         QVERIFY(resolver.calls >= 1);
+    }
+    void metadataOnlyHeadDoesNotDownloadBody()
+    {
+        MiniHttpServer server;
+        QVERIFY(server.start());
+        server.payload = QByteArray(8192, 'B');
+        server.serveOnce();
+        MapResolver resolver;
+        resolver.map.insert(QStringLiteral("127.0.0.1"), {QHostAddress::LocalHost});
+        QtNetworkClient client(&resolver);
+        NetworkRequest req;
+        req.url = QUrl(QStringLiteral("http://127.0.0.1:%1/file").arg(server.port()));
+        req.allowHttp = true;
+        req.allowPrivate = true;
+        req.metadataOnly = true;
+        req.maxBytes = 4096;
+        const NetworkResult result = client.fetch(req);
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(client.lastMethod(), QStringLiteral("HEAD"));
+        QVERIFY(client.lastMetadataOnly());
+        QVERIFY(result.contentLength > 4096);
+        QVERIFY(result.body.isEmpty());
+        QCOMPARE(result.bytesTransferred, 0);
+        QVERIFY(result.etag.contains(QLatin1String("abc")));
+        QVERIFY(!result.error.contains(QLatin1String("exceeded size bound")));
+        QTRY_VERIFY(!server.lastMethod.isEmpty());
+        QCOMPARE(server.lastMethod, QByteArrayLiteral("HEAD"));
+    }
+    void staticFileSourceUsesMetadataOnlyOnLocalHttp()
+    {
+        MiniHttpServer server;
+        QVERIFY(server.start());
+        server.payload = QByteArray(8192, 'Z');
+        server.serveOnce();
+        MapResolver resolver;
+        resolver.map.insert(QStringLiteral("127.0.0.1"), {QHostAddress::LocalHost});
+        QtNetworkClient qt(&resolver);
+        class RewriteClient : public NetworkClient
+        {
+        public:
+            QtNetworkClient *inner = nullptr;
+            QUrl local;
+            NetworkResult fetch(const NetworkRequest &request, std::atomic<bool> *cancel = nullptr) override
+            {
+                NetworkRequest copy = request;
+                copy.url = local;
+                copy.allowHttp = true;
+                copy.allowPrivate = true;
+                return inner->fetch(copy, cancel);
+            }
+        };
+        RewriteClient rewrite;
+        rewrite.inner = &qt;
+        rewrite.local = QUrl(QStringLiteral("http://127.0.0.1:%1/App.AppImage").arg(server.port()));
+        StaticFileSource source;
+        InstalledApp app;
+        app.size = 8192;
+        app.updateConfig.insert(QStringLiteral("url"), QStringLiteral("https://example.com/App.AppImage"));
+        const UpdateCheckResult checked = source.check(app, &rewrite, nullptr);
+        QVERIFY2(checked.ok, qPrintable(checked.error));
+        QVERIFY(!checked.available);
+        QCOMPARE(qt.lastMethod(), QStringLiteral("HEAD"));
+        QVERIFY(qt.lastMetadataOnly());
+        QCOMPARE(checked.size, 8192);
+    }
+    void ftpMetadataOnlyUsesGetSeam()
+    {
+        FakeNetworkClient fake;
+        FakeNetworkClient::Rule rule;
+        rule.hostContains = QStringLiteral("example.com");
+        rule.result.ok = true;
+        rule.result.status = 200;
+        rule.result.contentLength = 5000000;
+        rule.result.lastModified = QStringLiteral("now");
+        fake.rules.append(rule);
+        FtpSource source;
+        InstalledApp app;
+        app.size = 5000000;
+        app.updateConfig.insert(QStringLiteral("url"), QStringLiteral("ftp://example.com/a.AppImage"));
+        const UpdateCheckResult checked = source.check(app, &fake, nullptr);
+        QVERIFY(checked.ok);
+        QVERIFY(!fake.requests.isEmpty());
+        QVERIFY(fake.requests.last().allowFtp);
+        QVERIFY(fake.requests.last().metadataOnly);
+        QVERIFY(!checked.available);
+
+        MapResolver resolver;
+        resolver.map.insert(QStringLiteral("example.com"), {QHostAddress(QStringLiteral("8.8.8.8"))});
+        QtNetworkClient client(&resolver);
+        NetworkRequest req;
+        req.url = QUrl(QStringLiteral("ftp://example.com/a.AppImage"));
+        req.allowFtp = true;
+        req.metadataOnly = true;
+        req.timeoutMs = 200;
+        client.fetch(req);
+        QCOMPARE(client.lastMethod(), QStringLiteral("GET"));
+        QVERIFY(client.lastMetadataOnly());
+    }
+    void shortWriteFailsAndCleansStaging()
+    {
+        class ShortWriteSink final : public FileSink
+        {
+        public:
+            bool open(const QString &path, QString *error) override
+            {
+                Q_UNUSED(error);
+                m_path = path;
+                return true;
+            }
+            qint64 write(const char *, qint64) override
+            {
+                return -1;
+            }
+            bool flush() override { return true; }
+            bool sync() override { return true; }
+            void close() override {}
+            QString path() const override { return m_path; }
+            QString m_path;
+        };
+        MiniHttpServer server;
+        QVERIFY(server.start());
+        server.payload = QByteArray(64, 'D');
+        server.serveOnce();
+        MapResolver resolver;
+        resolver.map.insert(QStringLiteral("127.0.0.1"), {QHostAddress::LocalHost});
+        QtNetworkClient client(&resolver);
+        client.setFileSinkFactory([]() { return std::make_unique<ShortWriteSink>(); });
+        QTemporaryDir tmp;
+        const QString dest = tmp.path() + QStringLiteral("/dl.bin");
+        NetworkRequest req;
+        req.url = QUrl(QStringLiteral("http://127.0.0.1:%1/file").arg(server.port()));
+        req.allowHttp = true;
+        req.allowPrivate = true;
+        req.destinationPath = dest;
+        const NetworkResult result = client.fetch(req);
+        QVERIFY(!result.ok);
+        QVERIFY(result.error.contains(QLatin1String("Short write")) || !result.ok);
+        QVERIFY(!QFile::exists(dest));
     }
 };
 

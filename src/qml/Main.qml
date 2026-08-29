@@ -77,6 +77,11 @@ Kirigami.ApplicationWindow {
             root.showPassiveNotification(message)
         }
         function onConfirmInspect() {
+            for (let i = 0; i < pageStack.depth; ++i) {
+                const page = pageStack.get(i)
+                if (page && page.objectName === "inspectPage")
+                    return
+            }
             pageStack.push(Qt.resolvedUrl("InspectPage.qml"))
         }
         function onConfirmUnsafeExtract(path) {

@@ -180,7 +180,7 @@ void AppController::syncBackgroundChecks()
             execLine = QStringLiteral("flatpak run com.goshapps.AppImageManager --fetch-updates");
         } else {
             const QString exe = QCoreApplication::applicationFilePath();
-            execLine = QStringLiteral("\"%1\" --fetch-updates").arg(exe);
+            execLine = DesktopParser::escapeExecArg(exe) + QStringLiteral(" --fetch-updates");
         }
         const QByteArray body = QByteArrayLiteral(
                                     "[Desktop Entry]\n"
@@ -1037,6 +1037,7 @@ bool AppController::persistAppEdits(InstalledApp app, QString *error)
         }
         return false;
     }
+    Q_EMIT selectedChanged();
     return true;
 }
 

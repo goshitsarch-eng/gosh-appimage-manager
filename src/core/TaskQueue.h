@@ -2,6 +2,7 @@
 
 #include "Types.h"
 
+#include <QHash>
 #include <QMutex>
 #include <QObject>
 #include <QThread>
@@ -56,6 +57,7 @@ private:
     QString m_currentId;
     QString m_currentTarget;
     int m_seq = 0;
+    QHash<QString, qint64> m_lastProgressEmit;
 };
 
 } // namespace GoshAim

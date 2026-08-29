@@ -91,11 +91,60 @@ int printJson(const QString &key, const QJsonArray &items)
     return int(ExitCode::Ok);
 }
 
-QString argValue(const QStringList &args, const QString &name)
+QString optionPath(const QStringList &args, const QString &name)
 {
     const int idx = args.indexOf(name);
+    if (idx < 0) {
+        return {};
+    }
+    static const QStringList skipAlone = {
+        QStringLiteral("--yes"),
+        QStringLiteral("-y"),
+        QStringLiteral("--keep-both"),
+        QStringLiteral("--replace"),
+        QStringLiteral("--force"),
+        QStringLiteral("--delete"),
+        QStringLiteral("--json"),
+        QStringLiteral("--all"),
+        QStringLiteral("--unset"),
+    };
+    static const QStringList skipWithValue = {
+        QStringLiteral("--replace-uuid"),
+        QStringLiteral("--target"),
+        QStringLiteral("--manager"),
+    };
+    for (int i = idx + 1; i < args.size(); ++i) {
+        const QString &arg = args.at(i);
+        if (skipAlone.contains(arg)) {
+            continue;
+        }
+        if (skipWithValue.contains(arg)) {
+            if (i + 1 < args.size()) {
+                ++i;
+            }
+            continue;
+        }
+        if (arg.startsWith(QLatin1String("--"))) {
+            continue;
+        }
+        return arg;
+    }
+    return {};
+}
+
+QString argValue(const QStringList &args, const QString &name)
+{
+    const QString path = optionPath(args, name);
+    if (!path.isEmpty()) {
+        return path;
+    }
+    const int idx = args.indexOf(name);
     if (idx >= 0 && idx + 1 < args.size()) {
-        return args.at(idx + 1);
+        const QString next = args.at(idx + 1);
+        if (next.startsWith(QLatin1String("--"))) {
+            return {};
+        }
+        return next;
     }
     return {};
 }
@@ -237,6 +286,8 @@ int runCli(AppController &controller, const QStringList &arguments, bool interac
                 return int(ExitCode::NeedsConfirmation);
             }
             int failures = 0;
+            int skippedRunning = 0;
+            int applied = 0;
             const QVector<UpdateOffer> offers = controller.updates()->listUpdates(nullptr, false);
             for (const UpdateOffer &offer : offers) {
                 const InstalledApp app = controller.registry()->byUuid(offer.uuid);
@@ -247,12 +298,25 @@ int runCli(AppController &controller, const QStringList &arguments, bool interac
                 if (!result.ok) {
                     err() << app.managedPath << QStringLiteral(": ") << result.error << Qt::endl;
                     if (result.error.contains(QLatin1String("running"))) {
+                        ++skippedRunning;
                         continue;
                     }
                     ++failures;
+                } else {
+                    ++applied;
                 }
             }
-            return failures == 0 ? int(ExitCode::Ok) : int(ExitCode::Failure);
+            if (skippedRunning > 0) {
+                err() << QStringLiteral("%1 update(s) skipped because applications are running; pass --force to override\n")
+                             .arg(skippedRunning);
+            }
+            if (failures > 0) {
+                return int(ExitCode::Failure);
+            }
+            if (applied == 0 && skippedRunning > 0) {
+                return int(ExitCode::Running);
+            }
+            return int(ExitCode::Ok);
         }
         const QString path = argValue(arguments, QStringLiteral("--update"));
         InstalledApp app = controller.registry()->byPath(path);
@@ -278,7 +342,23 @@ int runCli(AppController &controller, const QStringList &arguments, bool interac
     }
 
     if (hasArg(arguments, QStringLiteral("--remove-all"))) {
-        if (!yes && !confirm(QStringLiteral("Remove ALL owned AppImages?"), yes, interactiveTty)) {
+        int ownedCount = 0;
+        for (const InstalledApp &app : controller.registry()->apps()) {
+            if (app.owned) {
+                ++ownedCount;
+            }
+        }
+        const bool permanent = del;
+        if (permanent) {
+            if (!yes
+                && !confirm(QStringLiteral("Permanently delete %1 owned AppImages and their Gosh desktop/icon artifacts?")
+                                .arg(ownedCount),
+                            yes,
+                            interactiveTty)) {
+                return int(ExitCode::NeedsConfirmation);
+            }
+        } else if (!yes
+                   && !confirm(QStringLiteral("Move %1 owned AppImages to Trash?").arg(ownedCount), yes, interactiveTty)) {
             return int(ExitCode::NeedsConfirmation);
         }
         const QVector<InstalledApp> apps = controller.registry()->apps();
@@ -288,7 +368,7 @@ int runCli(AppController &controller, const QStringList &arguments, bool interac
             }
             RemovalRequest req;
             req.pathOrUuid = app.uuid;
-            req.mode = RemovalMode::Permanent;
+            req.mode = permanent ? RemovalMode::Permanent : RemovalMode::Trash;
             req.assumeYes = true;
             QString error;
             if (!controller.removal()->remove(req, &error)) {

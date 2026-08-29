@@ -3,6 +3,7 @@
 #include <KConfig>
 #include <KConfigGroup>
 #include <QDir>
+#include <QMutexLocker>
 #include <QStandardPaths>
 
 namespace GoshAim {
@@ -27,6 +28,7 @@ QString SettingsStore::defaultManagedFolder() const
 
 QString SettingsStore::managedFolder() const
 {
+    QMutexLocker locker(&m_mutex);
     return m_managedFolder.isEmpty() ? defaultManagedFolder() : m_managedFolder;
 }
 
@@ -36,76 +38,134 @@ void SettingsStore::setManagedFolder(const QString &path)
     if (cleaned.isEmpty()) {
         cleaned = defaultManagedFolder();
     }
-    if (cleaned == m_managedFolder) {
-        return;
+    {
+        QMutexLocker locker(&m_mutex);
+        if (cleaned == m_managedFolder) {
+            return;
+        }
+        m_managedFolder = cleaned;
+        saveLocked();
     }
-    m_managedFolder = cleaned;
-    save();
     Q_EMIT changed();
+}
+
+bool SettingsStore::moveSource() const
+{
+    QMutexLocker locker(&m_mutex);
+    return m_moveSource;
 }
 
 void SettingsStore::setMoveSource(bool value)
 {
-    if (m_moveSource == value) {
-        return;
+    {
+        QMutexLocker locker(&m_mutex);
+        if (m_moveSource == value) {
+            return;
+        }
+        m_moveSource = value;
+        saveLocked();
     }
-    m_moveSource = value;
-    save();
     Q_EMIT changed();
+}
+
+bool SettingsStore::manageOutsideFolder() const
+{
+    QMutexLocker locker(&m_mutex);
+    return m_manageOutsideFolder;
 }
 
 void SettingsStore::setManageOutsideFolder(bool value)
 {
-    if (m_manageOutsideFolder == value) {
-        return;
+    {
+        QMutexLocker locker(&m_mutex);
+        if (m_manageOutsideFolder == value) {
+            return;
+        }
+        m_manageOutsideFolder = value;
+        saveLocked();
     }
-    m_manageOutsideFolder = value;
-    save();
     Q_EMIT changed();
+}
+
+bool SettingsStore::terminalOmitSuffix() const
+{
+    QMutexLocker locker(&m_mutex);
+    return m_terminalOmitSuffix;
 }
 
 void SettingsStore::setTerminalOmitSuffix(bool value)
 {
-    if (m_terminalOmitSuffix == value) {
-        return;
+    {
+        QMutexLocker locker(&m_mutex);
+        if (m_terminalOmitSuffix == value) {
+            return;
+        }
+        m_terminalOmitSuffix = value;
+        saveLocked();
     }
-    m_terminalOmitSuffix = value;
-    save();
     Q_EMIT changed();
+}
+
+bool SettingsStore::backgroundUpdateChecks() const
+{
+    QMutexLocker locker(&m_mutex);
+    return m_backgroundUpdateChecks;
 }
 
 void SettingsStore::setBackgroundUpdateChecks(bool value)
 {
-    if (m_backgroundUpdateChecks == value) {
-        return;
+    {
+        QMutexLocker locker(&m_mutex);
+        if (m_backgroundUpdateChecks == value) {
+            return;
+        }
+        m_backgroundUpdateChecks = value;
+        saveLocked();
     }
-    m_backgroundUpdateChecks = value;
-    save();
     Q_EMIT changed();
+}
+
+bool SettingsStore::unsafeExtractionFallback() const
+{
+    QMutexLocker locker(&m_mutex);
+    return m_unsafeExtractionFallback;
 }
 
 void SettingsStore::setUnsafeExtractionFallback(bool value)
 {
-    if (m_unsafeExtractionFallback == value) {
-        return;
+    {
+        QMutexLocker locker(&m_mutex);
+        if (m_unsafeExtractionFallback == value) {
+            return;
+        }
+        m_unsafeExtractionFallback = value;
+        saveLocked();
     }
-    m_unsafeExtractionFallback = value;
-    save();
     Q_EMIT changed();
+}
+
+Appearance SettingsStore::appearance() const
+{
+    QMutexLocker locker(&m_mutex);
+    return m_appearance;
 }
 
 QString SettingsStore::appearanceName() const
 {
+    QMutexLocker locker(&m_mutex);
     return GoshAim::appearanceName(m_appearance);
 }
 
 void SettingsStore::setAppearance(Appearance appearance)
 {
-    if (m_appearance == appearance) {
-        return;
+    {
+        QMutexLocker locker(&m_mutex);
+        if (m_appearance == appearance) {
+            return;
+        }
+        m_appearance = appearance;
+        saveLocked();
     }
-    m_appearance = appearance;
-    save();
     Q_EMIT changed();
 }
 
@@ -116,23 +176,41 @@ void SettingsStore::setAppearanceName(const QString &name)
 
 void SettingsStore::setDebugLogging(bool value)
 {
-    if (m_debugLogging == value) {
-        return;
+    {
+        QMutexLocker locker(&m_mutex);
+        if (m_debugLogging == value) {
+            return;
+        }
+        m_debugLogging = value;
+        saveLocked();
     }
-    m_debugLogging = value;
-    save();
     Q_EMIT changed();
+}
+
+bool SettingsStore::debugLogging() const
+{
+    QMutexLocker locker(&m_mutex);
+    return m_debugLogging;
 }
 
 void SettingsStore::setMaxAppImageBytes(qint64 bytes)
 {
     const qint64 clamped = qBound(kMinMaxAppImageBytes, bytes, kAbsoluteMaxAppImageBytes);
-    if (m_maxAppImageBytes == clamped) {
-        return;
+    {
+        QMutexLocker locker(&m_mutex);
+        if (m_maxAppImageBytes == clamped) {
+            return;
+        }
+        m_maxAppImageBytes = clamped;
+        saveLocked();
     }
-    m_maxAppImageBytes = clamped;
-    save();
     Q_EMIT changed();
+}
+
+qint64 SettingsStore::maxAppImageBytes() const
+{
+    QMutexLocker locker(&m_mutex);
+    return m_maxAppImageBytes;
 }
 
 QString SettingsStore::applicationsDir() const
@@ -162,7 +240,10 @@ QString SettingsStore::registryPath() const
 
 void SettingsStore::reload()
 {
-    load();
+    {
+        QMutexLocker locker(&m_mutex);
+        load();
+    }
     Q_EMIT changed();
 }
 
@@ -185,6 +266,12 @@ void SettingsStore::load()
 
 void SettingsStore::save()
 {
+    QMutexLocker locker(&m_mutex);
+    saveLocked();
+}
+
+void SettingsStore::saveLocked()
+{
     KConfig config(m_configPath.isEmpty() ? QStringLiteral("gosh-appimagemanager") : m_configPath,
                    KConfig::SimpleConfig);
     KConfigGroup group(&config, QStringLiteral("General"));
@@ -194,7 +281,7 @@ void SettingsStore::save()
     group.writeEntry("TerminalOmitSuffix", m_terminalOmitSuffix);
     group.writeEntry("BackgroundUpdateChecks", m_backgroundUpdateChecks);
     group.writeEntry("UnsafeExtractionFallback", m_unsafeExtractionFallback);
-    group.writeEntry("Appearance", appearanceName());
+    group.writeEntry("Appearance", GoshAim::appearanceName(m_appearance));
     group.writeEntry("DebugLogging", m_debugLogging);
     group.writeEntry("MaxAppImageBytes", m_maxAppImageBytes);
     config.sync();

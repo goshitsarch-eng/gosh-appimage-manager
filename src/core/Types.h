@@ -45,7 +45,7 @@ struct DesktopAction {
     QStringList arguments;
 };
 
-enum class IntegrateFailPoint { None, AfterStage, DesktopWrite, DesktopInstall, RegistrySave, SourceDelete, BackupCreate };
+enum class IntegrateFailPoint { None, AfterStage, DesktopWrite, DesktopInstall, RegistrySave, SourceDelete, BackupCreate, BeforeCommit };
 enum class UpdateFailPoint { None, AfterDownload, AfterReplace, DesktopInstall, RegistrySave, BackupCreate };
 enum class ArchiveEntryKind { File, Directory, Symlink, Device, Other };
 

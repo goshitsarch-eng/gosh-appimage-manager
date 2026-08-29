@@ -190,6 +190,13 @@ IntegrateResult IntegrationService::integrate(const IntegrateRequest &request, s
     }
 
     const QString staging = SafeFs::siblingTemp(destPath, QStringLiteral(".gosh-stage-"));
+    if (staging.isEmpty()) {
+        result.error = QStringLiteral("Cannot create staging file");
+        if (!rollbackCopy.isEmpty()) {
+            SafeFs::removeFileNoFollow(rollbackCopy);
+        }
+        return result;
+    }
     QStringList temps;
     temps.append(staging);
     if (!rollbackCopy.isEmpty()) {
@@ -325,7 +332,26 @@ IntegrateResult IntegrationService::integrate(const IntegrateRequest &request, s
     const bool desktopExisted = QFile::exists(app.desktopPath);
     const bool iconExisted = !app.iconPath.isEmpty() && QFile::exists(app.iconPath);
 
-    if (!SafeFs::renameOver(staging, destPath, &copyError)) {
+    if (m_failPoint == IntegrateFailPoint::BeforeCommit && m_beforeCommit) {
+        m_beforeCommit(destPath);
+    } else if (m_beforeCommit) {
+        m_beforeCommit(destPath);
+    }
+
+    const bool replacingOwned = request.conflict == ConflictPolicy::Replace && replacing.owned
+        && QFileInfo(destPath).canonicalFilePath() == QFileInfo(replacing.managedPath).canonicalFilePath();
+    if (!replacingOwned && SafeFs::destinationExistsNoFollow(destPath)) {
+        result.error = QStringLiteral("Destination appeared before commit; refusing to overwrite");
+        rollbackTemps(temps);
+        return result;
+    }
+    if (replacingOwned) {
+        if (!SafeFs::renameOver(staging, destPath, &copyError)) {
+            result.error = copyError;
+            rollbackTemps(temps);
+            return result;
+        }
+    } else if (!SafeFs::renameNoReplace(staging, destPath, &copyError)) {
         result.error = copyError;
         rollbackTemps(temps);
         return result;
@@ -384,15 +410,20 @@ IntegrateResult IntegrationService::integrate(const IntegrateRequest &request, s
         const QString sourceCanonical = SafeFs::canonicalExisting(request.sourcePath);
         if (sourceCanonical != SafeFs::canonicalExisting(destPath)) {
             QString moveError;
-            const bool deleted = m_failPoint != IntegrateFailPoint::SourceDelete
-                && SafeFs::removeFileNoFollow(request.sourcePath, &moveError);
+            bool deleted = false;
+            if (m_failPoint != IntegrateFailPoint::SourceDelete) {
+                deleted = QFile::moveToTrash(request.sourcePath);
+                if (!deleted) {
+                    moveError = QStringLiteral("Trash failed; leaving source intact");
+                }
+            } else {
+                moveError = QStringLiteral("Source deletion failed");
+            }
             if (!deleted) {
                 result.ok = false;
                 result.partial = true;
                 result.app = app;
-                result.error = m_failPoint == IntegrateFailPoint::SourceDelete
-                    ? QStringLiteral("Source deletion failed")
-                    : (moveError.isEmpty() ? QStringLiteral("Source deletion failed") : moveError);
+                result.error = moveError.isEmpty() ? QStringLiteral("Source deletion failed") : moveError;
                 return result;
             }
             result.sourceRemoved = true;

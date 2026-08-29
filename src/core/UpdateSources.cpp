@@ -55,16 +55,56 @@ qint64 installedSize(const InstalledApp &app)
     return 0;
 }
 
-bool githubOfferAvailable(const UpdateCheckResult &result, const InstalledApp &app)
+QString normalizeOneLeadingV(const QString &value)
 {
-    const bool versionChanged = !result.version.isEmpty() && result.version != app.version;
-    bool digestChanged = false;
-    if (!result.digest.trimmed().isEmpty() && !app.sha256.isEmpty()) {
-        digestChanged = !SafeFs::digestMatches(result.digest, app.sha256);
+    const QString trimmed = value.trimmed();
+    if (trimmed.size() >= 2 && (trimmed[0] == QLatin1Char('v') || trimmed[0] == QLatin1Char('V')) && trimmed[1].isDigit()) {
+        return trimmed.mid(1);
     }
+    return trimmed;
+}
+
+bool versionsEquivalent(const QString &left, const QString &right)
+{
+    if (left.trimmed().isEmpty() || right.trimmed().isEmpty()) {
+        return false;
+    }
+    if (left.trimmed() == right.trimmed()) {
+        return true;
+    }
+    return normalizeOneLeadingV(left) == normalizeOneLeadingV(right);
+}
+
+bool forgeOfferAvailable(const UpdateCheckResult &result, const InstalledApp &app)
+{
     const qint64 localSize = installedSize(app);
-    const bool sizeChanged = result.size > 0 && localSize > 0 && result.size != localSize;
-    return versionChanged || digestChanged || sizeChanged;
+    const bool sizeSupplied = result.size > 0 && localSize > 0;
+    const bool sizeDiffers = sizeSupplied && result.size != localSize;
+
+    if (!result.digest.trimmed().isEmpty() && !app.sha256.isEmpty()) {
+        if (SafeFs::digestMatches(result.digest, app.sha256)) {
+            if (sizeSupplied) {
+                return sizeDiffers;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    const QString applied = app.updateConfig.value(QStringLiteral("_applied_version")).toString();
+    if (!result.version.trimmed().isEmpty()) {
+        if (!applied.isEmpty()) {
+            return !versionsEquivalent(result.version, applied);
+        }
+        if (!app.version.isEmpty()) {
+            return !versionsEquivalent(result.version, app.version);
+        }
+    }
+
+    if (sizeSupplied) {
+        return sizeDiffers;
+    }
+    return false;
 }
 
 bool pickAsset(const QJsonArray &assets,
@@ -207,6 +247,7 @@ UpdateCheckResult StaticFileSource::check(const InstalledApp &app, NetworkClient
     }
     NetworkRequest req;
     req.url = QUrl(url);
+    req.metadataOnly = true;
     req.maxBytes = 4096;
     const NetworkResult head = network->fetch(req, cancel);
     UpdateCheckResult result;
@@ -337,7 +378,7 @@ UpdateCheckResult GitHubSource::check(const InstalledApp &app, NetworkClient *ne
     if (host != QLatin1String("github.com") && !host.endsWith(QLatin1String(".githubusercontent.com"))) {
         return fail(QStringLiteral("GitHub asset host is not allowed"), name());
     }
-    result.available = githubOfferAvailable(result, app);
+    result.available = forgeOfferAvailable(result, app);
     result.reducedVerification = result.digest.isEmpty();
     return result;
 }
@@ -462,7 +503,7 @@ UpdateCheckResult GitLabSource::check(const InstalledApp &app, NetworkClient *ne
     if (!check.ok) {
         return fail(check.error, name());
     }
-    result.available = result.version != app.version;
+    result.available = forgeOfferAvailable(result, app);
     result.reducedVerification = result.digest.isEmpty();
     return result;
 }
@@ -520,7 +561,7 @@ UpdateCheckResult CodebergSource::check(const InstalledApp &app, NetworkClient *
     if (host != QLatin1String("codeberg.org")) {
         return fail(QStringLiteral("Codeberg asset host is not allowed"), name());
     }
-    result.available = result.version != app.version;
+    result.available = forgeOfferAvailable(result, app);
     result.reducedVerification = result.digest.isEmpty();
     return result;
 }
@@ -585,7 +626,7 @@ UpdateCheckResult ForgejoSource::check(const InstalledApp &app, NetworkClient *n
     if (QUrl(result.url).host().toLower() != host.toLower()) {
         return fail(QStringLiteral("Forgejo asset host mismatch"), name());
     }
-    result.available = result.version != app.version;
+    result.available = forgeOfferAvailable(result, app);
     result.reducedVerification = result.digest.isEmpty();
     return result;
 }
@@ -615,6 +656,7 @@ UpdateCheckResult FtpSource::check(const InstalledApp &app, NetworkClient *netwo
     NetworkRequest req;
     req.url = QUrl(url);
     req.allowFtp = true;
+    req.metadataOnly = true;
     req.maxBytes = 4096;
     const NetworkResult head = network->fetch(req, cancel);
     UpdateCheckResult result;

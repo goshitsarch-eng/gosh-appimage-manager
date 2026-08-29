@@ -7,9 +7,15 @@
 #include <QRandomGenerator>
 #include <QStorageInfo>
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <cerrno>
 #include <fcntl.h>
+#include <stdio.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <ftw.h>
 
@@ -151,6 +157,13 @@ bool SafeFs::mkdir0700(const QString &path, QString *error)
             }
             return false;
         }
+        const QString name = QFileInfo(path).fileName();
+        const bool privateAppDir = path.contains(QLatin1String("gosh-appimage-manager"))
+            || name.startsWith(QLatin1Char('.'))
+            || name.startsWith(QLatin1String("gosh-"));
+        if (privateAppDir && st.st_uid == ::geteuid() && (st.st_mode & 0777) != 0700) {
+            ::chmod(path.toLocal8Bit().constData(), 0700);
+        }
         return true;
     }
     if (!dir.mkpath(path)) {
@@ -190,10 +203,22 @@ bool SafeFs::atomicWrite(const QString &path, const QByteArray &data, QString *e
         QFile::remove(tmp);
         return false;
     }
-    file.flush();
+    if (!file.flush()) {
+        if (error) {
+            *error = QStringLiteral("Failed to flush %1").arg(tmp);
+        }
+        file.close();
+        QFile::remove(tmp);
+        return false;
+    }
     const int fd = file.handle();
-    if (fd >= 0) {
-        ::fsync(fd);
+    if (fd < 0 || ::fsync(fd) != 0) {
+        if (error) {
+            *error = QStringLiteral("Failed to fsync %1").arg(tmp);
+        }
+        file.close();
+        QFile::remove(tmp);
+        return false;
     }
     file.close();
     if (::chmod(tmp.toLocal8Bit().constData(), static_cast<mode_t>(mode)) != 0) {
@@ -234,11 +259,27 @@ bool SafeFs::copyBounded(const QString &from,
         }
         return false;
     }
-    QFile out(to);
-    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    const int outFd = ::open(to.toLocal8Bit().constData(), O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (outFd < 0) {
         if (error) {
             *error = QStringLiteral("Cannot write %1").arg(to);
         }
+        return false;
+    }
+    QFile out;
+    if (!out.open(outFd, QIODevice::WriteOnly, QFileDevice::AutoCloseHandle)) {
+        ::close(outFd);
+        if (error) {
+            *error = QStringLiteral("Cannot write %1").arg(to);
+        }
+        return false;
+    }
+    if (!out.resize(0)) {
+        if (error) {
+            *error = QStringLiteral("Cannot truncate %1").arg(to);
+        }
+        out.close();
+        QFile::remove(to);
         return false;
     }
     QByteArray buffer(64 * 1024, Qt::Uninitialized);
@@ -282,10 +323,22 @@ bool SafeFs::copyBounded(const QString &from,
             return false;
         }
     }
-    out.flush();
+    if (!out.flush()) {
+        if (error) {
+            *error = QStringLiteral("Failed to flush %1").arg(to);
+        }
+        out.close();
+        QFile::remove(to);
+        return false;
+    }
     const int fd = out.handle();
-    if (fd >= 0) {
-        ::fsync(fd);
+    if (fd < 0 || ::fsync(fd) != 0) {
+        if (error) {
+            *error = QStringLiteral("Failed to fsync %1").arg(to);
+        }
+        out.close();
+        QFile::remove(to);
+        return false;
     }
     out.close();
     if (copied) {
@@ -337,6 +390,82 @@ bool SafeFs::chmodPath(const QString &path, int mode, QString *error)
 
 bool SafeFs::renameOver(const QString &from, const QString &to, QString *error)
 {
+    if (::rename(from.toLocal8Bit().constData(), to.toLocal8Bit().constData()) != 0) {
+        if (error) {
+            *error = QStringLiteral("rename %1 -> %2 failed").arg(from, to);
+        }
+        return false;
+    }
+    return true;
+}
+
+bool SafeFs::destinationExistsNoFollow(const QString &path)
+{
+    struct stat st {};
+    return ::lstat(path.toLocal8Bit().constData(), &st) == 0;
+}
+
+bool SafeFs::renameNoReplace(const QString &from, const QString &to, QString *error)
+{
+    struct stat st {};
+    if (::lstat(to.toLocal8Bit().constData(), &st) == 0) {
+        if (error) {
+            *error = QStringLiteral("Destination already exists: %1").arg(to);
+        }
+        return false;
+    }
+#ifdef SYS_renameat2
+    if (::syscall(SYS_renameat2, AT_FDCWD, from.toLocal8Bit().constData(), AT_FDCWD, to.toLocal8Bit().constData(), 1 /* RENAME_NOREPLACE */) == 0) {
+        return true;
+    }
+    if (errno == EEXIST) {
+        if (error) {
+            *error = QStringLiteral("Destination already exists: %1").arg(to);
+        }
+        return false;
+    }
+#endif
+#if defined(__linux__) && defined(RENAME_NOREPLACE)
+    if (::renameat2(AT_FDCWD, from.toLocal8Bit().constData(), AT_FDCWD, to.toLocal8Bit().constData(), RENAME_NOREPLACE) == 0) {
+        return true;
+    }
+    if (errno == EEXIST) {
+        if (error) {
+            *error = QStringLiteral("Destination already exists: %1").arg(to);
+        }
+        return false;
+    }
+#endif
+    if (::link(from.toLocal8Bit().constData(), to.toLocal8Bit().constData()) == 0) {
+        if (::unlink(from.toLocal8Bit().constData()) != 0) {
+            ::unlink(to.toLocal8Bit().constData());
+            if (error) {
+                *error = QStringLiteral("Failed to finish exclusive rename %1 -> %2").arg(from, to);
+            }
+            return false;
+        }
+        return true;
+    }
+    if (errno == EEXIST) {
+        if (error) {
+            *error = QStringLiteral("Destination already exists: %1").arg(to);
+        }
+        return false;
+    }
+    const int fd = ::open(to.toLocal8Bit().constData(), O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        if (error) {
+            *error = QStringLiteral("Cannot exclusively create %1").arg(to);
+        }
+        return false;
+    }
+    ::close(fd);
+    if (::unlink(to.toLocal8Bit().constData()) != 0) {
+        if (error) {
+            *error = QStringLiteral("Cannot prepare exclusive destination %1").arg(to);
+        }
+        return false;
+    }
     if (::rename(from.toLocal8Bit().constData(), to.toLocal8Bit().constData()) != 0) {
         if (error) {
             *error = QStringLiteral("rename %1 -> %2 failed").arg(from, to);
@@ -436,8 +565,24 @@ bool SafeFs::isForbiddenPermanentTarget(const QString &canonicalPath)
 QString SafeFs::siblingTemp(const QString &destination, const QString &prefix)
 {
     const QFileInfo info(destination);
-    const quint32 rand = QRandomGenerator::global()->generate();
-    return info.absolutePath() + QLatin1Char('/') + prefix + QString::number(rand, 16);
+    const QString dir = info.absolutePath();
+    if (dir.isEmpty() || !mkdir0700(dir)) {
+        return {};
+    }
+    for (int attempt = 0; attempt < 128; ++attempt) {
+        const quint64 a = QRandomGenerator::system()->generate64();
+        const quint64 b = QRandomGenerator::system()->generate64();
+        const QString path = dir + QLatin1Char('/') + prefix + QString::number(a, 16) + QString::number(b, 16);
+        const int fd = ::open(path.toLocal8Bit().constData(), O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (fd >= 0) {
+            ::close(fd);
+            return path;
+        }
+        if (errno != EEXIST) {
+            break;
+        }
+    }
+    return {};
 }
 
 HashResult SafeFs::sha256File(const QString &path, qint64 maxBytes, std::atomic<bool> *cancel)

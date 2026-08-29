@@ -9,6 +9,7 @@
 #include "core/UpdateSources.h"
 #include "core/UrlGuard.h"
 #include "core/SafeFs.h"
+#include "core/NetworkClient.h"
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -587,7 +588,7 @@ private Q_SLOTS:
         app.version = QStringLiteral("v1");
         const UpdateCheckResult changedTag = source.check(app, &network, nullptr);
         QVERIFY(changedTag.ok);
-        QVERIFY(changedTag.available);
+        QVERIFY(!changedTag.available);
         app.version = QStringLiteral("v2");
         app.sha256 = QByteArray(32, '\x11');
         const UpdateCheckResult changedDigest = source.check(app, &network, nullptr);
@@ -611,6 +612,226 @@ private Q_SLOTS:
         const UpdateCheckResult emptyDigest = source.check(app, &emptyDigestNet, nullptr);
         QVERIFY(emptyDigest.ok);
         QVERIFY(!emptyDigest.available);
+    }
+    void githubVPrefixMatchingDigestUnavailableAndApplyOnce()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        QStandardPaths::setTestModeEnabled(true);
+        SettingsStore settings(nullptr, home.path() + QStringLiteral("/cfg"));
+        settings.setManagedFolder(home.path() + QStringLiteral("/AppImages"));
+        ManagedRegistry registry(&settings);
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable processes;
+        AppImageInspector inspector(&runner, &settings, &registry);
+        DesktopIntegration desktop(&settings, &runner);
+        UpdateService updates(&settings, &registry, &inspector, &desktop, &network, &processes, &runner);
+        const QByteArray original = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(8, 'O'));
+        const QByteArray next = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(8, 'N'));
+        QDir().mkpath(settings.managedFolder());
+        const QString dest = TestFixt::writeFile(settings.managedFolder(), QStringLiteral("Demo.AppImage"), original);
+        const QByteArray installedDigest = QCryptographicHash::hash(original, QCryptographicHash::Sha256);
+        const QByteArray nextDigest = QCryptographicHash::hash(next, QCryptographicHash::Sha256);
+        InstalledApp app;
+        app.uuid = QStringLiteral("gh-v");
+        app.owned = true;
+        app.name = QStringLiteral("Demo");
+        app.version = QStringLiteral("1.0.0");
+        app.managedPath = dest;
+        app.desktopPath = settings.applicationsDir() + QStringLiteral("/gosh-appimage-gh-v.desktop");
+        app.architecture = Architecture::X86_64;
+        app.sha256 = installedDigest;
+        app.size = original.size();
+        app.updateManager = QStringLiteral("github");
+        app.updateConfig = {{QStringLiteral("username"), QStringLiteral("u")},
+                            {QStringLiteral("repo"), QStringLiteral("r")},
+                            {QStringLiteral("filename"), QStringLiteral("App.AppImage")}};
+        registry.upsert(app);
+        registry.save();
+        FakeNetworkClient::Rule same;
+        same.hostContains = QStringLiteral("api.github.com");
+        same.result.ok = true;
+        same.result.status = 200;
+        same.result.body = QByteArray("{\"tag_name\":\"v1.0.0\",\"assets\":[{\"name\":\"App.AppImage\",\"browser_download_url\":\"https://github.com/u/r/releases/download/v1.0.0/App.AppImage\",\"size\":")
+            + QByteArray::number(original.size()) + ",\"digest\":\"sha256:" + installedDigest.toHex() + "\"}]}";
+        network.rules.append(same);
+        GitHubSource source;
+        const UpdateCheckResult matching = source.check(app, &network, nullptr);
+        QVERIFY(matching.ok);
+        QVERIFY(!matching.available);
+        FakeNetworkClient changedNet;
+        FakeNetworkClient::Rule changed;
+        changed.hostContains = QStringLiteral("api.github.com");
+        changed.result.ok = true;
+        changed.result.status = 200;
+        changed.result.body = QByteArray("{\"tag_name\":\"v1.0.1\",\"assets\":[{\"name\":\"App.AppImage\",\"browser_download_url\":\"https://github.com/u/r/releases/download/v1.0.1/App.AppImage\",\"size\":")
+            + QByteArray::number(next.size()) + ",\"digest\":\"sha256:" + nextDigest.toHex() + "\"}]}";
+        changedNet.rules.append(changed);
+        FakeNetworkClient::Rule dl;
+        dl.hostContains = QStringLiteral("github.com");
+        dl.result.ok = true;
+        dl.result.status = 200;
+        dl.result.body = next;
+        changedNet.rules.append(dl);
+        const UpdateCheckResult available = source.check(app, &changedNet, nullptr);
+        QVERIFY(available.ok);
+        QVERIFY(available.available);
+        network.rules.clear();
+        network.rules.append(changed);
+        network.rules.append(dl);
+        const IntegrateResult applied = updates.apply(app, true);
+        QVERIFY2(applied.ok, qPrintable(applied.error));
+        QFile live(dest);
+        QVERIFY(live.open(QIODevice::ReadOnly));
+        QCOMPARE(live.readAll(), next);
+        live.close();
+        const UpdateCheckResult again = updates.check(registry.byUuid(app.uuid));
+        QVERIFY(again.ok);
+        QVERIFY(!again.available);
+        const IntegrateResult second = updates.apply(registry.byUuid(app.uuid), true);
+        QVERIFY(!second.ok);
+        QFile still(dest);
+        QVERIFY(still.open(QIODevice::ReadOnly));
+        QCOMPARE(still.readAll(), next);
+    }
+    void gitlabVPrefixMatchingDigestUnavailableAndApplyOnce()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        QStandardPaths::setTestModeEnabled(true);
+        SettingsStore settings(nullptr, home.path() + QStringLiteral("/cfg"));
+        settings.setManagedFolder(home.path() + QStringLiteral("/AppImages"));
+        ManagedRegistry registry(&settings);
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable processes;
+        AppImageInspector inspector(&runner, &settings, &registry);
+        DesktopIntegration desktop(&settings, &runner);
+        UpdateService updates(&settings, &registry, &inspector, &desktop, &network, &processes, &runner);
+        const QByteArray original = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(8, 'O'));
+        const QByteArray next = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(8, 'N'));
+        QDir().mkpath(settings.managedFolder());
+        const QString dest = TestFixt::writeFile(settings.managedFolder(), QStringLiteral("Demo.AppImage"), original);
+        const QByteArray installedDigest = QCryptographicHash::hash(original, QCryptographicHash::Sha256);
+        const QByteArray nextDigest = QCryptographicHash::hash(next, QCryptographicHash::Sha256);
+        InstalledApp app;
+        app.uuid = QStringLiteral("gl-v");
+        app.owned = true;
+        app.name = QStringLiteral("Demo");
+        app.version = QStringLiteral("1.0.0");
+        app.managedPath = dest;
+        app.desktopPath = settings.applicationsDir() + QStringLiteral("/gosh-appimage-gl-v.desktop");
+        app.architecture = Architecture::X86_64;
+        app.sha256 = installedDigest;
+        app.size = original.size();
+        app.updateManager = QStringLiteral("gitlab");
+        app.updateConfig = {{QStringLiteral("project"), QStringLiteral("group/repo")},
+                            {QStringLiteral("filename"), QStringLiteral("App.AppImage")}};
+        registry.upsert(app);
+        registry.save();
+        GitLabSource source;
+        FakeNetworkClient::Rule same;
+        same.hostContains = QStringLiteral("gitlab.com");
+        same.pathContains = QStringLiteral("/api/v4");
+        same.result.ok = true;
+        same.result.status = 200;
+        same.result.body = QByteArray("[{\"tag_name\":\"v1.0.0\",\"assets\":{\"links\":[{\"name\":\"App.AppImage\",\"url\":\"https://gitlab.com/group/repo/-/releases/App.AppImage\",\"size\":")
+            + QByteArray::number(original.size()) + ",\"checksum\":\"sha256:" + installedDigest.toHex() + "\"}]}}]";
+        network.rules.append(same);
+        const UpdateCheckResult matching = source.check(app, &network, nullptr);
+        QVERIFY(matching.ok);
+        QVERIFY(!matching.available);
+        FakeNetworkClient changedNet;
+        FakeNetworkClient::Rule changed;
+        changed.hostContains = QStringLiteral("gitlab.com");
+        changed.pathContains = QStringLiteral("/api/v4");
+        changed.result.ok = true;
+        changed.result.status = 200;
+        changed.result.body = QByteArray("[{\"tag_name\":\"v1.0.1\",\"assets\":{\"links\":[{\"name\":\"App.AppImage\",\"url\":\"https://gitlab.com/group/repo/-/releases/App.AppImage\",\"size\":")
+            + QByteArray::number(next.size()) + ",\"checksum\":\"sha256:" + nextDigest.toHex() + "\"}]}}]";
+        changedNet.rules.append(changed);
+        FakeNetworkClient::Rule dl;
+        dl.hostContains = QStringLiteral("gitlab.com");
+        dl.pathContains = QStringLiteral("/-/releases/");
+        dl.result.ok = true;
+        dl.result.status = 200;
+        dl.result.body = next;
+        changedNet.rules.append(dl);
+        const UpdateCheckResult available = source.check(app, &changedNet, nullptr);
+        QVERIFY(available.ok);
+        QVERIFY(available.available);
+        network.rules.clear();
+        network.rules.append(changed);
+        network.rules.append(dl);
+        const IntegrateResult applied = updates.apply(app, true);
+        QVERIFY2(applied.ok, qPrintable(applied.error));
+        QFile live(dest);
+        QVERIFY(live.open(QIODevice::ReadOnly));
+        QCOMPARE(live.readAll(), next);
+        live.close();
+        const UpdateCheckResult again = updates.check(registry.byUuid(app.uuid));
+        QVERIFY(again.ok);
+        QVERIFY(!again.available);
+        const IntegrateResult second = updates.apply(registry.byUuid(app.uuid), true);
+        QVERIFY(!second.ok);
+        QFile still(dest);
+        QVERIFY(still.open(QIODevice::ReadOnly));
+        QCOMPARE(still.readAll(), next);
+    }
+    void applyLeavesOriginalOnShortWrite()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        QStandardPaths::setTestModeEnabled(true);
+        SettingsStore settings(nullptr, home.path() + QStringLiteral("/cfg"));
+        settings.setManagedFolder(home.path() + QStringLiteral("/AppImages"));
+        ManagedRegistry registry(&settings);
+        FakeProcessRunner runner;
+        class FailingDownload : public NetworkClient
+        {
+        public:
+            NetworkResult fetch(const NetworkRequest &request, std::atomic<bool> *cancel = nullptr) override
+            {
+                Q_UNUSED(cancel);
+                NetworkResult result;
+                if (request.metadataOnly) {
+                    result.ok = true;
+                    result.status = 200;
+                    result.contentLength = 64;
+                    result.etag = QStringLiteral("\"new\"");
+                    return result;
+                }
+                result.error = QStringLiteral("Short write to download destination");
+                if (!request.destinationPath.isEmpty()) {
+                    QFile::remove(request.destinationPath);
+                }
+                return result;
+            }
+        };
+        FailingDownload network;
+        FakeProcessTable processes;
+        AppImageInspector inspector(&runner, &settings, &registry);
+        DesktopIntegration desktop(&settings, &runner);
+        UpdateService updates(&settings, &registry, &inspector, &desktop, &network, &processes, &runner);
+        const QByteArray original = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(8, 'O'));
+        QDir().mkpath(settings.managedFolder());
+        const QString dest = TestFixt::writeFile(settings.managedFolder(), QStringLiteral("Demo.AppImage"), original);
+        InstalledApp app;
+        app.uuid = QStringLiteral("short");
+        app.owned = true;
+        app.name = QStringLiteral("Demo");
+        app.managedPath = dest;
+        app.desktopPath = settings.applicationsDir() + QStringLiteral("/gosh-appimage-short.desktop");
+        app.size = original.size();
+        app.updateManager = QStringLiteral("static");
+        app.updateConfig.insert(QStringLiteral("url"), QStringLiteral("https://example.com/App.AppImage"));
+        registry.upsert(app);
+        const IntegrateResult result = updates.apply(app, true);
+        QVERIFY(!result.ok);
+        QFile live(dest);
+        QVERIFY(live.open(QIODevice::ReadOnly));
+        QCOMPARE(live.readAll(), original);
     }
 };
 

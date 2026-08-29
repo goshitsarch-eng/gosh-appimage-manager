@@ -14,6 +14,8 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QCryptographicHash>
+#include <QJsonDocument>
+#include <QJsonParseError>
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -621,6 +623,53 @@ private Q_SLOTS:
         controller.updateAll(false);
         QCOMPARE(controller.taskQueue()->tasks().size(), before);
         QVERIFY(controller.updateSummary().contains(QLatin1String("No updates")));
+    }
+    void editsDuringHeldUpdateKeepRegistryCoherent()
+    {
+        QtWarnGuard guard;
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable table;
+        AppController controller(nullptr, &runner, &network, &table, true);
+        const QByteArray original = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(8, 'O'));
+        const QByteArray next = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(16, 'N'));
+        const QString src = TestFixt::writeFile(home.path(), QStringLiteral("Held.AppImage"), original);
+        IntegrateRequest req;
+        req.sourcePath = src;
+        req.conflict = ConflictPolicy::KeepBoth;
+        const IntegrateResult integrated = controller.integration()->integrate(req);
+        QVERIFY(integrated.ok);
+        InstalledApp app = controller.registry()->byUuid(integrated.app.uuid);
+        app.updateManager = QStringLiteral("static");
+        app.updateConfig.insert(QStringLiteral("url"), QStringLiteral("https://example.com/App.AppImage"));
+        controller.registry()->upsert(app);
+        FakeNetworkClient::Rule rule;
+        rule.hostContains = QStringLiteral("example.com");
+        rule.result.ok = true;
+        rule.result.status = 200;
+        rule.result.body = next;
+        rule.result.contentLength = next.size();
+        rule.hangOnDownload = true;
+        network.rules.append(rule);
+        controller.updateApp(app.uuid, true);
+        QTRY_VERIFY(controller.updateProgress(app.uuid) > 0 && controller.updateProgress(app.uuid) < 100);
+        controller.setArguments(app.uuid, QStringList{QStringLiteral("--held")});
+        QFile json(controller.settings()->registryPath());
+        QVERIFY(json.open(QIODevice::ReadOnly));
+        QJsonParseError parseError;
+        const QJsonDocument doc = QJsonDocument::fromJson(json.readAll(), &parseError);
+        QCOMPARE(parseError.error, QJsonParseError::NoError);
+        QVERIFY(doc.isObject());
+        controller.cancelTask(controller.updateTaskId(app.uuid));
+        QTRY_VERIFY(controller.taskQueue()->task(controller.updateTaskId(app.uuid)).state == TaskState::Cancelled
+                    || controller.taskQueue()->task(controller.updateTaskId(app.uuid)).id.isEmpty()
+                    || controller.taskQueue()->task(controller.updateTaskId(app.uuid)).state == TaskState::Failed);
+        const InstalledApp finalApp = controller.registry()->byUuid(app.uuid);
+        QVERIFY(!finalApp.uuid.isEmpty());
+        QCOMPARE(finalApp.arguments, QStringList{QStringLiteral("--held")});
+        QVERIFY(!guard.sawLiveDestruction());
     }
 };
 

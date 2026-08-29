@@ -45,6 +45,48 @@ private Q_SLOTS:
         QVERIFY(ArchiveGuard::filterExtractable(entries, &error).isEmpty());
         QVERIFY(!error.isEmpty());
     }
+    void largeTreeSkipsUnrelatedAndKeepsRootDesktop()
+    {
+        QVector<ArchiveEntry> entries;
+        for (int i = 0; i < 200; ++i) {
+            ArchiveEntry file;
+            file.path = QStringLiteral("usr/lib/file%1").arg(i);
+            file.size = 10;
+            entries.append(file);
+        }
+        ArchiveEntry link;
+        link.path = QStringLiteral("usr/bin/foo");
+        link.kind = ArchiveEntryKind::Symlink;
+        link.linkTarget = QStringLiteral("../lib/foo");
+        entries.append(link);
+        ArchiveEntry desktop;
+        desktop.path = QStringLiteral("demo.desktop");
+        desktop.size = 80;
+        entries.append(desktop);
+        ArchiveEntry icon;
+        icon.path = QStringLiteral(".DirIcon");
+        icon.size = 20;
+        entries.append(icon);
+        QString error;
+        const QStringList out = ArchiveGuard::filterExtractable(entries, &error);
+        QVERIFY(error.isEmpty());
+        QVERIFY(out.contains(QStringLiteral("demo.desktop")));
+        QVERIFY(out.contains(QStringLiteral(".DirIcon")));
+        QVERIFY(!out.contains(QStringLiteral("usr/bin/foo")));
+        QVERIFY(!out.contains(QStringLiteral("usr/lib/file0")));
+    }
+    void unsafeWantedSymlinkIsRejected()
+    {
+        QVector<ArchiveEntry> entries;
+        ArchiveEntry link;
+        link.path = QStringLiteral("demo.desktop");
+        link.kind = ArchiveEntryKind::Symlink;
+        link.linkTarget = QStringLiteral("../etc/passwd");
+        entries.append(link);
+        QString error;
+        QVERIFY(ArchiveGuard::filterExtractable(entries, &error).isEmpty());
+        QVERIFY(!error.isEmpty());
+    }
     void parse7zRejectsAbsolute()
     {
         QString error;

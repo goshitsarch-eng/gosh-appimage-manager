@@ -8,6 +8,13 @@ Kirigami.ScrollablePage {
 
     property var details: Store.selectedDetails()
 
+    Connections {
+        target: Store
+        function onSelectedChanged() { details = Store.selectedDetails() }
+        function onTaskTickChanged() { details = Store.selectedDetails() }
+        function onStatusMessageChanged() { details = Store.selectedDetails() }
+    }
+
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
         Kirigami.Heading { text: details.name }

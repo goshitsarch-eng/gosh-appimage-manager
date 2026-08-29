@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
 Kirigami.ScrollablePage {
+    objectName: "inspectPage"
     title: i18n("Inspect AppImage")
 
     ColumnLayout {

@@ -44,6 +44,9 @@ InstalledApp RemovalService::resolve(const QString &pathOrUuid, QString *error) 
 
 bool RemovalService::trashFile(const QString &path, QString *error)
 {
+    if (m_trashHook) {
+        return m_trashHook(path, error);
+    }
     if (QFile::moveToTrash(path)) {
         return true;
     }
@@ -74,6 +77,8 @@ RemovalResult RemovalService::remove(const RemovalRequest &request, std::atomic<
         result.error = resolveError;
         return result;
     }
+    m_lastMode = request.mode;
+    m_lastTargets.append(app.managedPath);
     if (!app.desktopPath.isEmpty() && QFile::exists(app.desktopPath)) {
         if (!m_desktop->hasOwnershipMarkers(app.desktopPath, app.uuid)) {
             result.error = QStringLiteral("Desktop file is missing ownership markers");

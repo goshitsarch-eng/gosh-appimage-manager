@@ -5,9 +5,11 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMutexLocker>
 #include <QUuid>
 
 namespace GoshAim {
@@ -22,7 +24,23 @@ QString ManagedRegistry::newUuid()
     return QUuid::createUuid().toString(QUuid::WithoutBraces);
 }
 
-InstalledApp ManagedRegistry::byUuid(const QString &uuid) const
+QVector<InstalledApp> ManagedRegistry::apps() const
+{
+    QMutexLocker locker(&m_mutex);
+    return m_apps;
+}
+
+QVector<InstalledApp> ManagedRegistry::snapshot() const
+{
+    return apps();
+}
+
+QVector<InstalledApp> ManagedRegistry::appsUnlocked() const
+{
+    return m_apps;
+}
+
+InstalledApp ManagedRegistry::byUuidUnlocked(const QString &uuid) const
 {
     for (const InstalledApp &app : m_apps) {
         if (app.uuid == uuid) {
@@ -32,8 +50,26 @@ InstalledApp ManagedRegistry::byUuid(const QString &uuid) const
     return {};
 }
 
+void ManagedRegistry::upsertUnlocked(const InstalledApp &app)
+{
+    for (int i = 0; i < m_apps.size(); ++i) {
+        if (m_apps[i].uuid == app.uuid) {
+            m_apps[i] = app;
+            return;
+        }
+    }
+    m_apps.append(app);
+}
+
+InstalledApp ManagedRegistry::byUuid(const QString &uuid) const
+{
+    QMutexLocker locker(&m_mutex);
+    return byUuidUnlocked(uuid);
+}
+
 InstalledApp ManagedRegistry::byPath(const QString &path) const
 {
+    QMutexLocker locker(&m_mutex);
     const QString canonical = QFileInfo(path).canonicalFilePath().isEmpty() ? QFileInfo(path).absoluteFilePath()
                                                                             : QFileInfo(path).canonicalFilePath();
     for (const InstalledApp &app : m_apps) {
@@ -46,6 +82,7 @@ InstalledApp ManagedRegistry::byPath(const QString &path) const
 
 InstalledApp ManagedRegistry::byDesktopId(const QString &desktopId) const
 {
+    QMutexLocker locker(&m_mutex);
     for (const InstalledApp &app : m_apps) {
         if (app.desktopId == desktopId) {
             return app;
@@ -66,17 +103,13 @@ bool ManagedRegistry::isOwned(const InstalledApp &app) const
 
 void ManagedRegistry::upsert(const InstalledApp &app)
 {
-    for (int i = 0; i < m_apps.size(); ++i) {
-        if (m_apps[i].uuid == app.uuid) {
-            m_apps[i] = app;
-            return;
-        }
-    }
-    m_apps.append(app);
+    QMutexLocker locker(&m_mutex);
+    upsertUnlocked(app);
 }
 
 bool ManagedRegistry::removeUuid(const QString &uuid)
 {
+    QMutexLocker locker(&m_mutex);
     for (int i = 0; i < m_apps.size(); ++i) {
         if (m_apps[i].uuid == uuid) {
             m_apps.removeAt(i);
@@ -88,7 +121,62 @@ bool ManagedRegistry::removeUuid(const QString &uuid)
 
 void ManagedRegistry::restoreApps(const QVector<InstalledApp> &apps)
 {
+    QMutexLocker locker(&m_mutex);
     m_apps = apps;
+}
+
+void ManagedRegistry::setFailSave(bool fail)
+{
+    QMutexLocker locker(&m_mutex);
+    m_failSave = fail;
+}
+
+ManagedRegistry::Transaction::Transaction(ManagedRegistry *registry)
+    : m_registry(registry)
+{
+    m_registry->m_mutex.lock();
+    m_snapshot = m_registry->m_apps;
+}
+
+ManagedRegistry::Transaction::~Transaction()
+{
+    m_registry->m_mutex.unlock();
+}
+
+QVector<InstalledApp> ManagedRegistry::Transaction::snapshot() const
+{
+    return m_snapshot;
+}
+
+InstalledApp ManagedRegistry::Transaction::byUuid(const QString &uuid) const
+{
+    return m_registry->byUuidUnlocked(uuid);
+}
+
+void ManagedRegistry::Transaction::upsert(const InstalledApp &app)
+{
+    m_registry->upsertUnlocked(app);
+}
+
+bool ManagedRegistry::Transaction::removeUuid(const QString &uuid)
+{
+    for (int i = 0; i < m_registry->m_apps.size(); ++i) {
+        if (m_registry->m_apps[i].uuid == uuid) {
+            m_registry->m_apps.removeAt(i);
+            return true;
+        }
+    }
+    return false;
+}
+
+void ManagedRegistry::Transaction::restore()
+{
+    m_registry->m_apps = m_snapshot;
+}
+
+bool ManagedRegistry::Transaction::save(QString *error)
+{
+    return m_registry->saveUnlocked(error);
 }
 
 namespace {
@@ -225,6 +313,7 @@ InstalledApp appFromJson(const QJsonObject &obj)
 
 bool ManagedRegistry::load(QString *error)
 {
+    QMutexLocker locker(&m_mutex);
     m_apps.clear();
     if (!m_settings) {
         if (error) {
@@ -275,6 +364,12 @@ bool ManagedRegistry::load(QString *error)
 }
 
 bool ManagedRegistry::save(QString *error)
+{
+    QMutexLocker locker(&m_mutex);
+    return saveUnlocked(error);
+}
+
+bool ManagedRegistry::saveUnlocked(QString *error)
 {
     if (m_failSave) {
         if (error) {

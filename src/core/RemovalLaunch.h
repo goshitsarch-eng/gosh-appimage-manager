@@ -2,7 +2,9 @@
 
 #include "Types.h"
 
+#include <QStringList>
 #include <atomic>
+#include <functional>
 
 namespace GoshAim {
 
@@ -24,6 +26,9 @@ public:
     bool trashFile(const QString &path, QString *error);
     RemovalResult remove(const RemovalRequest &request, std::atomic<bool> *cancel = nullptr);
     bool remove(const RemovalRequest &request, QString *error, std::atomic<bool> *cancel = nullptr);
+    void setTrashHook(std::function<bool(const QString &path, QString *error)> hook) { m_trashHook = std::move(hook); }
+    RemovalMode lastMode() const { return m_lastMode; }
+    QStringList lastTargets() const { return m_lastTargets; }
 
 private:
     InstalledApp resolve(const QString &pathOrUuid, QString *error) const;
@@ -32,6 +37,9 @@ private:
     DesktopIntegration *m_desktop = nullptr;
     ProcessTable *m_processes = nullptr;
     ProcessRunner *m_runner = nullptr;
+    std::function<bool(const QString &path, QString *error)> m_trashHook;
+    RemovalMode m_lastMode = RemovalMode::Trash;
+    QStringList m_lastTargets;
 };
 
 class LaunchService

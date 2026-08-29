@@ -51,7 +51,7 @@ QByteArray DesktopIntegration::buildDesktopFile(const InstalledApp &app, const Q
         out << QStringLiteral("X-AppImage-Version=") << DesktopParser::escapeDesktopValue(app.version) << QLatin1Char('\n');
     }
     out << QStringLiteral("Exec=") << DesktopParser::buildExecLine(app.managedPath, app.arguments, app.environment) << QLatin1Char('\n');
-    out << QStringLiteral("TryExec=") << DesktopParser::escapeExecArg(app.managedPath) << QLatin1Char('\n');
+    out << QStringLiteral("TryExec=") << app.managedPath << QLatin1Char('\n');
     if (!app.iconPath.isEmpty()) {
         out << QStringLiteral("Icon=") << app.iconPath << QLatin1Char('\n');
     }
@@ -153,8 +153,8 @@ bool DesktopIntegration::hasOwnershipMarkers(const QString &desktopPath, const Q
     }
     const QByteArray data = file.read(kMaxDesktopFileBytes);
     const QString text = QString::fromUtf8(data);
-    return text.contains(QLatin1String(kOwnershipKey) + QStringLiteral("=true"))
-        && text.contains(QLatin1String(kOwnershipUuidKey) + QLatin1Char('=') + uuid);
+    return DesktopParser::hasExactKeyValue(text, QLatin1String(kOwnershipKey), QStringLiteral("true"))
+        && DesktopParser::hasExactKeyValue(text, QLatin1String(kOwnershipUuidKey), uuid);
 }
 
 InstalledApp DesktopIntegration::parseExternalDesktop(const QString &desktopPath) const
@@ -181,11 +181,10 @@ InstalledApp DesktopIntegration::parseExternalDesktop(const QString &desktopPath
     QFile rewind(desktopPath);
     if (rewind.open(QIODevice::ReadOnly)) {
         const QString text = QString::fromUtf8(rewind.readAll());
-        app.owned = text.contains(QLatin1String(kOwnershipKey) + QStringLiteral("=true"));
-        const QString marker = QLatin1String(kOwnershipUuidKey) + QLatin1Char('=');
-        const int idx = text.indexOf(marker);
-        if (idx >= 0) {
-            app.uuid = text.mid(idx + marker.size()).section(QLatin1Char('\n'), 0, 0).trimmed();
+        app.owned = DesktopParser::hasExactKeyValue(text, QLatin1String(kOwnershipKey), QStringLiteral("true"));
+        const QString markerUuid = DesktopParser::exactKeyValue(text, QLatin1String(kOwnershipUuidKey));
+        if (!markerUuid.isEmpty()) {
+            app.uuid = markerUuid;
         }
     }
     return app;
