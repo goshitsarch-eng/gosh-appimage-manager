@@ -137,6 +137,7 @@ public:
         ConflictingUuidRole,
         ConflictingNameRole,
         NeedsDecisionRole,
+        CanReplaceRole,
         ExistingManagedRole,
         ChosenPolicyRole,
         ChosenReplaceUuidRole

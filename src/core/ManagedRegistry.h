@@ -30,12 +30,14 @@ public:
     bool removeUuid(const QString &uuid);
     void restoreApps(const QVector<InstalledApp> &apps);
     QVector<InstalledApp> snapshot() const { return m_apps; }
+    void setFailSave(bool fail) { m_failSave = fail; }
 
     static QString newUuid();
 
 private:
     SettingsStore *m_settings = nullptr;
     QVector<InstalledApp> m_apps;
+    bool m_failSave = false;
 };
 
 } // namespace GoshAim

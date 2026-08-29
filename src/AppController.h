@@ -8,6 +8,7 @@
 #include <QHash>
 #include <QObject>
 #include <QPointer>
+#include <QSet>
 #include <QTimer>
 #include <QVariantMap>
 #include <atomic>
@@ -129,6 +130,8 @@ public:
     Q_INVOKABLE QString updateTaskId(const QString &uuid) const;
     Q_INVOKABLE int updateProgress(const QString &uuid) const;
     Q_INVOKABLE QString updateStatus(const QString &uuid) const;
+    QString autostartDirectory() const;
+    QString autostartDesktopPath() const;
     InspectionResult pendingCandidate(int row) const;
 
 Q_SIGNALS:
@@ -154,6 +157,9 @@ private:
     void applyDebugLogging();
     void notifyUpdates(int count);
     bool persistAppEdits(InstalledApp app, QString *error);
+    QString enqueueUpdate(const QString &uuid, bool force);
+    void syncOffers(const QVector<UpdateOffer> &offers);
+    void dropOffer(const QString &uuid);
     ProcessRunner *m_runner = nullptr;
     NetworkClient *m_network = nullptr;
     ProcessTable *m_processes = nullptr;
@@ -190,11 +196,12 @@ private:
     int m_inspectGeneration = 0;
     int m_inspectProgress = 0;
     bool m_inspecting = false;
-    int m_updateAllRemaining = 0;
     int m_updateAllFailed = 0;
     int m_updateAllSucceeded = 0;
     int m_taskTick = 0;
     QHash<QString, QString> m_updateTaskIds;
+    QSet<QString> m_updateAllIds;
+    QSet<QString> m_availableUpdateUuids;
 };
 
 } // namespace GoshAim

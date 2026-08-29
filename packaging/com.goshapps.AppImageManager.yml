@@ -17,6 +17,7 @@ finish-args:
   - --filesystem=~/.local/share/applications:create
   - --filesystem=~/.local/share/icons:create
   - --filesystem=~/.local/share/gosh-appimage-manager:create
+  - --filesystem=xdg-config/autostart:create
 cleanup:
   - /include
   - /lib/pkgconfig

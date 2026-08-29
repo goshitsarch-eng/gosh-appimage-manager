@@ -224,6 +224,10 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
             } else {
                 result.body += chunk;
             }
+            if (request.progress) {
+                const qint64 total = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
+                request.progress(written, total > 0 ? total : -1);
+            }
         });
         timer.start(request.timeoutMs);
         loop.exec();
@@ -238,6 +242,10 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
         result.etag = QString::fromUtf8(reply->rawHeader("ETag"));
         result.lastModified = QString::fromUtf8(reply->rawHeader("Last-Modified"));
         result.contentLength = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
+        result.digest = QString::fromUtf8(reply->rawHeader("Digest"));
+        if (result.digest.isEmpty()) {
+            result.digest = QString::fromUtf8(reply->rawHeader("X-Checksum-Sha256"));
+        }
         result.finalUrl = logical;
         const QVariant redir = reply->attribute(QNetworkRequest::RedirectionTargetAttribute);
         if (truncated) {

@@ -276,6 +276,12 @@ bool ManagedRegistry::load(QString *error)
 
 bool ManagedRegistry::save(QString *error)
 {
+    if (m_failSave) {
+        if (error) {
+            *error = QStringLiteral("Forced registry save failure");
+        }
+        return false;
+    }
     if (!m_settings) {
         if (error) {
             *error = QStringLiteral("Settings unavailable");

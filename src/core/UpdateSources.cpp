@@ -1,5 +1,9 @@
 #include "UpdateSources.h"
 
+#include "Limits.h"
+#include "SafeFs.h"
+
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -35,6 +39,32 @@ UpdateCheckResult fail(const QString &error, const QString &manager)
     result.error = error;
     result.manager = manager;
     return result;
+}
+
+qint64 installedSize(const InstalledApp &app)
+{
+    if (app.size > 0) {
+        return app.size;
+    }
+    if (!app.managedPath.isEmpty()) {
+        const qint64 n = QFileInfo(app.managedPath).size();
+        if (n > 0) {
+            return n;
+        }
+    }
+    return 0;
+}
+
+bool githubOfferAvailable(const UpdateCheckResult &result, const InstalledApp &app)
+{
+    const bool versionChanged = !result.version.isEmpty() && result.version != app.version;
+    bool digestChanged = false;
+    if (!result.digest.trimmed().isEmpty() && !app.sha256.isEmpty()) {
+        digestChanged = !SafeFs::digestMatches(result.digest, app.sha256);
+    }
+    const qint64 localSize = installedSize(app);
+    const bool sizeChanged = result.size > 0 && localSize > 0 && result.size != localSize;
+    return versionChanged || digestChanged || sizeChanged;
 }
 
 bool pickAsset(const QJsonArray &assets,
@@ -152,19 +182,25 @@ UpdateCheckResult StaticFileSource::check(const InstalledApp &app, NetworkClient
         if (!check.ok) {
             return fail(check.error, name());
         }
-        const QString lastDigest = app.updateConfig.value(QStringLiteral("_last_digest")).toString();
-        const qint64 lastSize = app.updateConfig.value(QStringLiteral("_last_size")).toLongLong();
-        const QString lastUrl = app.updateConfig.value(QStringLiteral("_last_url")).toString();
-        const QString lastEtag = app.updateConfig.value(QStringLiteral("_last_etag")).toString();
         bool changed = true;
-        if (!result.digest.isEmpty() && !lastDigest.isEmpty()) {
-            changed = result.digest != lastDigest;
-        } else if (result.size > 0 && lastSize > 0) {
-            changed = result.size != lastSize;
-        } else if (!result.url.isEmpty() && !lastUrl.isEmpty()) {
-            changed = result.url != lastUrl;
-        } else if (!result.etag.isEmpty() && !lastEtag.isEmpty()) {
-            changed = result.etag != lastEtag;
+        if (!result.digest.isEmpty() && !app.managedPath.isEmpty() && QFileInfo::exists(app.managedPath)) {
+            const HashResult hashed = SafeFs::sha1File(app.managedPath, kDefaultMaxAppImageBytes, cancel);
+            if (!hashed.sha256.isEmpty()) {
+                changed = !SafeFs::digestMatches(result.digest, hashed.sha256);
+            }
+        } else if (result.size > 0) {
+            const qint64 local = installedSize(app);
+            if (local > 0) {
+                changed = result.size != local;
+            } else {
+                const qint64 appliedSize = app.updateConfig.value(QStringLiteral("_applied_size")).toLongLong();
+                changed = appliedSize <= 0 || result.size != appliedSize;
+            }
+        } else if (!result.url.isEmpty()) {
+            const QString appliedUrl = app.updateConfig.value(QStringLiteral("_applied_url")).toString();
+            if (!appliedUrl.isEmpty()) {
+                changed = result.url != appliedUrl;
+            }
         }
         result.available = changed;
         return result;
@@ -180,37 +216,45 @@ UpdateCheckResult StaticFileSource::check(const InstalledApp &app, NetworkClient
     result.size = head.contentLength;
     result.etag = head.etag;
     result.lastModified = head.lastModified;
-    result.digest.clear();
-    result.reducedVerification = head.etag.isEmpty();
+    result.digest = head.digest;
+    result.reducedVerification = head.digest.isEmpty();
     result.version = head.lastModified;
     if (!head.ok) {
         result.error = head.error;
         return result;
     }
-    const QString lastEtag = app.updateConfig.value(QStringLiteral("_last_etag")).toString();
-    const QString lastModified = app.updateConfig.value(QStringLiteral("_last_modified")).toString();
-    const qint64 lastSize = app.updateConfig.value(QStringLiteral("_last_size")).toLongLong();
-    const QString lastVersion = app.updateConfig.value(QStringLiteral("_last_version")).toString();
-    const QString lastDigest = app.updateConfig.value(QStringLiteral("_last_digest")).toString();
+    const qint64 localSize = installedSize(app);
     bool changed = false;
-    if (!head.etag.isEmpty() && !lastEtag.isEmpty()) {
-        changed = head.etag != lastEtag;
-    } else if (!head.lastModified.isEmpty() && !lastModified.isEmpty()) {
-        changed = head.lastModified != lastModified;
-    } else if (head.contentLength > 0 && lastSize > 0) {
-        changed = head.contentLength != lastSize;
-    } else if (!head.lastModified.isEmpty() && !lastVersion.isEmpty()) {
-        changed = head.lastModified != lastVersion;
-    } else if (!head.etag.isEmpty() && !lastDigest.isEmpty()) {
-        changed = head.etag != lastDigest;
-    } else if (head.contentLength > 0 && app.size > 0) {
-        changed = head.contentLength != app.size;
-    } else if (!app.version.isEmpty() && !head.lastModified.isEmpty()) {
-        changed = head.lastModified != app.version;
+    if (!head.digest.isEmpty() && !app.sha256.isEmpty()) {
+        changed = !SafeFs::digestMatches(head.digest, app.sha256);
     } else {
-        changed = lastEtag.isEmpty() && lastModified.isEmpty() && lastSize <= 0;
-        if (changed && app.size > 0 && head.contentLength == app.size) {
-            changed = false;
+        bool compared = false;
+        if (head.contentLength > 0 && localSize > 0) {
+            compared = true;
+            changed = head.contentLength != localSize;
+        } else if (head.contentLength > 0 && localSize <= 0) {
+            compared = true;
+            changed = true;
+        } else if (!app.version.isEmpty() && !head.lastModified.isEmpty()) {
+            compared = true;
+            changed = head.lastModified != app.version;
+        }
+        if (!compared) {
+            const QString appliedEtag = app.updateConfig.value(QStringLiteral("_applied_etag")).toString();
+            const qint64 appliedSize = app.updateConfig.value(QStringLiteral("_applied_size")).toLongLong();
+            const QString appliedVersion = app.updateConfig.value(QStringLiteral("_applied_version")).toString();
+            const QString appliedModified = app.updateConfig.value(QStringLiteral("_applied_modified")).toString();
+            if (!head.etag.isEmpty() && !appliedEtag.isEmpty()) {
+                changed = head.etag != appliedEtag;
+            } else if (head.contentLength > 0 && appliedSize > 0) {
+                changed = head.contentLength != appliedSize;
+            } else if (!head.lastModified.isEmpty() && !appliedModified.isEmpty()) {
+                changed = head.lastModified != appliedModified;
+            } else if (!head.lastModified.isEmpty() && !appliedVersion.isEmpty()) {
+                changed = head.lastModified != appliedVersion;
+            } else {
+                changed = false;
+            }
         }
     }
     result.available = changed;
@@ -293,7 +337,7 @@ UpdateCheckResult GitHubSource::check(const InstalledApp &app, NetworkClient *ne
     if (host != QLatin1String("github.com") && !host.endsWith(QLatin1String(".githubusercontent.com"))) {
         return fail(QStringLiteral("GitHub asset host is not allowed"), name());
     }
-    result.available = result.version != app.version || result.digest != QString::fromLatin1(app.sha256.toHex());
+    result.available = githubOfferAvailable(result, app);
     result.reducedVerification = result.digest.isEmpty();
     return result;
 }
@@ -587,16 +631,26 @@ UpdateCheckResult FtpSource::check(const InstalledApp &app, NetworkClient *netwo
         result.error = head.error.isEmpty() ? result.error : head.error;
         return result;
     }
-    const QString lastEtag = app.updateConfig.value(QStringLiteral("_last_etag")).toString();
-    const qint64 lastSize = app.updateConfig.value(QStringLiteral("_last_size")).toLongLong();
-    if (!head.etag.isEmpty() && !lastEtag.isEmpty()) {
-        result.available = head.etag != lastEtag;
-    } else if (head.contentLength > 0 && lastSize > 0) {
-        result.available = head.contentLength != lastSize;
-    } else if (head.contentLength > 0 && app.size > 0) {
-        result.available = head.contentLength != app.size;
-    } else {
+    const qint64 localSize = installedSize(app);
+    if (head.contentLength > 0 && localSize > 0) {
+        result.available = head.contentLength != localSize;
+    } else if (head.contentLength > 0 && localSize <= 0) {
         result.available = true;
+    } else if (!head.lastModified.isEmpty() && !app.version.isEmpty()) {
+        result.available = head.lastModified != app.version;
+    } else {
+        const QString appliedEtag = app.updateConfig.value(QStringLiteral("_applied_etag")).toString();
+        const qint64 appliedSize = app.updateConfig.value(QStringLiteral("_applied_size")).toLongLong();
+        const QString appliedVersion = app.updateConfig.value(QStringLiteral("_applied_version")).toString();
+        if (!head.etag.isEmpty() && !appliedEtag.isEmpty()) {
+            result.available = head.etag != appliedEtag;
+        } else if (head.contentLength > 0 && appliedSize > 0) {
+            result.available = head.contentLength != appliedSize;
+        } else if (!head.lastModified.isEmpty() && !appliedVersion.isEmpty()) {
+            result.available = head.lastModified != appliedVersion;
+        } else {
+            result.available = false;
+        }
     }
     return result;
 }

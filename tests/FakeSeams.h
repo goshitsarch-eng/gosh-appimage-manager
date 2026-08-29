@@ -121,6 +121,7 @@ public:
         QString pathContains;
         NetworkResult result;
         bool hangUntilCancel = false;
+        bool hangOnDownload = false;
     };
     QVector<QUrl> urls;
     QVector<NetworkRequest> requests;
@@ -146,15 +147,25 @@ public:
             if (!rule.pathContains.isEmpty() && !path.contains(rule.pathContains) && !request.url.toString().contains(rule.pathContains)) {
                 continue;
             }
-            if (rule.hangUntilCancel) {
+            if (rule.hangUntilCancel || (rule.hangOnDownload && !request.destinationPath.isEmpty())) {
+                if (request.progress) {
+                    const qint64 total = rule.result.contentLength > 0 ? rule.result.contentLength
+                                                                       : (rule.result.body.size() > 0 ? rule.result.body.size() : 100);
+                    request.progress(qMax<qint64>(1, total / 2), total);
+                }
                 while (cancel && !cancel->load()) {
                     QThread::msleep(10);
                 }
                 NetworkResult cancelled = rule.result;
                 cancelled.cancelled = true;
+                cancelled.error = QStringLiteral("Cancelled");
                 return cancelled;
             }
             NetworkResult copy = rule.result;
+            if (request.progress && copy.ok) {
+                const qint64 total = copy.body.size() > 0 ? copy.body.size() : (copy.contentLength > 0 ? copy.contentLength : 1);
+                request.progress(qMax<qint64>(1, total / 2), total);
+            }
             if (!request.destinationPath.isEmpty() && copy.ok) {
                 QFile file(request.destinationPath);
                 if (file.open(QIODevice::WriteOnly)) {

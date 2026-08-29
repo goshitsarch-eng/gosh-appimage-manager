@@ -13,5 +13,6 @@ int runCli(AppController &controller, const QStringList &arguments, bool interac
 int runSelfTest(QApplication &app, AppController &controller);
 int runHostProbe(AppController &controller);
 int runInspectProbe(AppController &controller, const QString &path);
+int runAutostartProbe(AppController &controller);
 
 } // namespace GoshAim

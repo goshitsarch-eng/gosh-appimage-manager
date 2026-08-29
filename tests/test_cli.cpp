@@ -258,6 +258,48 @@ private Q_SLOTS:
         QCOMPARE(runCli(controller, {QStringLiteral("--fetch-updates")}, false), 0);
         QCOMPARE(notifier.calls, 0);
     }
+    void updateAllAfterListUpdatesReplacesOnce()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable table;
+        AppController controller(nullptr, &runner, &network, &table, true);
+        const QByteArray original = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(8, 'O'));
+        const QByteArray next = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(16, 'N'));
+        QDir().mkpath(controller.settings()->managedFolder());
+        const QString dest = TestFixt::writeFile(controller.settings()->managedFolder(), QStringLiteral("Demo.AppImage"), original);
+        InstalledApp app;
+        app.uuid = QStringLiteral("cli-upd");
+        app.owned = true;
+        app.name = QStringLiteral("Demo");
+        app.managedPath = dest;
+        app.desktopPath = controller.settings()->applicationsDir() + QStringLiteral("/gosh-appimage-cli-upd.desktop");
+        app.architecture = Architecture::X86_64;
+        app.size = original.size();
+        app.updateManager = QStringLiteral("static");
+        app.updateConfig.insert(QStringLiteral("url"), QStringLiteral("https://example.com/App.AppImage"));
+        controller.registry()->upsert(app);
+        controller.registry()->save();
+        FakeNetworkClient::Rule rule;
+        rule.hostContains = QStringLiteral("example.com");
+        rule.result.ok = true;
+        rule.result.status = 200;
+        rule.result.body = next;
+        rule.result.contentLength = next.size();
+        network.rules.append(rule);
+        QCOMPARE(runCli(controller, {QStringLiteral("--list-updates")}, false), 0);
+        QCOMPARE(runCli(controller, {QStringLiteral("--update"), QStringLiteral("--all"), QStringLiteral("--yes")}, false), 0);
+        QFile live(dest);
+        QVERIFY(live.open(QIODevice::ReadOnly));
+        QCOMPARE(live.readAll(), next);
+        live.close();
+        QCOMPARE(runCli(controller, {QStringLiteral("--update"), QStringLiteral("--all"), QStringLiteral("--yes")}, false), 0);
+        QFile still(dest);
+        QVERIFY(still.open(QIODevice::ReadOnly));
+        QCOMPARE(still.readAll(), next);
+    }
 };
 
 QTEST_GUILESS_MAIN(TestCli)

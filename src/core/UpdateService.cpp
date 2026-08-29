@@ -63,15 +63,6 @@ UpdateCheckResult UpdateService::check(const InstalledApp &app, std::atomic<bool
         info.fields = AppImageInspector::parseUpdInfo(app.embeddedUpdate.toUtf8()).fields;
         copy.updateConfig = source->configFromEmbedded(info);
     }
-    const QVariantMap last = m_checkState ? m_checkState->get(app.uuid) : QVariantMap{};
-    if (!last.isEmpty()) {
-        copy.updateConfig.insert(QStringLiteral("_last_etag"), last.value(QStringLiteral("etag")));
-        copy.updateConfig.insert(QStringLiteral("_last_modified"), last.value(QStringLiteral("last_modified")));
-        copy.updateConfig.insert(QStringLiteral("_last_size"), last.value(QStringLiteral("size")));
-        copy.updateConfig.insert(QStringLiteral("_last_version"), last.value(QStringLiteral("version")));
-        copy.updateConfig.insert(QStringLiteral("_last_digest"), last.value(QStringLiteral("digest")));
-        copy.updateConfig.insert(QStringLiteral("_last_url"), last.value(QStringLiteral("url")));
-    }
     UpdateCheckResult result = source->check(copy, m_network, cancel);
     if (result.ok && m_checkState) {
         QVariantMap state;
@@ -155,9 +146,14 @@ bool UpdateService::verifyStagedDigest(const QString &staging, const UpdateCheck
     return true;
 }
 
-IntegrateResult UpdateService::apply(const InstalledApp &app, bool force, std::atomic<bool> *cancel)
+IntegrateResult UpdateService::apply(const InstalledApp &app, bool force, std::atomic<bool> *cancel, const ProgressFn &progress)
 {
     IntegrateResult result;
+    auto report = [&](int percent, const QString &status) {
+        if (progress) {
+            progress(percent, status);
+        }
+    };
     if (!app.owned) {
         result.error = QStringLiteral("Cannot update an unowned AppImage");
         return result;
@@ -167,6 +163,7 @@ IntegrateResult UpdateService::apply(const InstalledApp &app, bool force, std::a
         result.error = QStringLiteral("Application is running; use --force to override");
         return result;
     }
+    report(5, QStringLiteral("Checking"));
     const UpdateCheckResult checked = check(app, cancel);
     if (!checked.ok || !checked.available || checked.url.isEmpty()) {
         result.error = checked.error.isEmpty() ? QStringLiteral("No update available") : checked.error;
@@ -184,6 +181,16 @@ IntegrateResult UpdateService::apply(const InstalledApp &app, bool force, std::a
     req.destinationPath = staging;
     req.maxBytes = m_settings->maxAppImageBytes();
     req.allowFtp = checked.manager == QLatin1String("ftp");
+    report(10, QStringLiteral("Downloading"));
+    req.progress = [&](qint64 received, qint64 total) {
+        int pct = 15;
+        if (total > 0 && received > 0) {
+            pct = 15 + int(qMin(55.0, (double(received) / double(total)) * 55.0));
+        } else if (received > 0) {
+            pct = 40;
+        }
+        report(qBound(15, pct, 70), QStringLiteral("Downloading"));
+    };
     const NetworkResult downloaded = m_network->fetch(req, cancel);
     if (!downloaded.ok) {
         SafeFs::removeFileNoFollow(staging);
@@ -191,6 +198,7 @@ IntegrateResult UpdateService::apply(const InstalledApp &app, bool force, std::a
         return result;
     }
     QString digestError;
+    report(80, QStringLiteral("Validating"));
     if (!verifyStagedDigest(staging, checked, &digestError)) {
         SafeFs::removeFileNoFollow(staging);
         result.error = digestError;
@@ -268,6 +276,7 @@ IntegrateResult UpdateService::apply(const InstalledApp &app, bool force, std::a
     }
     const QVector<InstalledApp> registrySnap = m_registry->snapshot();
 
+    report(90, QStringLiteral("Replacing"));
     if (!SafeFs::chmodPath(staging, 0755, &copyError) || !SafeFs::renameOver(staging, app.managedPath, &copyError)) {
         if (QFile::exists(rollback)) {
             SafeFs::renameOver(rollback, app.managedPath);
@@ -317,6 +326,12 @@ IntegrateResult UpdateService::apply(const InstalledApp &app, bool force, std::a
     updated.environment = app.environment;
     updated.updateManager = app.updateManager;
     updated.updateConfig = app.updateConfig;
+    updated.updateConfig.insert(QStringLiteral("_applied_etag"), checked.etag);
+    updated.updateConfig.insert(QStringLiteral("_applied_digest"), checked.digest);
+    updated.updateConfig.insert(QStringLiteral("_applied_size"), checked.size);
+    updated.updateConfig.insert(QStringLiteral("_applied_version"), checked.version);
+    updated.updateConfig.insert(QStringLiteral("_applied_url"), checked.url);
+    updated.updateConfig.insert(QStringLiteral("_applied_modified"), checked.lastModified);
     updated.actions = app.actions;
     const QString stagedDesktop = SafeFs::siblingTemp(updated.desktopPath, QStringLiteral(".gosh-desk-"));
     temps.append(stagedDesktop);
@@ -345,6 +360,7 @@ IntegrateResult UpdateService::apply(const InstalledApp &app, bool force, std::a
     for (const QString &temp : temps) {
         SafeFs::removeFileNoFollow(temp);
     }
+    report(100, QStringLiteral("Done"));
     result.ok = true;
     result.app = updated;
     return result;

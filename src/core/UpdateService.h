@@ -4,6 +4,7 @@
 #include "UpdateSources.h"
 
 #include <atomic>
+#include <functional>
 
 namespace GoshAim {
 
@@ -29,9 +30,11 @@ public:
                   ProcessRunner *runner);
     ~UpdateService();
 
+    using ProgressFn = std::function<void(int percent, const QString &status)>;
+
     UpdateCheckResult check(const InstalledApp &app, std::atomic<bool> *cancel = nullptr);
     QVector<UpdateOffer> listUpdates(std::atomic<bool> *cancel = nullptr, bool persistInstallState = false);
-    IntegrateResult apply(const InstalledApp &app, bool force, std::atomic<bool> *cancel = nullptr);
+    IntegrateResult apply(const InstalledApp &app, bool force, std::atomic<bool> *cancel = nullptr, const ProgressFn &progress = {});
     bool setSource(InstalledApp app, const QString &manager, const QVariantMap &config, QString *error);
     bool unsetSource(InstalledApp app, QString *error);
     void setFailPoint(UpdateFailPoint point) { m_failPoint = point; }

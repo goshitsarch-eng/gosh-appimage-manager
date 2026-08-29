@@ -23,6 +23,7 @@ struct NetworkRequest {
     bool allowPrivate = false;
     bool allowFtp = false;
     QString accept;
+    std::function<void(qint64 received, qint64 total)> progress;
 };
 
 struct NetworkResult {
@@ -38,6 +39,7 @@ struct NetworkResult {
     bool cancelled = false;
     bool truncated = false;
     bool redirected = false;
+    QString digest;
 };
 
 class NetworkClient

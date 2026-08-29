@@ -15,6 +15,7 @@
 #include <KLocalizedString>
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QCoreApplication>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -452,6 +453,32 @@ int runInspectProbe(AppController &controller, const QString &path)
     }
     fwrite("INSPECT_NO_EXECUTION\n", 1, 21, stdout);
     return result.magicValid ? 0 : 1;
+}
+
+int runAutostartProbe(AppController &controller)
+{
+    controller.settings()->setBackgroundUpdateChecks(true);
+    QTextStream stream(stdout);
+    const QString path = controller.autostartDesktopPath();
+    stream << QStringLiteral("autostart_path=") << path << Qt::endl;
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        stream << QStringLiteral("AUTOSTART_MISSING") << Qt::endl;
+        return 1;
+    }
+    const QByteArray body = file.readAll();
+    stream << QString::fromUtf8(body);
+    const bool flatpak = ProcessRunner::inFlatpak()
+        || qEnvironmentVariable("FLATPAK_ID") == QLatin1String("com.goshapps.AppImageManager");
+    const bool execOk = flatpak
+        ? body.contains("flatpak run com.goshapps.AppImageManager --fetch-updates")
+        : body.contains("--fetch-updates");
+    if (!execOk || (flatpak && body.contains(QCoreApplication::applicationFilePath().toUtf8()) && !body.contains("flatpak run"))) {
+        stream << QStringLiteral("AUTOSTART_BAD_EXEC") << Qt::endl;
+        return 1;
+    }
+    stream << QStringLiteral("AUTOSTART_OK") << Qt::endl;
+    return 0;
 }
 
 } // namespace GoshAim

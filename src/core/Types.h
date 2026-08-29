@@ -109,6 +109,7 @@ struct InspectionResult {
     QString conflictingPath;
     QString conflictingName;
     bool needsConflictDecision = false;
+    bool canReplace = false;
     ConflictPolicy chosenPolicy = ConflictPolicy::Unspecified;
     QString chosenReplaceUuid;
 };

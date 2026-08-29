@@ -150,6 +150,35 @@ bool TaskQueue::busy() const
     return m_busy.load();
 }
 
+void TaskQueue::setProgress(const QString &id, int progress, const QString &statusText)
+{
+    if (id.isEmpty()) {
+        return;
+    }
+    const int bounded = qBound(0, progress, 100);
+    {
+        QMutexLocker locker(&m_mutex);
+        if (m_currentItem && m_currentItem->task.id == id) {
+            m_currentItem->task.progress = bounded;
+            if (!statusText.isEmpty()) {
+                m_currentItem->task.statusText = statusText;
+            }
+        }
+        for (TaskItem &hist : m_history) {
+            if (hist.id != id) {
+                continue;
+            }
+            hist.progress = bounded;
+            if (!statusText.isEmpty()) {
+                hist.statusText = statusText;
+            }
+            break;
+        }
+    }
+    Q_EMIT progressChanged(id, bounded);
+    Q_EMIT tasksChanged();
+}
+
 void TaskQueue::workerLoop()
 {
     while (!m_stop.load()) {
@@ -168,6 +197,7 @@ void TaskQueue::workerLoop()
             item = m_queue.takeFirst();
             m_busy.store(true);
             m_currentCancel = item->cancel;
+            m_currentItem = item;
             m_currentId = item->task.id;
             m_currentTarget = item->task.target;
             item->task.state = TaskState::Running;
@@ -199,6 +229,7 @@ void TaskQueue::workerLoop()
             }
             m_busy.store(false);
             m_currentCancel = nullptr;
+            m_currentItem = nullptr;
             m_currentId.clear();
             m_currentTarget.clear();
         }

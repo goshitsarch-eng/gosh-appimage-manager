@@ -87,6 +87,31 @@ private Q_SLOTS:
         queue.shutdown();
         QVERIFY(!guard.sawLiveDestruction());
     }
+    void publishesProgressBeforeFinish()
+    {
+        QtWarnGuard guard;
+        TaskQueue queue;
+        std::atomic<bool> started{false};
+        std::atomic<bool> hold{true};
+        QString id;
+        id = queue.enqueue(TaskKind::Update, QStringLiteral("upd"), QStringLiteral("/tmp/p"),
+                           [&](TaskItem &task, std::atomic<bool> *) {
+                               started.store(true);
+                               queue.setProgress(task.id, 40, QStringLiteral("Downloading"));
+                               while (hold.load()) {
+                                   QThread::msleep(5);
+                               }
+                           },
+                           true);
+        QTRY_VERIFY(started.load());
+        QTRY_COMPARE(queue.task(id).progress, 40);
+        QVERIFY(queue.task(id).progress > 0 && queue.task(id).progress < 100);
+        QCOMPARE(queue.task(id).statusText, QStringLiteral("Downloading"));
+        hold.store(false);
+        QTRY_COMPARE(queue.task(id).state, TaskState::Succeeded);
+        queue.shutdown();
+        QVERIFY(!guard.sawLiveDestruction());
+    }
 };
 
 QTEST_GUILESS_MAIN(TestTasks)

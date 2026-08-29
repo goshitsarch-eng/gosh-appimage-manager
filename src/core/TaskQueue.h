@@ -24,6 +24,7 @@ public:
     void cancel(const QString &id);
     void cancelAll();
     void shutdown();
+    void setProgress(const QString &id, int progress, const QString &statusText);
     QVector<TaskItem> tasks() const;
     TaskItem task(const QString &id) const;
     bool busy() const;
@@ -31,6 +32,7 @@ public:
 Q_SIGNALS:
     void tasksChanged();
     void taskChanged(const QString &id);
+    void progressChanged(const QString &id, int progress);
     void finished(const QString &id, bool ok, const QString &error);
 
 private:
@@ -50,6 +52,7 @@ private:
     std::atomic<bool> m_stop{false};
     std::atomic<bool> m_busy{false};
     std::atomic<bool> *m_currentCancel = nullptr;
+    JobItem *m_currentItem = nullptr;
     QString m_currentId;
     QString m_currentTarget;
     int m_seq = 0;

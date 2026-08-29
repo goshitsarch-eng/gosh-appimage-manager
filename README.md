@@ -79,6 +79,7 @@ gosh-appimage-manager --fetch-updates
 gosh-appimage-manager --self-test
 gosh-appimage-manager --probe-host
 gosh-appimage-manager --probe-inspect <path>
+gosh-appimage-manager --probe-autostart
 ```
 
 JSON list output uses `schema_version: 1` with `installed` or `updates` arrays.
@@ -90,7 +91,8 @@ stderr. Diagnostics go to stderr so stdout remains valid JSON.
 Manifest: `packaging/com.goshapps.AppImageManager.yml`
 
 The manifest does not use `--filesystem=host:rw`. It grants the managed
-folder, user applications, and icon directories, plus portals and
+folder, user applications, and icon directories, session autostart
+(`xdg-config/autostart:create`), plus portals and
 argument-safe `flatpak-spawn --host`. Extraction tools (unsquashfs, 7zz,
 dwarfsextract) are pinned by SHA-256. Corresponding source tarballs and
 license texts are installed beside the binaries.

@@ -30,7 +30,8 @@ bool isCliCommand(const QStringList &args)
                                   QStringLiteral("--set-update-source"),
                                   QStringLiteral("--fetch-updates"),
                                   QStringLiteral("--probe-host"),
-                                  QStringLiteral("--probe-inspect")};
+                                  QStringLiteral("--probe-inspect"),
+                                  QStringLiteral("--probe-autostart")};
     for (const QString &arg : args) {
         if (commands.contains(arg)) {
             return true;
@@ -50,6 +51,7 @@ int main(int argc, char *argv[])
     const bool selfTest = raw.contains(QStringLiteral("--self-test"));
     const bool probeHost = raw.contains(QStringLiteral("--probe-host"));
     const bool probeInspect = raw.contains(QStringLiteral("--probe-inspect"));
+    const bool probeAutostart = raw.contains(QStringLiteral("--probe-autostart"));
     const bool cli = isCliCommand(raw);
 
     if ((selfTest || cli) && qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
@@ -71,6 +73,9 @@ int main(int argc, char *argv[])
             const int idx = raw.indexOf(QStringLiteral("--probe-inspect"));
             const QString path = (idx >= 0 && idx + 1 < raw.size()) ? raw.at(idx + 1) : QString();
             return runInspectProbe(controller, path);
+        }
+        if (probeAutostart) {
+            return runAutostartProbe(controller);
         }
         return runCli(controller, raw, isatty(STDIN_FILENO) == 1);
     }
@@ -95,9 +100,12 @@ int main(int argc, char *argv[])
     QCommandLineOption probeInspectOpt(QStringLiteral("probe-inspect"),
                                        i18n("Inspect a local file without executing it"),
                                        QStringLiteral("path"));
+    QCommandLineOption probeAutostartOpt(QStringLiteral("probe-autostart"),
+                                         i18n("Write and verify the session autostart desktop for background checks"));
     parser.addOption(selfTestOpt);
     parser.addOption(probeHostOpt);
     parser.addOption(probeInspectOpt);
+    parser.addOption(probeAutostartOpt);
     parser.addPositionalArgument(QStringLiteral("files"), i18n("AppImage files to inspect"), QStringLiteral("[files...]"));
     parser.process(app);
 
@@ -107,6 +115,9 @@ int main(int argc, char *argv[])
     }
     if (parser.isSet(probeInspectOpt)) {
         return runInspectProbe(controller, parser.value(probeInspectOpt));
+    }
+    if (parser.isSet(probeAutostartOpt)) {
+        return runAutostartProbe(controller);
     }
     if (parser.isSet(selfTestOpt)) {
         return runSelfTest(app, controller);

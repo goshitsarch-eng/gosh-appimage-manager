@@ -37,6 +37,7 @@ Kirigami.ScrollablePage {
                 required property string existingManagedId
                 required property string conflictStatus
                 required property bool needsDecision
+                required property bool canReplace
                 required property string conflictingUuid
                 required property string conflictingName
                 required property string warnings
@@ -63,13 +64,16 @@ Kirigami.ScrollablePage {
                         Accessible.name: i18n("Conflict policy for %1", name)
                         currentIndex: chosenPolicy === 2 ? 1 : (chosenPolicy === 1 ? 0 : -1)
                         displayText: currentIndex < 0 ? i18n("Choose keep both or replace…") : currentText
-                        property var policyChoices: [
-                            i18n("Keep both (new filename)"),
-                            i18n("Replace owned install %1", conflictingName)
-                        ]
+                        property var policyChoices: canReplace
+                            ? [i18n("Keep both (new filename)"), i18n("Replace owned install %1", conflictingName)]
+                            : [i18n("Keep both (new filename)")]
                         model: policyChoices
                         onActivated: function(choiceIndex) {
-                            Store.setCandidateConflict(index, choiceIndex === 1 ? 2 : 1, choiceIndex === 1 ? conflictingUuid : "")
+                            if (canReplace && choiceIndex === 1) {
+                                Store.setCandidateConflict(index, 2, conflictingUuid)
+                            } else {
+                                Store.setCandidateConflict(index, 1, "")
+                            }
                         }
                     }
                 }

@@ -1,15 +1,19 @@
 #include "AppController.h"
+#include "Cli.h"
 #include "ElfFixtures.h"
 #include "FakeSeams.h"
 #include "QtWarnGuard.h"
 #include "core/IntegrationService.h"
 #include "core/ManagedRegistry.h"
+#include "core/ProcessRunner.h"
 #include "core/ProcessTable.h"
 #include "core/TaskQueue.h"
+#include "models/Models.h"
 
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QCryptographicHash>
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -321,6 +325,302 @@ private Q_SLOTS:
         QCOMPARE(controller.taskQueue()->task(inspectId).state, TaskState::Running);
         controller.taskQueue()->cancel(inspectId);
         QTRY_VERIFY(inspectCancelled.load());
+    }
+    void libraryBadgeFollowsCheckAndApply()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable table;
+        AppController controller(nullptr, &runner, &network, &table, true);
+        const QByteArray original = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(8, 'O'));
+        const QByteArray next = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(16, 'N'));
+        const QString src = TestFixt::writeFile(home.path(), QStringLiteral("Demo.AppImage"), original);
+        IntegrateRequest req;
+        req.sourcePath = src;
+        req.conflict = ConflictPolicy::KeepBoth;
+        const IntegrateResult integrated = controller.integration()->integrate(req);
+        QVERIFY2(integrated.ok, qPrintable(integrated.error));
+        InstalledApp app = controller.registry()->byUuid(integrated.app.uuid);
+        app.updateManager = QStringLiteral("static");
+        app.updateConfig.insert(QStringLiteral("url"), QStringLiteral("https://example.com/App.AppImage"));
+        controller.registry()->upsert(app);
+        controller.registry()->save();
+        FakeNetworkClient::Rule rule;
+        rule.hostContains = QStringLiteral("example.com");
+        rule.result.ok = true;
+        rule.result.status = 200;
+        rule.result.body = next;
+        rule.result.contentLength = next.size();
+        network.rules.append(rule);
+        controller.refreshLibrary();
+        QCOMPARE(controller.libraryModel()->data(controller.libraryModel()->index(0, 0), LibraryModel::UpdateAvailableRole).toBool(), false);
+        controller.checkAll();
+        QTRY_COMPARE(controller.updatesModel()->rowCount(), 1);
+        QTRY_COMPARE(controller.libraryModel()->data(controller.libraryModel()->index(0, 0), LibraryModel::UpdateAvailableRole).toBool(), true);
+        controller.updateApp(app.uuid, true);
+        QTRY_COMPARE(controller.libraryModel()->data(controller.libraryModel()->index(0, 0), LibraryModel::UpdateAvailableRole).toBool(), false);
+        QFile live(app.managedPath);
+        QVERIFY(live.open(QIODevice::ReadOnly));
+        QCOMPARE(live.readAll(), next);
+    }
+    void updateProgressVisibleBeforeFinish()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable table;
+        AppController controller(nullptr, &runner, &network, &table, true);
+        const QByteArray original = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(8, 'O'));
+        const QByteArray next = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(16, 'N'));
+        const QString src = TestFixt::writeFile(home.path(), QStringLiteral("Demo.AppImage"), original);
+        IntegrateRequest req;
+        req.sourcePath = src;
+        req.conflict = ConflictPolicy::KeepBoth;
+        const IntegrateResult integrated = controller.integration()->integrate(req);
+        QVERIFY(integrated.ok);
+        InstalledApp app = controller.registry()->byUuid(integrated.app.uuid);
+        app.updateManager = QStringLiteral("static");
+        app.updateConfig.insert(QStringLiteral("url"), QStringLiteral("https://example.com/App.AppImage"));
+        controller.registry()->upsert(app);
+        FakeNetworkClient::Rule rule;
+        rule.hostContains = QStringLiteral("example.com");
+        rule.result.ok = true;
+        rule.result.status = 200;
+        rule.result.body = next;
+        rule.result.contentLength = next.size();
+        rule.hangOnDownload = true;
+        network.rules.append(rule);
+        controller.checkAll();
+        QTRY_COMPARE(controller.updatesModel()->rowCount(), 1);
+        controller.updateApp(app.uuid, true);
+        QTRY_VERIFY(controller.updateProgress(app.uuid) > 0 && controller.updateProgress(app.uuid) < 100);
+        const int mid = controller.updateProgress(app.uuid);
+        QVERIFY(mid > 0 && mid < 100);
+        controller.cancelTask(controller.updateTaskId(app.uuid));
+        QTRY_VERIFY(controller.taskQueue()->task(controller.updateTaskId(app.uuid)).state == TaskState::Cancelled
+                    || controller.taskQueue()->task(controller.updateTaskId(app.uuid)).state == TaskState::Failed);
+    }
+    void updateAllIgnoresInspectAndFailedEnqueue()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable table;
+        AppController controller(nullptr, &runner, &network, &table, true);
+        std::atomic<bool> inspectStarted{false};
+        std::atomic<bool> inspectHold{true};
+        controller.taskQueue()->enqueue(
+            TaskKind::Inspect,
+            QStringLiteral("inspect"),
+            QStringLiteral("/tmp/inspect-all"),
+            [&](TaskItem &, std::atomic<bool> *cancel) {
+                inspectStarted.store(true);
+                while (inspectHold.load() && !cancel->load()) {
+                    QThread::msleep(5);
+                }
+            },
+            false);
+        QTRY_VERIFY(inspectStarted.load());
+        const QByteArray original = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(8, 'O'));
+        const QByteArray next = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(16, 'N'));
+        const QString src = TestFixt::writeFile(home.path(), QStringLiteral("Demo.AppImage"), original);
+        IntegrateRequest req;
+        req.sourcePath = src;
+        req.conflict = ConflictPolicy::KeepBoth;
+        const IntegrateResult integrated = controller.integration()->integrate(req);
+        QVERIFY(integrated.ok);
+        InstalledApp app = controller.registry()->byUuid(integrated.app.uuid);
+        app.updateManager = QStringLiteral("static");
+        app.updateConfig.insert(QStringLiteral("url"), QStringLiteral("https://example.com/App.AppImage"));
+        controller.registry()->upsert(app);
+        FakeNetworkClient::Rule rule;
+        rule.hostContains = QStringLiteral("example.com");
+        rule.result.ok = true;
+        rule.result.status = 200;
+        rule.result.body = next;
+        rule.result.contentLength = next.size();
+        rule.hangOnDownload = true;
+        network.rules.append(rule);
+        UpdateOffer offer;
+        offer.uuid = app.uuid;
+        offer.name = app.name;
+        controller.updatesModel()->setOffers({offer});
+        controller.updateAll(true);
+        inspectHold.store(false);
+        QTRY_VERIFY(controller.updateProgress(app.uuid) > 0 && controller.updateProgress(app.uuid) < 100);
+        QVERIFY(!controller.updateSummary().contains(QLatin1String("succeeded")));
+        QVERIFY(!controller.updateSummary().contains(QLatin1String("failed")));
+        controller.cancelTask(controller.updateTaskId(app.uuid));
+        QTRY_VERIFY(controller.updateSummary().contains(QLatin1String("Update-all finished")));
+        QVERIFY(controller.updateSummary().contains(QLatin1String("0 succeeded")));
+
+        std::atomic<bool> mutationStarted{false};
+        std::atomic<bool> mutationHold{true};
+        const QString blockId = controller.taskQueue()->enqueue(
+            TaskKind::Update,
+            QStringLiteral("block"),
+            app.managedPath,
+            [&](TaskItem &, std::atomic<bool> *cancel) {
+                mutationStarted.store(true);
+                while (mutationHold.load() && !cancel->load()) {
+                    QThread::msleep(5);
+                }
+            },
+            true);
+        QVERIFY(!blockId.isEmpty());
+        QTRY_VERIFY(mutationStarted.load());
+        controller.updatesModel()->setOffers({offer});
+        controller.updateAll(true);
+        QCOMPARE(controller.updateSummary(), QStringLiteral("No updates are currently offered"));
+        mutationHold.store(false);
+        QTRY_COMPARE(controller.taskQueue()->task(blockId).state, TaskState::Succeeded);
+        QVERIFY(!controller.updateSummary().contains(QLatin1String("1 succeeded")));
+    }
+    void autostartFileIsSessionVisible()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable table;
+        AppController controller(nullptr, &runner, &network, &table, true);
+        controller.settings()->setBackgroundUpdateChecks(true);
+        const QString path = controller.autostartDesktopPath();
+        QVERIFY(QFile::exists(path));
+        QVERIFY(path.contains(QStringLiteral("/autostart/")));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QByteArray body = file.readAll();
+        QVERIFY(body.contains("--fetch-updates"));
+        if (ProcessRunner::inFlatpak()
+            || qEnvironmentVariable("FLATPAK_ID") == QLatin1String("com.goshapps.AppImageManager")) {
+            QVERIFY(body.contains("flatpak run com.goshapps.AppImageManager --fetch-updates"));
+        } else {
+            QVERIFY(!body.contains("flatpak run"));
+        }
+        QCOMPARE(runAutostartProbe(controller), 0);
+        controller.registry()->save();
+        const QByteArray before = [&]() {
+            QFile registryFile(controller.settings()->registryPath());
+            if (!registryFile.open(QIODevice::ReadOnly)) {
+                return QByteArray();
+            }
+            return registryFile.readAll();
+        }();
+        QCOMPARE(runCli(controller, {QStringLiteral("--fetch-updates")}, false), 0);
+        QFile registryFile(controller.settings()->registryPath());
+        QByteArray after;
+        if (registryFile.open(QIODevice::ReadOnly)) {
+            after = registryFile.readAll();
+        }
+        QCOMPARE(after, before);
+    }
+    void hideReplaceWhenConflictIsUnowned()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable table;
+        AppController controller(nullptr, &runner, &network, &table, true);
+        QDir().mkpath(controller.settings()->managedFolder());
+        TestFixt::writeFile(controller.settings()->managedFolder(), QStringLiteral("Demo.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(4, 'X')));
+        const QString incoming = TestFixt::writeFile(home.path(), QStringLiteral("Demo.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(4, 'Y')));
+        QSignalSpy spy(&controller, &AppController::confirmInspect);
+        controller.inspectPaths({incoming});
+        QTRY_COMPARE(spy.count(), 1);
+        QVERIFY(controller.pendingCandidate(0).needsConflictDecision);
+        QVERIFY(!controller.pendingCandidate(0).canReplace);
+        QVERIFY(controller.pendingCandidate(0).conflictingUuid.isEmpty());
+    }
+    void refreshMetadataRestoresOnSaveFailure()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable table;
+        AppController controller(nullptr, &runner, &network, &table, true);
+        const QString src = TestFixt::writeFile(home.path(), QStringLiteral("Demo.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2));
+        IntegrateRequest req;
+        req.sourcePath = src;
+        req.conflict = ConflictPolicy::KeepBoth;
+        const IntegrateResult integrated = controller.integration()->integrate(req);
+        QVERIFY(integrated.ok);
+        const QString name = controller.registry()->byUuid(integrated.app.uuid).name;
+        QByteArray desktopBytes;
+        {
+            QFile desk(integrated.app.desktopPath);
+            QVERIFY(desk.open(QIODevice::ReadOnly));
+            desktopBytes = desk.readAll();
+        }
+        controller.registry()->setFailSave(true);
+        controller.refreshMetadata(integrated.app.uuid);
+        QTRY_VERIFY([&]() {
+            const auto tasks = controller.taskQueue()->tasks();
+            for (const TaskItem &task : tasks) {
+                if (task.kind == TaskKind::RefreshMetadata && (task.state == TaskState::Failed || task.state == TaskState::Succeeded)) {
+                    return true;
+                }
+            }
+            return false;
+        }());
+        controller.registry()->setFailSave(false);
+        QCOMPARE(controller.registry()->byUuid(integrated.app.uuid).name, name);
+        QFile desk(integrated.app.desktopPath);
+        QVERIFY(desk.open(QIODevice::ReadOnly));
+        QCOMPARE(desk.readAll(), desktopBytes);
+    }
+    void githubUnavailableDoesNotEnqueueUpdateAll()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable table;
+        AppController controller(nullptr, &runner, &network, &table, true);
+        const QByteArray payload = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(8, 'G'));
+        const QByteArray digest = QCryptographicHash::hash(payload, QCryptographicHash::Sha256);
+        const QString dest = TestFixt::writeFile(home.path(), QStringLiteral("Demo.AppImage"), payload);
+        InstalledApp app;
+        app.uuid = QStringLiteral("gh-same");
+        app.owned = true;
+        app.name = QStringLiteral("Demo");
+        app.managedPath = dest;
+        app.version = QStringLiteral("v2");
+        app.sha256 = digest;
+        app.size = payload.size();
+        app.updateManager = QStringLiteral("github");
+        app.updateConfig = {{QStringLiteral("username"), QStringLiteral("u")},
+                            {QStringLiteral("repo"), QStringLiteral("r")},
+                            {QStringLiteral("filename"), QStringLiteral("App.AppImage")}};
+        controller.registry()->upsert(app);
+        FakeNetworkClient::Rule api;
+        api.hostContains = QStringLiteral("api.github.com");
+        api.result.ok = true;
+        api.result.status = 200;
+        api.result.body = QByteArray("{\"tag_name\":\"v2\",\"assets\":[{\"name\":\"App.AppImage\",\"browser_download_url\":\"https://github.com/u/r/releases/download/v2/App.AppImage\",\"size\":")
+            + QByteArray::number(payload.size()) + ",\"digest\":\"sha256:" + digest.toHex() + "\"}]}";
+        network.rules.append(api);
+        controller.checkAll();
+        QTRY_VERIFY([&]() {
+            const auto tasks = controller.taskQueue()->tasks();
+            for (const TaskItem &task : tasks) {
+                if (task.kind == TaskKind::CheckUpdate && (task.state == TaskState::Succeeded || task.state == TaskState::Failed)) {
+                    return true;
+                }
+            }
+            return false;
+        }());
+        QCOMPARE(controller.updatesModel()->rowCount(), 0);
+        const int before = controller.taskQueue()->tasks().size();
+        controller.updateAll(false);
+        QCOMPARE(controller.taskQueue()->tasks().size(), before);
+        QVERIFY(controller.updateSummary().contains(QLatin1String("No updates")));
     }
 };
 

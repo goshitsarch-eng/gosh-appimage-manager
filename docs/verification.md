@@ -1,6 +1,6 @@
 # Verification record
 
-All commands below were executed on 2026-08-28 in this worktree. Output is
+All commands below were executed on 2026-08-29 UTC in this worktree. Output is
 summarised from the real tool transcripts; nothing here is fabricated.
 
 Host: Ubuntu, `/root/projects/gosh-appimage-manager-grok`, branch
@@ -18,11 +18,12 @@ notification.
 ```
 flatpak run --filesystem=/root/projects/gosh-appimage-manager-grok --share=network \
   --devel --command=bash org.kde.Sdk//6.10 \
-  -lc 'cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build'
+  -lc 'cmake --build /root/projects/gosh-appimage-manager-grok/build'
 ```
 
-Configure succeeded (ECM 6.10, Qt 6.10.3, KF6 6.27.0 including Kirigami,
-I18n, Config, DBusAddons, Notifications). Ninja linked
+Incremental rebuild after the update-availability remediation succeeded.
+Configure remains ECM 6.10, Qt 6.10.3, KF6 6.27.0 including Kirigami, I18n,
+Config, DBusAddons, Notifications. Ninja linked
 `build/bin/gosh-appimage-manager` and the test binaries.
 
 ## 2. CTest
@@ -35,7 +36,7 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure
 
 ```
 100% tests passed, 0 tests failed out of 15
-Total Test time (real) =   6.37 sec
+Total Test time (real) =   7.32 sec
 ```
 
 Tests: `appstreamtest`, `test_elf`, `test_hash`, `test_desktop`,
@@ -65,9 +66,31 @@ Production-path coverage that these tests actually exercise:
 - URL guards reject `file:`, credentials, and private/loopback hosts
 - GitHub API host validation; advertised digest mismatch leaves the install;
   matching digest replaces and keeps arguments; FTP `allowFtp` and invalid FTP
-  config fail closed; static same ETag is not an update; zsync same SHA-1 is
-  not available; zsync changed SHA-1 is available; apply refuses `!available`;
-  update-all with zero offers enqueues nothing; update backup failure leaves bytes
+  config fail closed; static same size as installed is not an update; zsync
+  compares a bounded SHA-1 of the installed AppImage (same SHA-1 unavailable,
+  changed available); apply refuses genuine `!available`
+- **check then apply:** `listUpdates`/`check()` for static and zsync with a
+  changed remote, then `apply()`; dest bytes replace once; the next check is
+  unavailable; applying the same remote as the installed file refuses and
+  leaves bytes; CLI `--update --all --yes` after `--list-updates` replaces
+  once and a second `--update --all` does not change bytes
+- GitHub `sha256:<hex>` matches installed digest+tag+size => `!available`;
+  changed tag, digest, or size => available; empty digest does not itself
+  force available; `updateAll` does not enqueue that uuid when `!available`
+- Library `updateAvailable` role is true after `checkAll` from in-memory
+  offers (no registry write) and false after a successful apply
+- Update download reports progress in (0, 100) while a fake download is held
+  in flight; TaskQueue publishes that progress into history under mutex
+- Update-all summary counts only the task IDs created by that `updateAll`;
+  an in-flight inspect finish does not emit “1 succeeded”; a failed enqueue
+  does not leave remaining work and does not rewrite the summary when the
+  blocking mutation later succeeds
+- Autostart desktop is written to a session-visible `…/autostart/` path;
+  Exec is `flatpak run com.goshapps.AppImageManager --fetch-updates` inside
+  Flatpak/SDK and the native executable otherwise; `--fetch-updates` does
+  not modify `registry.json`
+- dest-exists unowned conflicts need KeepBoth and do not offer Replace
+- `refreshMetadata` save failure restores registry state and prior desktop bytes
 - QtNetworkClient local HTTP: size abort, timeout, cancellation; resolver
   rejects private/rebind addresses; fetch pins the validated public address so
   a later private resolve cannot write a body
@@ -123,9 +146,11 @@ kept. Screenshot metadata is present; the original PNG is
 ## 5. Native/SDK offscreen `--self-test`
 
 ```
-QT_QPA_PLATFORM=offscreen HOME=/tmp/gosh-aim-selftest-home-fix2 \
+QT_QPA_PLATFORM=offscreen HOME=/tmp/gosh-aim-selftest-home-final3 \
   build/bin/gosh-appimage-manager --self-test
 ```
+
+(run inside the SDK; the host cannot load the SDK-linked Qt libraries)
 
 Exit 0. Models and services probed, synthetic catalog row loaded, QML `Main`
 loaded with `objectName: mainWindow`. Isolated HOME.
@@ -137,6 +162,26 @@ build/bin/gosh-appimage-manager --list-update-managers
 ```
 
 Printed: `static`, `github`, `gitlab`, `codeberg`, `forgejo`, `ftp`.
+
+```
+HOME=/tmp/gosh-aim-autostart-probe3 QT_QPA_PLATFORM=offscreen \
+  build/bin/gosh-appimage-manager --probe-autostart
+```
+
+```
+autostart_path=/tmp/gosh-aim-autostart-probe3/.config/autostart/com.goshapps.AppImageManager-updates.desktop
+[Desktop Entry]
+Type=Application
+Name=Gosh AppImage Manager update checks
+Exec=flatpak run com.goshapps.AppImageManager --fetch-updates
+X-GNOME-Autostart-enabled=true
+OnlyShowIn=KDE;
+AUTOSTART_OK
+```
+
+The SDK has `/.flatpak-info`, so Exec is the Flatpak launch line. `--fetch-updates`
+against an empty catalog printed `0 update(s) available` and left
+`registry.json` SHA-256 unchanged.
 
 CTest `test_cli` captured `--list-installed --json` and `--list-updates --json`
 stdout and asserted `schema_version` 1 plus the `installed`/`updates` arrays.
@@ -154,15 +199,17 @@ Corresponding source and licenses installed under
 `/app/share/gosh-appimage-manager/`. KF6 Notifications is linked; notifyrc is
 installed at `/app/share/knotifications6/gosh-appimage-manager.notifyrc`.
 `--talk-name=org.freedesktop.Notifications` is granted.
+`--filesystem=xdg-config/autostart:create` is granted so login autostart can
+reach the session.
 
-Exported commit: `b001e77417a83e8e7ac9da3be8e0b03a4d03de26351758097823cbd6de5f924d`
-(app), debug `0cbac907b611388629fcc44c096485b55a10f309c20cf5bc3191051ee60d0b69`.
+Exported commit: `d998d28365c9dd28ce107b9d830a65dfc102f9b5ef985997ec4b3192eb689a1d`
+(app), debug `4d31ce4e4ad1c7de1c417a5342075c9ff4468762382828d2450c719c8937e1c8`.
 
 ## 8. Packaged offscreen `--self-test`
 
 ```
 flatpak-builder --run build-dir packaging/com.goshapps.AppImageManager.yml \
-  env QT_QPA_PLATFORM=offscreen HOME=/tmp/gosh-aim-flatpak-home2 \
+  env QT_QPA_PLATFORM=offscreen HOME=/tmp/gosh-aim-flatpak-home3 \
   gosh-appimage-manager --self-test
 ```
 
@@ -172,9 +219,14 @@ Exit 0.
 
 ```
 flatpak-builder --run build-dir packaging/com.goshapps.AppImageManager.yml \
-  env QT_QPA_PLATFORM=offscreen HOME=/tmp/gosh-aim-flatpak-home2 \
+  env QT_QPA_PLATFORM=offscreen HOME=/tmp/gosh-aim-flatpak-home3 \
   gosh-appimage-manager --probe-host
 ```
+
+Inside this `--run` sandbox, `HOME` is `/tmp/gosh-aim-flatpak-home3` while
+`XDG_CONFIG_HOME` / `XDG_DATA_HOME` remain
+`/root/.var/app/com.goshapps.AppImageManager/{config,data}`. KConfig therefore
+still holds the managed folder from an earlier isolated probe:
 
 ```
 host_spawn_program=flatpak-spawn
@@ -183,6 +235,9 @@ in_flatpak=true
 managed_folder=/tmp/gosh-aim-flatpak-home/AppImages
 HOST_PROBE_OK
 ```
+
+That path is leftover isolated-probe configuration under the app's sandbox
+config, not the operator's real `~/AppImages`.
 
 ## 10. Packaged synthetic inspect probe
 
@@ -197,11 +252,34 @@ INSPECT_NO_EXECUTION
 Architecture of the 256-byte stub was `unknown` (headers too small for a
 machine type). Magic and no-execution still hold.
 
-## 11. `git diff --check`
+## 11. Packaged autostart / `--fetch-updates` probe
+
+```
+flatpak-builder --run build-dir packaging/com.goshapps.AppImageManager.yml \
+  env QT_QPA_PLATFORM=offscreen HOME=/tmp/gosh-aim-flatpak-home3 \
+  gosh-appimage-manager --probe-autostart
+```
+
+```
+autostart_path=/tmp/gosh-aim-flatpak-home3/.config/autostart/com.goshapps.AppImageManager-updates.desktop
+[Desktop Entry]
+Type=Application
+Name=Gosh AppImage Manager update checks
+Exec=flatpak run com.goshapps.AppImageManager --fetch-updates
+X-GNOME-Autostart-enabled=true
+OnlyShowIn=KDE;
+AUTOSTART_OK
+```
+
+`--fetch-updates` in the same sandbox printed `0 update(s) available` and did
+not create `registry.json` under
+`/root/.var/app/com.goshapps.AppImageManager/data/gosh-appimage-manager/`.
+
+## 12. `git diff --check`
 
 No whitespace errors.
 
-## 12. Worktree
+## 13. Worktree
 
 Intended project files committed after this record. Build products (`build/`,
 `build-dir/`, `repo/`, `.flatpak-builder/`) remain gitignored.

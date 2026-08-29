@@ -81,16 +81,25 @@ AppController::AppController(QObject *parent,
         ++m_taskTick;
         Q_EMIT taskTickChanged();
     });
-    connect(m_tasks, &TaskQueue::finished, this, [this](const QString &, bool ok, const QString &) {
-        refreshLibrary();
-        if (m_updateAllRemaining > 0) {
-            --m_updateAllRemaining;
+    connect(m_tasks, &TaskQueue::finished, this, [this](const QString &id, bool ok, const QString &) {
+        if (ok) {
+            const QString uuid = m_updateTaskIds.key(id);
+            if (!uuid.isEmpty()) {
+                dropOffer(uuid);
+            } else {
+                refreshLibrary();
+            }
+        } else {
+            refreshLibrary();
+        }
+        if (m_updateAllIds.contains(id)) {
+            m_updateAllIds.remove(id);
             if (ok) {
                 ++m_updateAllSucceeded;
             } else {
                 ++m_updateAllFailed;
             }
-            if (m_updateAllRemaining == 0) {
+            if (m_updateAllIds.isEmpty()) {
                 m_updateSummary = tr("Update-all finished: %1 succeeded, %2 failed")
                                       .arg(m_updateAllSucceeded)
                                       .arg(m_updateAllFailed);
@@ -161,8 +170,8 @@ void AppController::syncBackgroundChecks()
     } else {
         m_backgroundTimer->stop();
     }
-    const QString autostartDir = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + QStringLiteral("/autostart");
-    const QString desktopPath = autostartDir + QStringLiteral("/com.goshapps.AppImageManager-updates.desktop");
+    const QString autostartDir = autostartDirectory();
+    const QString desktopPath = autostartDesktopPath();
     if (enabled) {
         QDir().mkpath(autostartDir);
         QString execLine;
@@ -265,6 +274,7 @@ void AppController::refreshLibrary()
     QVector<InstalledApp> apps = m_library->discover();
     for (InstalledApp &app : apps) {
         app.running = m_launch->isRunning(app);
+        app.updateAvailable = m_availableUpdateUuids.contains(app.uuid);
     }
     m_libraryModel->setApps(apps);
     m_libraryModel->setFilter(m_search);
@@ -553,7 +563,7 @@ void AppController::checkUpdate(const QString &uuid)
                     if (!self) {
                         return;
                     }
-                    self->m_updatesModel->setOffers(offers);
+                    self->syncOffers(offers);
                 },
                 Qt::QueuedConnection);
         },
@@ -579,7 +589,7 @@ void AppController::checkAll()
                     if (!self) {
                         return;
                     }
-                    self->m_updatesModel->setOffers(offers);
+                    self->syncOffers(offers);
                     self->notifyUpdates(offers.size());
                 },
                 Qt::QueuedConnection);
@@ -589,9 +599,14 @@ void AppController::checkAll()
 
 void AppController::updateApp(const QString &uuid, bool force)
 {
+    enqueueUpdate(uuid, force);
+}
+
+QString AppController::enqueueUpdate(const QString &uuid, bool force)
+{
     const InstalledApp app = m_registry->byUuid(uuid);
     if (app.uuid.isEmpty()) {
-        return;
+        return {};
     }
     QPointer<AppController> self(this);
     const QString id = m_tasks->enqueue(
@@ -602,7 +617,12 @@ void AppController::updateApp(const QString &uuid, bool force)
             if (!self) {
                 return;
             }
-            const IntegrateResult result = self->m_updates->apply(app, force, cancel);
+            const IntegrateResult result = self->m_updates->apply(app, force, cancel, [&](int percent, const QString &status) {
+                if (!self) {
+                    return;
+                }
+                self->m_tasks->setProgress(task.id, percent, status);
+            });
             if (!result.ok) {
                 task.error = result.error;
                 task.retryable = true;
@@ -614,23 +634,26 @@ void AppController::updateApp(const QString &uuid, bool force)
         ++m_taskTick;
         Q_EMIT taskTickChanged();
     }
+    return id;
 }
 
 void AppController::updateAll(bool force)
 {
     m_updateAllSucceeded = 0;
     m_updateAllFailed = 0;
-    m_updateAllRemaining = 0;
+    m_updateAllIds.clear();
     const int count = m_updatesModel ? m_updatesModel->rowCount() : 0;
     for (int i = 0; i < count; ++i) {
         const UpdateOffer offer = m_updatesModel->at(i);
         if (offer.uuid.isEmpty()) {
             continue;
         }
-        ++m_updateAllRemaining;
-        updateApp(offer.uuid, force);
+        const QString id = enqueueUpdate(offer.uuid, force);
+        if (!id.isEmpty()) {
+            m_updateAllIds.insert(id);
+        }
     }
-    if (m_updateAllRemaining == 0) {
+    if (m_updateAllIds.isEmpty()) {
         m_updateSummary = tr("No updates are currently offered");
         Q_EMIT updateSummaryChanged();
     }
@@ -687,8 +710,10 @@ void AppController::refreshMetadata(const QString &uuid)
             }
             updated.version = inspection.metadata.version;
             updated.comment = inspection.metadata.comment;
-            self->m_registry->upsert(updated);
-            self->m_registry->save();
+            QString error;
+            if (!self->persistAppEdits(updated, &error)) {
+                task.error = error.isEmpty() ? QStringLiteral("Metadata refresh failed") : error;
+            }
         },
         true);
 }
@@ -923,6 +948,50 @@ QString AppController::updateStatus(const QString &uuid) const
         return item.error;
     }
     return item.statusText;
+}
+
+QString AppController::autostartDirectory() const
+{
+    if (QFile::exists(QStringLiteral("/.flatpak-info"))
+        || qEnvironmentVariable("FLATPAK_ID") == QLatin1String("com.goshapps.AppImageManager")) {
+        return QDir::homePath() + QStringLiteral("/.config/autostart");
+    }
+    return QStandardPaths::writableLocation(QStandardPaths::ConfigLocation) + QStringLiteral("/autostart");
+}
+
+QString AppController::autostartDesktopPath() const
+{
+    return autostartDirectory() + QStringLiteral("/com.goshapps.AppImageManager-updates.desktop");
+}
+
+void AppController::syncOffers(const QVector<UpdateOffer> &offers)
+{
+    m_availableUpdateUuids.clear();
+    for (const UpdateOffer &offer : offers) {
+        if (!offer.uuid.isEmpty()) {
+            m_availableUpdateUuids.insert(offer.uuid);
+        }
+    }
+    if (m_updatesModel) {
+        m_updatesModel->setOffers(offers);
+    }
+    refreshLibrary();
+}
+
+void AppController::dropOffer(const QString &uuid)
+{
+    m_availableUpdateUuids.remove(uuid);
+    if (m_updatesModel) {
+        QVector<UpdateOffer> remain;
+        for (int i = 0; i < m_updatesModel->rowCount(); ++i) {
+            const UpdateOffer offer = m_updatesModel->at(i);
+            if (offer.uuid != uuid) {
+                remain.append(offer);
+            }
+        }
+        m_updatesModel->setOffers(remain);
+    }
+    refreshLibrary();
 }
 
 InspectionResult AppController::pendingCandidate(int row) const

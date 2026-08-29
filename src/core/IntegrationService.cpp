@@ -82,6 +82,7 @@ void IntegrationService::annotatePlan(InspectionResult *inspection, CopyMode cop
         inspection->conflictingName = existing.name;
         inspection->conflictStatus = QStringLiteral("already-managed");
         inspection->needsConflictDecision = existing.owned;
+        inspection->canReplace = existing.owned && !existing.uuid.isEmpty();
         if (existing.owned) {
             inspection->plannedTarget = existing.managedPath;
         }
@@ -94,6 +95,7 @@ void IntegrationService::annotatePlan(InspectionResult *inspection, CopyMode cop
         inspection->conflictingName = byPath.name.isEmpty() ? QFileInfo(inspection->plannedTarget).fileName() : byPath.name;
         inspection->conflictStatus = byPath.owned ? QStringLiteral("owned-dest") : QStringLiteral("dest-exists");
         inspection->needsConflictDecision = true;
+        inspection->canReplace = byPath.owned && !byPath.uuid.isEmpty();
     }
 }
 
