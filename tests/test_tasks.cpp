@@ -54,6 +54,39 @@ private Q_SLOTS:
         delete queue;
         QVERIFY(!guard.sawLiveDestruction());
     }
+    void cancelQueuedDoesNotCancelRunning()
+    {
+        QtWarnGuard guard;
+        TaskQueue queue;
+        std::atomic<bool> aStarted{false};
+        std::atomic<bool> aFinished{false};
+        std::atomic<bool> proceed{false};
+        const QString a = queue.enqueue(TaskKind::Inspect, QStringLiteral("A"), QStringLiteral("/tmp/a"),
+                                        [&](TaskItem &task, std::atomic<bool> *cancel) {
+                                            aStarted.store(true);
+                                            while (!proceed.load() && !cancel->load()) {
+                                                QThread::msleep(5);
+                                            }
+                                            if (!cancel->load()) {
+                                                task.statusText = QStringLiteral("done");
+                                            }
+                                            aFinished.store(true);
+                                        },
+                                        false);
+        QTRY_VERIFY(aStarted.load());
+        const QString b = queue.enqueue(TaskKind::Inspect, QStringLiteral("B"), QStringLiteral("/tmp/b"),
+                                        [&](TaskItem &, std::atomic<bool> *) {}, false);
+        QVERIFY(!b.isEmpty());
+        queue.cancel(b);
+        QVERIFY(aStarted.load());
+        QCOMPARE(queue.task(a).state, TaskState::Running);
+        proceed.store(true);
+        QTRY_VERIFY(aFinished.load());
+        QTRY_COMPARE(queue.task(a).state, TaskState::Succeeded);
+        QTRY_COMPARE(queue.task(b).state, TaskState::Cancelled);
+        queue.shutdown();
+        QVERIFY(!guard.sawLiveDestruction());
+    }
 };
 
 QTEST_GUILESS_MAIN(TestTasks)

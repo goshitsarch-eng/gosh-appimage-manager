@@ -50,6 +50,7 @@ private:
     std::atomic<bool> m_stop{false};
     std::atomic<bool> m_busy{false};
     std::atomic<bool> *m_currentCancel = nullptr;
+    QString m_currentId;
     QString m_currentTarget;
     int m_seq = 0;
 };

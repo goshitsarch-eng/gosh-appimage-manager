@@ -7,3 +7,4 @@ install(FILES icons/hicolor/symbolic/apps/com.goshapps.AppImageManager-symbolic.
 install(FILES screenshots/library.png DESTINATION ${KDE_INSTALL_DATADIR}/gosh-appimage-manager/screenshots)
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/third_party/licenses DESTINATION ${KDE_INSTALL_DATADIR}/gosh-appimage-manager)
 install(FILES ${CMAKE_SOURCE_DIR}/third_party/NOTICE DESTINATION ${KDE_INSTALL_DATADIR}/gosh-appimage-manager)
+install(FILES gosh-appimage-manager.notifyrc DESTINATION ${KDE_INSTALL_KNOTIFYRCDIR})

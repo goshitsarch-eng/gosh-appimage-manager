@@ -9,6 +9,7 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -283,6 +284,99 @@ private Q_SLOTS:
         fake.metadata.name = QStringLiteral("Demo");
         const QString name = m_service->chooseDestinationName(fake, false);
         QVERIFY(name.endsWith(QLatin1String(".AppImage")));
+    }
+    bool noGoshTempsAnywhere() const
+    {
+        const QStringList roots = {m_settings->managedFolder(), m_settings->applicationsDir(), m_settings->dataDir()};
+        for (const QString &root : roots) {
+            QDir dir(root);
+            const QFileInfoList entries = dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
+            for (const QFileInfo &info : entries) {
+                if (info.fileName().contains(QLatin1String(".gosh-"))) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    void newIntegrationRegistrySaveFailureCleansArtifacts()
+    {
+        m_registry->failSave = true;
+        const QString src = TestFixt::writeFile(m_home.path(), QStringLiteral("NewFail.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2));
+        IntegrateRequest req;
+        req.sourcePath = src;
+        req.conflict = ConflictPolicy::KeepBoth;
+        const IntegrateResult result = m_service->integrate(req);
+        m_registry->failSave = false;
+        QVERIFY(!result.ok);
+        QVERIFY(!result.app.managedPath.isEmpty());
+        QVERIFY(!QFile::exists(result.app.managedPath));
+        QVERIFY(result.app.desktopPath.isEmpty() || !QFile::exists(result.app.desktopPath));
+        QVERIFY(result.app.iconPath.isEmpty() || !QFile::exists(result.app.iconPath));
+        QVERIFY(m_registry->apps().isEmpty() || m_registry->byUuid(result.app.uuid).uuid.isEmpty());
+        QVERIFY(noGoshTempsAnywhere());
+        QVERIFY(QFile::exists(src));
+    }
+    void newIntegrationPartialDesktopInstallCleans()
+    {
+        class PartialDesktop : public FailingDesktop
+        {
+        public:
+            using FailingDesktop::FailingDesktop;
+            bool install(const InstalledApp &app, const QString &stagedDesktop, const QString &stagedIcon, QString *error) override
+            {
+                Q_UNUSED(stagedDesktop);
+                if (!stagedIcon.isEmpty() && QFile::exists(stagedIcon)) {
+                    QDir().mkpath(QFileInfo(app.iconPath).absolutePath());
+                    QFile::rename(stagedIcon, app.iconPath);
+                }
+                if (error) {
+                    *error = QStringLiteral("Forced partial icon install");
+                }
+                return false;
+            }
+        };
+        PartialDesktop partial(m_settings, &m_runner);
+        IntegrationService service(m_settings, m_registry, m_inspector, &partial, &m_runner);
+        const QString iconSrc = TestFixt::writeFile(m_home.path(), QStringLiteral("icon.png"), QByteArray(16, 'I'));
+        Q_UNUSED(iconSrc);
+        const QString src = TestFixt::writeFile(m_home.path(), QStringLiteral("Partial.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2));
+        IntegrateRequest req;
+        req.sourcePath = src;
+        req.conflict = ConflictPolicy::KeepBoth;
+        const IntegrateResult result = service.integrate(req);
+        QVERIFY(!result.ok);
+        QVERIFY(result.app.managedPath.isEmpty() || !QFile::exists(result.app.managedPath));
+        QVERIFY(result.app.desktopPath.isEmpty() || !QFile::exists(result.app.desktopPath));
+        QVERIFY(result.app.iconPath.isEmpty() || !QFile::exists(result.app.iconPath));
+        QVERIFY(noGoshTempsAnywhere());
+    }
+    void backupCreationFailureIsFailClosed()
+    {
+        const QByteArray original = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(16, 'Z'));
+        const QString src1 = TestFixt::writeFile(m_home.path(), QStringLiteral("Bak.AppImage"), original);
+        IntegrateRequest req;
+        req.sourcePath = src1;
+        req.conflict = ConflictPolicy::KeepBoth;
+        const IntegrateResult first = m_service->integrate(req);
+        QVERIFY(first.ok);
+        const QByteArray before = fileBytes(first.app.managedPath);
+        const QByteArray desktopBefore = fileBytes(first.app.desktopPath);
+        m_service->setFailPoint(IntegrateFailPoint::BackupCreate);
+        const QByteArray replacement = TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(24, 'Y'));
+        const QString src2 = TestFixt::writeFile(m_home.path(), QStringLiteral("BakNew.AppImage"), replacement);
+        IntegrateRequest replace;
+        replace.sourcePath = src2;
+        replace.conflict = ConflictPolicy::Replace;
+        replace.replaceUuid = first.app.uuid;
+        const IntegrateResult result = m_service->integrate(replace);
+        m_service->setFailPoint(IntegrateFailPoint::None);
+        QVERIFY(!result.ok);
+        QVERIFY(result.error.contains(QLatin1String("backup")));
+        QCOMPARE(fileBytes(first.app.managedPath), before);
+        QCOMPARE(fileBytes(first.app.desktopPath), desktopBefore);
+        QVERIFY(QFile::exists(src2));
+        QVERIFY(noOrphans());
     }
 };
 

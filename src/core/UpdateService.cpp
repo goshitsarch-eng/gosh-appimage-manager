@@ -75,8 +75,8 @@ UpdateCheckResult UpdateService::check(const InstalledApp &app, std::atomic<bool
     UpdateCheckResult result = source->check(copy, m_network, cancel);
     if (result.ok && m_checkState) {
         QVariantMap state;
-        state.insert(QStringLiteral("etag"), result.digest);
-        state.insert(QStringLiteral("last_modified"), result.version);
+        state.insert(QStringLiteral("etag"), result.etag);
+        state.insert(QStringLiteral("last_modified"), result.lastModified);
         state.insert(QStringLiteral("size"), result.size);
         state.insert(QStringLiteral("version"), result.version);
         state.insert(QStringLiteral("digest"), result.digest);
@@ -168,7 +168,7 @@ IntegrateResult UpdateService::apply(const InstalledApp &app, bool force, std::a
         return result;
     }
     const UpdateCheckResult checked = check(app, cancel);
-    if (!checked.ok || checked.url.isEmpty()) {
+    if (!checked.ok || !checked.available || checked.url.isEmpty()) {
         result.error = checked.error.isEmpty() ? QStringLiteral("No update available") : checked.error;
         return result;
     }
@@ -222,9 +222,13 @@ IntegrateResult UpdateService::apply(const InstalledApp &app, bool force, std::a
     qint64 copied = 0;
     QStringList temps{staging};
     if (QFile::exists(app.managedPath)
-        && !SafeFs::copyBounded(app.managedPath, rollback, m_settings->maxAppImageBytes(), cancel, &copied, &copyError)) {
+        && (m_failPoint == UpdateFailPoint::BackupCreate
+            || !SafeFs::copyBounded(app.managedPath, rollback, m_settings->maxAppImageBytes(), cancel, &copied, &copyError))) {
         SafeFs::removeFileNoFollow(staging);
-        result.error = copyError;
+        SafeFs::removeFileNoFollow(rollback);
+        result.error = m_failPoint == UpdateFailPoint::BackupCreate
+            ? QStringLiteral("Forced backup creation failure")
+            : copyError;
         return result;
     }
     if (QFile::exists(rollback)) {
@@ -235,20 +239,32 @@ IntegrateResult UpdateService::apply(const InstalledApp &app, bool force, std::a
     if (QFile::exists(app.desktopPath)) {
         desktopBackup = SafeFs::siblingTemp(app.desktopPath, QStringLiteral(".gosh-desk-bak-"));
         qint64 n = 0;
-        if (SafeFs::copyBounded(app.desktopPath, desktopBackup, kMaxDesktopFileBytes, cancel, &n, &copyError)) {
-            temps.append(desktopBackup);
-        } else {
-            desktopBackup.clear();
+        if (m_failPoint == UpdateFailPoint::BackupCreate
+            || !SafeFs::copyBounded(app.desktopPath, desktopBackup, kMaxDesktopFileBytes, cancel, &n, &copyError)) {
+            SafeFs::removeFileNoFollow(staging);
+            SafeFs::removeFileNoFollow(rollback);
+            SafeFs::removeFileNoFollow(desktopBackup);
+            result.error = m_failPoint == UpdateFailPoint::BackupCreate
+                ? QStringLiteral("Forced backup creation failure")
+                : (copyError.isEmpty() ? QStringLiteral("Cannot create desktop backup") : copyError);
+            return result;
         }
+        temps.append(desktopBackup);
     }
     if (!app.iconPath.isEmpty() && QFile::exists(app.iconPath)) {
         iconBackup = SafeFs::siblingTemp(app.iconPath, QStringLiteral(".gosh-icon-bak-"));
         qint64 n = 0;
-        if (SafeFs::copyBounded(app.iconPath, iconBackup, kMaxIconBytes, cancel, &n, &copyError)) {
-            temps.append(iconBackup);
-        } else {
-            iconBackup.clear();
+        if (m_failPoint == UpdateFailPoint::BackupCreate
+            || !SafeFs::copyBounded(app.iconPath, iconBackup, kMaxIconBytes, cancel, &n, &copyError)) {
+            SafeFs::removeFileNoFollow(staging);
+            SafeFs::removeFileNoFollow(rollback);
+            SafeFs::removeFileNoFollow(iconBackup);
+            result.error = m_failPoint == UpdateFailPoint::BackupCreate
+                ? QStringLiteral("Forced backup creation failure")
+                : (copyError.isEmpty() ? QStringLiteral("Cannot create icon backup") : copyError);
+            return result;
         }
+        temps.append(iconBackup);
     }
     const QVector<InstalledApp> registrySnap = m_registry->snapshot();
 
@@ -346,14 +362,38 @@ bool UpdateService::setSource(InstalledApp app, const QString &manager, const QV
     if (!source->validateConfig(config, error)) {
         return false;
     }
+    const QVector<InstalledApp> snap = m_registry->snapshot();
+    QByteArray desktopBytes;
+    if (!app.desktopPath.isEmpty() && QFile::exists(app.desktopPath)) {
+        QFile file(app.desktopPath);
+        if (file.open(QIODevice::ReadOnly)) {
+            desktopBytes = file.read(kMaxDesktopFileBytes);
+        }
+    }
     app.updateManager = source->name();
     app.updateConfig = config;
     m_registry->upsert(app);
-    return m_registry->save(error);
+    if (!m_registry->save(error)) {
+        m_registry->restoreApps(snap);
+        m_registry->save();
+        if (!desktopBytes.isEmpty()) {
+            SafeFs::atomicWrite(app.desktopPath, desktopBytes, nullptr, 0644);
+        }
+        return false;
+    }
+    return true;
 }
 
 bool UpdateService::unsetSource(InstalledApp app, QString *error)
 {
+    const QVector<InstalledApp> snap = m_registry->snapshot();
+    QByteArray desktopBytes;
+    if (!app.desktopPath.isEmpty() && QFile::exists(app.desktopPath)) {
+        QFile file(app.desktopPath);
+        if (file.open(QIODevice::ReadOnly)) {
+            desktopBytes = file.read(kMaxDesktopFileBytes);
+        }
+    }
     app.updateManager.clear();
     app.updateConfig.clear();
     app.updateAvailable = false;
@@ -362,7 +402,15 @@ bool UpdateService::unsetSource(InstalledApp app, QString *error)
         m_checkState->clear(app.uuid);
         m_checkState->save();
     }
-    return m_registry->save(error);
+    if (!m_registry->save(error)) {
+        m_registry->restoreApps(snap);
+        m_registry->save();
+        if (!desktopBytes.isEmpty()) {
+            SafeFs::atomicWrite(app.desktopPath, desktopBytes, nullptr, 0644);
+        }
+        return false;
+    }
+    return true;
 }
 
 } // namespace GoshAim

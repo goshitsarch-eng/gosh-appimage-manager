@@ -19,7 +19,7 @@ include(CTest)
 include(FeatureSummary)
 
 find_package(Qt6 6.10 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Widgets Network Svg Test)
-find_package(KF6 REQUIRED COMPONENTS Kirigami I18n CoreAddons Config IconThemes QQC2DesktopStyle DBusAddons)
+find_package(KF6 REQUIRED COMPONENTS Kirigami I18n CoreAddons Config IconThemes QQC2DesktopStyle DBusAddons Notifications)
 
 ecm_find_qmlmodule(org.kde.kirigami REQUIRED)
 

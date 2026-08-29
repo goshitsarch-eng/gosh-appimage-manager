@@ -52,6 +52,17 @@ Kirigami.ScrollablePage {
                         Controls.Label { text: i18n("%1 → %2 · %3", model.currentVersion, model.availableVersion, model.manager) }
                         Controls.Label { text: i18n("Running — update blocked"); visible: model.running }
                         Controls.Label { text: i18n("Reduced verification"); visible: model.reducedVerification }
+                        Controls.Label {
+                            visible: Store.updateTaskId(model.uuid).length > 0
+                            text: Store.taskTick >= 0 ? Store.updateStatus(model.uuid) : ""
+                        }
+                        Controls.ProgressBar {
+                            visible: Store.updateTaskId(model.uuid).length > 0
+                            from: 0
+                            to: 100
+                            value: Store.taskTick >= 0 ? Store.updateProgress(model.uuid) : 0
+                            Layout.fillWidth: true
+                        }
                     }
                     Controls.Button {
                         text: i18n("Update")
@@ -61,7 +72,8 @@ Kirigami.ScrollablePage {
                     Controls.Button {
                         text: i18n("Cancel")
                         Accessible.name: i18n("Cancel update for %1", model.name)
-                        onClicked: Store.cancelTask("")
+                        enabled: Store.updateTaskId(model.uuid).length > 0
+                        onClicked: Store.cancelTask(Store.updateTaskId(model.uuid))
                     }
                 }
             }

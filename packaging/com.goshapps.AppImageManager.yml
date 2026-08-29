@@ -11,6 +11,7 @@ finish-args:
   - --share=network
   - --talk-name=org.freedesktop.Flatpak
   - --talk-name=org.freedesktop.portal.Desktop
+  - --talk-name=org.freedesktop.Notifications
   - --own-name=com.goshapps.AppImageManager
   - --filesystem=~/AppImages:create
   - --filesystem=~/.local/share/applications:create

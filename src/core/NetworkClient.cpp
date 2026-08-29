@@ -2,9 +2,12 @@
 
 #include "SafeFs.h"
 
+#include <QAbstractSocket>
 #include <QEventLoop>
 #include <QFile>
+#include <QHostAddress>
 #include <QNetworkAccessManager>
+#include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QTimer>
 #include <sys/stat.h>
@@ -17,6 +20,42 @@ namespace {
 bool isDowngrade(const QUrl &from, const QUrl &to)
 {
     return from.scheme().toLower() == QLatin1String("https") && to.scheme().toLower() != QLatin1String("https");
+}
+
+QHostAddress pickPinnedAddress(const QList<QHostAddress> &addresses, bool allowPrivate)
+{
+    for (const QHostAddress &address : addresses) {
+        if (address.isNull()) {
+            continue;
+        }
+        if (!UrlGuard::isDisallowedAddress(address) || allowPrivate) {
+            return address;
+        }
+    }
+    return {};
+}
+
+QUrl pinToAddress(const QUrl &url, const QHostAddress &address)
+{
+    QUrl pinned = url;
+    if (address.protocol() == QAbstractSocket::IPv6Protocol) {
+        pinned.setHost(address.toString());
+    } else {
+        pinned.setHost(QHostAddress(address.toIPv4Address()).toString());
+    }
+    return pinned;
+}
+
+QByteArray hostHeaderValue(const QUrl &url)
+{
+    const QString host = url.host();
+    const int port = url.port();
+    const QString scheme = url.scheme().toLower();
+    const int implied = scheme == QLatin1String("https") ? 443 : (scheme == QLatin1String("http") ? 80 : -1);
+    if (port == -1 || port == implied) {
+        return host.toUtf8();
+    }
+    return (host + QLatin1Char(':') + QString::number(port)).toUtf8();
 }
 
 } // namespace
@@ -42,18 +81,41 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
     }
 
     QNetworkAccessManager manager;
-    QUrl current = request.url;
+    QUrl logical = request.url;
     int redirects = 0;
     while (true) {
         if (cancel && cancel->load()) {
             result.cancelled = true;
             result.error = QStringLiteral("Cancelled");
+            if (!request.destinationPath.isEmpty()) {
+                QFile::remove(request.destinationPath);
+            }
             return result;
         }
-        QNetworkRequest req(current);
+        UrlCheck hop = UrlGuard::validateResolved(logical, resolver, request.allowHttp, request.allowPrivate, request.allowFtp);
+        if (!hop.ok) {
+            result.error = hop.error;
+            if (!request.destinationPath.isEmpty()) {
+                QFile::remove(request.destinationPath);
+            }
+            return result;
+        }
+        const QHostAddress pinned = pickPinnedAddress(hop.resolved, request.allowPrivate);
+        if (pinned.isNull()) {
+            result.error = QStringLiteral("Resolved address is private, loopback, link-local, multicast or unspecified");
+            if (!request.destinationPath.isEmpty()) {
+                QFile::remove(request.destinationPath);
+            }
+            return result;
+        }
+
+        const QUrl connectUrl = pinToAddress(logical, pinned);
+        QNetworkRequest req(connectUrl);
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
         req.setMaximumRedirectsAllowed(0);
         req.setTransferTimeout(request.timeoutMs);
+        req.setRawHeader("Host", hostHeaderValue(logical));
+        req.setPeerVerifyName(logical.host());
         if (!request.accept.isEmpty()) {
             req.setRawHeader("Accept", request.accept.toUtf8());
         }
@@ -68,29 +130,92 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
             reply->abort();
             loop.quit();
         });
-        QFile outFile;
+
+        QByteArray held;
         qint64 written = 0;
+        bool truncated = false;
+        bool peerReady = logical.scheme().toLower() != QLatin1String("https");
+        bool streaming = false;
+        bool isRedirect = false;
+        QFile outFile;
         bool destOpen = false;
-        if (!request.destinationPath.isEmpty()) {
-            outFile.setFileName(request.destinationPath);
-            if (!outFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                reply->abort();
-                reply->deleteLater();
-                result.error = QStringLiteral("Cannot open download destination");
-                return result;
+
+        auto abortWrite = [&]() {
+            if (destOpen) {
+                outFile.close();
+                QFile::remove(request.destinationPath);
+                destOpen = false;
             }
-            destOpen = true;
-            ::fchmod(outFile.handle(), 0600);
-        }
+            held.clear();
+        };
+
+        auto beginStreaming = [&]() -> bool {
+            if (streaming || isRedirect) {
+                return true;
+            }
+            if (!peerReady && logical.scheme().toLower() == QLatin1String("https")) {
+                return true;
+            }
+            streaming = true;
+            if (!request.destinationPath.isEmpty() && !destOpen) {
+                outFile.setFileName(request.destinationPath);
+                if (!outFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                    result.error = QStringLiteral("Cannot open download destination");
+                    reply->abort();
+                    return false;
+                }
+                destOpen = true;
+                ::fchmod(outFile.handle(), 0600);
+            }
+            if (!held.isEmpty()) {
+                written += held.size();
+                if (written > request.maxBytes) {
+                    truncated = true;
+                    reply->abort();
+                    return false;
+                }
+                if (destOpen) {
+                    outFile.write(held);
+                } else {
+                    result.body += held;
+                }
+                held.clear();
+            }
+            return true;
+        };
+
+        QObject::connect(reply, &QNetworkReply::encrypted, &loop, [&]() {
+            peerReady = true;
+            if (!isRedirect) {
+                beginStreaming();
+            }
+        });
+        QObject::connect(reply, &QNetworkReply::metaDataChanged, &loop, [&]() {
+            const QVariant redir = reply->attribute(QNetworkRequest::RedirectionTargetAttribute);
+            if (redir.isValid()) {
+                isRedirect = true;
+                held.clear();
+                return;
+            }
+            beginStreaming();
+        });
         QObject::connect(reply, &QNetworkReply::readyRead, &loop, [&]() {
             if (cancel && cancel->load()) {
                 reply->abort();
                 return;
             }
             const QByteArray chunk = reply->readAll();
+            if (!peerReady || isRedirect || !streaming) {
+                held += chunk;
+                if (held.size() > request.maxBytes) {
+                    truncated = true;
+                    reply->abort();
+                }
+                return;
+            }
             written += chunk.size();
             if (written > request.maxBytes) {
-                result.truncated = true;
+                truncated = true;
                 reply->abort();
                 return;
             }
@@ -105,10 +230,7 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
         if (cancel && cancel->load()) {
             result.cancelled = true;
             result.error = QStringLiteral("Cancelled");
-            if (destOpen) {
-                outFile.close();
-                QFile::remove(request.destinationPath);
-            }
+            abortWrite();
             reply->deleteLater();
             return result;
         }
@@ -116,68 +238,52 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
         result.etag = QString::fromUtf8(reply->rawHeader("ETag"));
         result.lastModified = QString::fromUtf8(reply->rawHeader("Last-Modified"));
         result.contentLength = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
-        result.finalUrl = reply->url();
+        result.finalUrl = logical;
         const QVariant redir = reply->attribute(QNetworkRequest::RedirectionTargetAttribute);
-        if (result.truncated) {
+        if (truncated) {
+            result.truncated = true;
             result.error = QStringLiteral("Download exceeded size bound");
-            if (destOpen) {
-                outFile.close();
-                QFile::remove(request.destinationPath);
-            }
+            abortWrite();
             reply->deleteLater();
             return result;
         }
         if (redir.isValid()) {
-            const QUrl next = current.resolved(redir.toUrl());
-            if (isDowngrade(current, next)) {
+            const QUrl next = logical.resolved(redir.toUrl());
+            if (isDowngrade(logical, next)) {
                 result.error = QStringLiteral("HTTPS to HTTP downgrade rejected");
+                abortWrite();
                 reply->deleteLater();
-                if (destOpen) {
-                    outFile.close();
-                    QFile::remove(request.destinationPath);
-                }
                 return result;
             }
             UrlCheck nextCheck = UrlGuard::validateResolved(next, resolver, request.allowHttp, request.allowPrivate, request.allowFtp);
             if (!nextCheck.ok) {
                 result.error = nextCheck.error;
+                abortWrite();
                 reply->deleteLater();
-                if (destOpen) {
-                    outFile.close();
-                    QFile::remove(request.destinationPath);
-                }
                 return result;
             }
             if (++redirects > request.maxRedirects) {
                 result.error = QStringLiteral("Too many redirects");
+                abortWrite();
                 reply->deleteLater();
-                if (destOpen) {
-                    outFile.close();
-                    QFile::remove(request.destinationPath);
-                }
                 return result;
             }
             result.redirected = true;
-            current = next;
-            if (destOpen) {
-                outFile.resize(0);
-                written = 0;
-                result.body.clear();
-            } else {
-                result.body.clear();
-                written = 0;
-            }
+            logical = next;
+            abortWrite();
+            result.body.clear();
+            written = 0;
             reply->deleteLater();
             continue;
         }
         if (reply->error() != QNetworkReply::NoError) {
             result.error = reply->errorString();
-            if (destOpen) {
-                outFile.close();
-                QFile::remove(request.destinationPath);
-            }
+            abortWrite();
             reply->deleteLater();
             return result;
+        }
+        if (!streaming) {
+            beginStreaming();
         }
         if (destOpen) {
             outFile.flush();
@@ -191,6 +297,9 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
         result.ok = result.status >= 200 && result.status < 300;
         if (!result.ok && result.error.isEmpty()) {
             result.error = QStringLiteral("HTTP status %1").arg(result.status);
+            if (!request.destinationPath.isEmpty()) {
+                QFile::remove(request.destinationPath);
+            }
         }
         return result;
     }

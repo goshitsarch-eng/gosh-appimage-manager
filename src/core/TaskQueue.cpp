@@ -86,6 +86,9 @@ QString TaskQueue::enqueue(TaskKind kind, const QString &title, const QString &t
 
 void TaskQueue::cancel(const QString &id)
 {
+    if (id.isEmpty()) {
+        return;
+    }
     QMutexLocker locker(&m_mutex);
     for (JobItem *item : m_queue) {
         if (item->task.id == id) {
@@ -97,8 +100,20 @@ void TaskQueue::cancel(const QString &id)
             }
         }
     }
-    if (m_currentCancel) {
+    if (m_currentId == id && m_currentCancel) {
         m_currentCancel->store(true);
+    }
+    for (TaskItem &hist : m_history) {
+        if (hist.id != id) {
+            continue;
+        }
+        if (hist.state == TaskState::Queued) {
+            hist.state = TaskState::Cancelled;
+            hist.statusText = QStringLiteral("Cancelled");
+        } else if (hist.state == TaskState::Running) {
+            hist.state = TaskState::Cancelling;
+            hist.statusText = QStringLiteral("Cancelling");
+        }
     }
 }
 
@@ -153,6 +168,7 @@ void TaskQueue::workerLoop()
             item = m_queue.takeFirst();
             m_busy.store(true);
             m_currentCancel = item->cancel;
+            m_currentId = item->task.id;
             m_currentTarget = item->task.target;
             item->task.state = TaskState::Running;
             item->task.statusText = QStringLiteral("Running");
@@ -183,6 +199,7 @@ void TaskQueue::workerLoop()
             }
             m_busy.store(false);
             m_currentCancel = nullptr;
+            m_currentId.clear();
             m_currentTarget.clear();
         }
         const bool ok = item->task.state == TaskState::Succeeded;

@@ -142,6 +142,8 @@ UpdateCheckResult StaticFileSource::check(const InstalledApp &app, NetworkClient
                 result.version = line.mid(10).trimmed();
             }
         }
+        result.etag = body.etag;
+        result.lastModified = body.lastModified;
         if (result.url.isEmpty()) {
             result.url = url;
             result.url.chop(6);
@@ -150,7 +152,21 @@ UpdateCheckResult StaticFileSource::check(const InstalledApp &app, NetworkClient
         if (!check.ok) {
             return fail(check.error, name());
         }
-        result.available = true;
+        const QString lastDigest = app.updateConfig.value(QStringLiteral("_last_digest")).toString();
+        const qint64 lastSize = app.updateConfig.value(QStringLiteral("_last_size")).toLongLong();
+        const QString lastUrl = app.updateConfig.value(QStringLiteral("_last_url")).toString();
+        const QString lastEtag = app.updateConfig.value(QStringLiteral("_last_etag")).toString();
+        bool changed = true;
+        if (!result.digest.isEmpty() && !lastDigest.isEmpty()) {
+            changed = result.digest != lastDigest;
+        } else if (result.size > 0 && lastSize > 0) {
+            changed = result.size != lastSize;
+        } else if (!result.url.isEmpty() && !lastUrl.isEmpty()) {
+            changed = result.url != lastUrl;
+        } else if (!result.etag.isEmpty() && !lastEtag.isEmpty()) {
+            changed = result.etag != lastEtag;
+        }
+        result.available = changed;
         return result;
     }
     NetworkRequest req;
@@ -162,7 +178,9 @@ UpdateCheckResult StaticFileSource::check(const InstalledApp &app, NetworkClient
     result.ok = head.ok;
     result.url = url;
     result.size = head.contentLength;
-    result.digest = head.etag;
+    result.etag = head.etag;
+    result.lastModified = head.lastModified;
+    result.digest.clear();
     result.reducedVerification = head.etag.isEmpty();
     result.version = head.lastModified;
     if (!head.ok) {
@@ -546,7 +564,7 @@ bool FtpSource::validateConfig(const QVariantMap &config, QString *error) const
 UpdateCheckResult FtpSource::check(const InstalledApp &app, NetworkClient *network, std::atomic<bool> *cancel)
 {
     QString error;
-    if (!validateConfig(app.updateConfig, &error) && app.updateConfig.value(QStringLiteral("url")).toString().isEmpty()) {
+    if (!validateConfig(app.updateConfig, &error)) {
         return fail(error.isEmpty() ? QStringLiteral("Invalid FTP URL") : error, name());
     }
     const QString url = app.updateConfig.value(QStringLiteral("url")).toString();
@@ -560,7 +578,8 @@ UpdateCheckResult FtpSource::check(const InstalledApp &app, NetworkClient *netwo
     result.url = url;
     result.ok = head.ok;
     result.size = head.contentLength;
-    result.digest = head.etag;
+    result.etag = head.etag;
+    result.lastModified = head.lastModified;
     result.version = head.lastModified;
     result.reducedVerification = true;
     result.error = QStringLiteral("FTP is a legacy insecure transport");

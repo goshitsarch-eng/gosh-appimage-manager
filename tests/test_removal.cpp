@@ -9,6 +9,8 @@
 #include "core/SafeFs.h"
 #include "core/SettingsStore.h"
 
+#include <QDir>
+#include <QFile>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -79,6 +81,38 @@ private Q_SLOTS:
         QVERIFY(SafeFs::isForbiddenPermanentTarget(QStringLiteral("/")));
         QVERIFY(SafeFs::isForbiddenPermanentTarget(QDir::homePath()));
         QVERIFY(!SafeFs::isForbiddenPermanentTarget(QDir::homePath() + QStringLiteral("/AppImages/Demo.AppImage")));
+    }
+    void missingExecutableReconcilesRegistryPermanent()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        SettingsStore settings(nullptr, home.path() + QStringLiteral("/cfg"));
+        settings.setManagedFolder(home.path() + QStringLiteral("/AppImages"));
+        ManagedRegistry registry(&settings);
+        FakeProcessRunner runner;
+        DesktopIntegration desktop(&settings, &runner);
+        FakeProcessTable processes;
+        RemovalService removal(&settings, &registry, &desktop, &processes, &runner);
+        InstalledApp app;
+        app.uuid = QStringLiteral("gone-perm");
+        app.owned = true;
+        app.managedPath = home.path() + QStringLiteral("/missing.AppImage");
+        app.desktopPath = settings.applicationsDir() + QStringLiteral("/gosh-appimage-gone-perm.desktop");
+        QDir().mkpath(settings.applicationsDir());
+        QFile desk(app.desktopPath);
+        QVERIFY(desk.open(QIODevice::WriteOnly));
+        desk.write("X-Gosh-AppImage-Manager=true\nX-Gosh-AppImage-Id=gone-perm\n");
+        desk.close();
+        registry.upsert(app);
+        registry.save();
+        RemovalRequest rem;
+        rem.pathOrUuid = app.uuid;
+        rem.mode = RemovalMode::Permanent;
+        QString error;
+        const bool ok = removal.remove(rem, &error);
+        QVERIFY(ok || error.contains(QLatin1String("already gone")));
+        QVERIFY(registry.byUuid(app.uuid).uuid.isEmpty());
+        QVERIFY(!QFile::exists(app.desktopPath));
     }
     void refusesUnowned()
     {

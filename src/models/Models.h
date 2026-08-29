@@ -137,7 +137,9 @@ public:
         ConflictingUuidRole,
         ConflictingNameRole,
         NeedsDecisionRole,
-        ExistingManagedRole
+        ExistingManagedRole,
+        ChosenPolicyRole,
+        ChosenReplaceUuidRole
     };
     explicit CandidateModel(QObject *parent = nullptr);
     int rowCount(const QModelIndex &parent = {}) const override;

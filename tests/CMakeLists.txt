@@ -1,6 +1,6 @@
 include(ECMAddTests)
 
-set(test_libs goshaimcore Qt6::Test Qt6::Core Qt6::Gui Qt6::Network Qt6::Widgets)
+set(test_libs goshaimcore Qt6::Test Qt6::Core Qt6::Gui Qt6::Network Qt6::Widgets Qt6::Qml Qt6::Quick)
 
 ecm_add_test(test_elf.cpp TEST_NAME test_elf LINK_LIBRARIES ${test_libs})
 ecm_add_test(test_hash.cpp TEST_NAME test_hash LINK_LIBRARIES ${test_libs})

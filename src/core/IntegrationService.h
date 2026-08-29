@@ -25,6 +25,7 @@ public:
     QString chooseDestinationName(const InspectionResult &inspection, bool omitSuffix) const;
     QString preferredDestinationName(const InspectionResult &inspection, bool omitSuffix) const;
     void annotatePlan(InspectionResult *inspection, CopyMode copyMode) const;
+    void applyConflictChoice(InspectionResult *inspection) const;
     IntegrateResult integrate(const IntegrateRequest &request, std::atomic<bool> *cancel = nullptr);
     void setFailPoint(IntegrateFailPoint point) { m_failPoint = point; }
 

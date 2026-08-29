@@ -45,8 +45,8 @@ struct DesktopAction {
     QStringList arguments;
 };
 
-enum class IntegrateFailPoint { None, AfterStage, DesktopWrite, DesktopInstall, RegistrySave, SourceDelete };
-enum class UpdateFailPoint { None, AfterDownload, AfterReplace, DesktopInstall, RegistrySave };
+enum class IntegrateFailPoint { None, AfterStage, DesktopWrite, DesktopInstall, RegistrySave, SourceDelete, BackupCreate };
+enum class UpdateFailPoint { None, AfterDownload, AfterReplace, DesktopInstall, RegistrySave, BackupCreate };
 enum class ArchiveEntryKind { File, Directory, Symlink, Device, Other };
 
 struct ArchiveEntry {
@@ -109,7 +109,7 @@ struct InspectionResult {
     QString conflictingPath;
     QString conflictingName;
     bool needsConflictDecision = false;
-    ConflictPolicy chosenPolicy = ConflictPolicy::KeepBoth;
+    ConflictPolicy chosenPolicy = ConflictPolicy::Unspecified;
     QString chosenReplaceUuid;
 };
 

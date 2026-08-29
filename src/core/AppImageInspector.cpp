@@ -414,6 +414,21 @@ bool AppImageInspector::extractUnsafe(InspectionResult &result, const QString &d
     if (extracted.exitCode != 0 || extracted.failedToStart || extracted.refused) {
         return false;
     }
+    QString tree = dest;
+    const QString nested = dest + QStringLiteral("/squashfs-root");
+    const QString sibling = QFileInfo(dest).absolutePath() + QStringLiteral("/squashfs-root");
+    if (QDir(nested).exists()) {
+        tree = nested;
+    } else if (QDir(sibling).exists()) {
+        tree = sibling;
+    }
+    QString walkError;
+    if (!ArchiveGuard::verifyExtractedTree(tree, kMaxExtractedBytes, &walkError)) {
+        result.warnings.append(walkError.isEmpty() ? QStringLiteral("Unsafe extract tree failed verification") : walkError);
+        SafeFs::removeTreeNoFollow(tree);
+        SafeFs::removeTreeNoFollow(dest);
+        return false;
+    }
     result.extractorUsed = QStringLiteral("appimage-extract");
     return true;
 }

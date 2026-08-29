@@ -4,12 +4,15 @@
 #include "FakeSeams.h"
 #include "core/ManagedRegistry.h"
 #include "core/ProcessTable.h"
+#include "core/UpdateNotifier.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QDir>
+#include <QFile>
 #include <QtTest>
 #include <fcntl.h>
 #include <unistd.h>
@@ -134,6 +137,126 @@ private Q_SLOTS:
         FakeProcessTable table;
         AppController controller(nullptr, &runner, &network, &table, true);
         QCOMPARE(runCli(controller, {QStringLiteral("--nope")}, false), int(ExitCode::Usage));
+    }
+    void secondIntegrateRequiresExplicitKeepBoth()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable table;
+        AppController controller(nullptr, &runner, &network, &table, true);
+        const QString path = TestFixt::writeFile(home.path(), QStringLiteral("Demo.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2));
+        QCOMPARE(runCli(controller, {QStringLiteral("--integrate"), path, QStringLiteral("--yes")}, false), 0);
+        const QString same = TestFixt::writeFile(home.path() + QStringLiteral("/more"), QStringLiteral("Demo.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray(4, '2')));
+        const int code = runCli(controller, {QStringLiteral("--integrate"), same, QStringLiteral("--yes")}, false);
+        QCOMPARE(code, int(ExitCode::Validation));
+        const QDir managed(controller.settings()->managedFolder());
+        const QStringList leftover = managed.entryList(QStringList{QStringLiteral("*-2.AppImage")}, QDir::Files);
+        QVERIFY(leftover.isEmpty());
+    }
+    void listUpdatesJsonSchema()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable table;
+        AppController controller(nullptr, &runner, &network, &table, true);
+        int fds[2];
+        int errfds[2];
+        QVERIFY(pipe(fds) == 0);
+        QVERIFY(pipe(errfds) == 0);
+        const int savedOut = dup(STDOUT_FILENO);
+        const int savedErr = dup(STDERR_FILENO);
+        dup2(fds[1], STDOUT_FILENO);
+        dup2(errfds[1], STDERR_FILENO);
+        const int code = runCli(controller, {QStringLiteral("--list-updates"), QStringLiteral("--json")}, false);
+        fflush(stdout);
+        fflush(stderr);
+        dup2(savedOut, STDOUT_FILENO);
+        dup2(savedErr, STDERR_FILENO);
+        close(savedOut);
+        close(savedErr);
+        close(fds[1]);
+        close(errfds[1]);
+        QByteArray captured;
+        QByteArray capturedErr;
+        char buf[4096];
+        ssize_t n;
+        while ((n = read(fds[0], buf, sizeof(buf))) > 0) {
+            captured.append(buf, int(n));
+        }
+        while ((n = read(errfds[0], buf, sizeof(buf))) > 0) {
+            capturedErr.append(buf, int(n));
+        }
+        close(fds[0]);
+        close(errfds[0]);
+        QCOMPARE(code, 0);
+        QJsonParseError parseError;
+        const QJsonDocument doc = QJsonDocument::fromJson(captured.trimmed(), &parseError);
+        QVERIFY2(doc.isObject(), captured.constData());
+        const QJsonObject root = doc.object();
+        QCOMPARE(root.value(QStringLiteral("schema_version")).toInt(), 1);
+        QVERIFY(root.contains(QStringLiteral("updates")));
+        QVERIFY(!root.contains(QStringLiteral("items")));
+        QVERIFY(root.value(QStringLiteral("updates")).isArray());
+        QVERIFY(!QString::fromUtf8(captured).contains(QString::fromUtf8(capturedErr)) || capturedErr.isEmpty());
+    }
+    void fetchUpdatesNotifiesOnceAndDoesNotMutate()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable table;
+        RecordingUpdateNotifier notifier;
+        AppController controller(nullptr, &runner, &network, &table, true, &notifier);
+        InstalledApp app;
+        app.uuid = QStringLiteral("fetch");
+        app.owned = true;
+        app.name = QStringLiteral("Demo");
+        app.managedPath = home.path() + QStringLiteral("/Demo.AppImage");
+        app.updateManager = QStringLiteral("static");
+        app.updateConfig.insert(QStringLiteral("url"), QStringLiteral("https://example.com/App.AppImage"));
+        controller.registry()->upsert(app);
+        controller.registry()->save();
+        const QByteArray before = [&]() {
+            QFile file(controller.settings()->dataDir() + QStringLiteral("/registry.json"));
+            if (!file.open(QIODevice::ReadOnly)) {
+                return QByteArray();
+            }
+            return file.readAll();
+        }();
+        FakeNetworkClient::Rule rule;
+        rule.hostContains = QStringLiteral("example.com");
+        rule.result.ok = true;
+        rule.result.status = 200;
+        rule.result.etag = QStringLiteral("\"new\"");
+        rule.result.contentLength = 99;
+        network.rules.append(rule);
+        QCOMPARE(runCli(controller, {QStringLiteral("--fetch-updates")}, false), 0);
+        QCOMPARE(notifier.calls, 1);
+        QCOMPARE(notifier.lastCount, 1);
+        QFile file(controller.settings()->dataDir() + QStringLiteral("/registry.json"));
+        QByteArray after;
+        if (file.open(QIODevice::ReadOnly)) {
+            after = file.readAll();
+        }
+        QCOMPARE(after, before);
+        QVERIFY(network.requests.isEmpty() || network.requests.last().destinationPath.isEmpty());
+    }
+    void fetchUpdatesZeroOffersDoesNotNotify()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        FakeProcessRunner runner;
+        FakeNetworkClient network;
+        FakeProcessTable table;
+        RecordingUpdateNotifier notifier;
+        AppController controller(nullptr, &runner, &network, &table, true, &notifier);
+        QCOMPARE(runCli(controller, {QStringLiteral("--fetch-updates")}, false), 0);
+        QCOMPARE(notifier.calls, 0);
     }
 };
 

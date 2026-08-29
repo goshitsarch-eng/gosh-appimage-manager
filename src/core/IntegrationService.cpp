@@ -93,7 +93,32 @@ void IntegrationService::annotatePlan(InspectionResult *inspection, CopyMode cop
         inspection->conflictingPath = inspection->plannedTarget;
         inspection->conflictingName = byPath.name.isEmpty() ? QFileInfo(inspection->plannedTarget).fileName() : byPath.name;
         inspection->conflictStatus = byPath.owned ? QStringLiteral("owned-dest") : QStringLiteral("dest-exists");
-        inspection->needsConflictDecision = byPath.owned;
+        inspection->needsConflictDecision = true;
+    }
+}
+
+void IntegrationService::applyConflictChoice(InspectionResult *inspection) const
+{
+    if (!inspection || !m_settings) {
+        return;
+    }
+    const QString destDir = m_settings->managedFolder();
+    if (inspection->chosenPolicy == ConflictPolicy::Replace) {
+        const QString uuid = inspection->chosenReplaceUuid.isEmpty() ? inspection->conflictingUuid : inspection->chosenReplaceUuid;
+        const InstalledApp existing = m_registry ? m_registry->byUuid(uuid) : InstalledApp{};
+        if (existing.owned) {
+            inspection->plannedTarget = existing.managedPath;
+            inspection->chosenReplaceUuid = existing.uuid;
+            inspection->conflictingUuid = existing.uuid;
+            inspection->conflictingPath = existing.managedPath;
+            inspection->conflictingName = existing.name;
+        }
+        return;
+    }
+    if (inspection->chosenPolicy == ConflictPolicy::KeepBoth) {
+        inspection->chosenReplaceUuid.clear();
+        inspection->plannedTarget = destDir + QLatin1Char('/')
+            + chooseDestinationName(*inspection, m_settings->terminalOmitSuffix());
     }
 }
 
@@ -267,24 +292,36 @@ IntegrateResult IntegrationService::integrate(const IntegrateRequest &request, s
     if (QFile::exists(app.desktopPath)) {
         desktopBackup = SafeFs::siblingTemp(app.desktopPath, QStringLiteral(".gosh-desk-bak-"));
         qint64 n = 0;
-        if (SafeFs::copyBounded(app.desktopPath, desktopBackup, kMaxDesktopFileBytes, cancel, &n, &copyError)) {
-            temps.append(desktopBackup);
-        } else {
-            desktopBackup.clear();
+        if (m_failPoint == IntegrateFailPoint::BackupCreate
+            || !SafeFs::copyBounded(app.desktopPath, desktopBackup, kMaxDesktopFileBytes, cancel, &n, &copyError)) {
+            result.error = m_failPoint == IntegrateFailPoint::BackupCreate
+                ? QStringLiteral("Forced backup creation failure")
+                : (copyError.isEmpty() ? QStringLiteral("Cannot create desktop backup") : copyError);
+            SafeFs::removeFileNoFollow(desktopBackup);
+            rollbackTemps(temps);
+            return result;
         }
+        temps.append(desktopBackup);
     }
     if (!app.iconPath.isEmpty() && QFile::exists(app.iconPath)) {
         iconBackup = SafeFs::siblingTemp(app.iconPath, QStringLiteral(".gosh-icon-bak-"));
         qint64 n = 0;
-        if (SafeFs::copyBounded(app.iconPath, iconBackup, kMaxIconBytes, cancel, &n, &copyError)) {
-            temps.append(iconBackup);
-        } else {
-            iconBackup.clear();
+        if (m_failPoint == IntegrateFailPoint::BackupCreate
+            || !SafeFs::copyBounded(app.iconPath, iconBackup, kMaxIconBytes, cancel, &n, &copyError)) {
+            result.error = m_failPoint == IntegrateFailPoint::BackupCreate
+                ? QStringLiteral("Forced backup creation failure")
+                : (copyError.isEmpty() ? QStringLiteral("Cannot create icon backup") : copyError);
+            SafeFs::removeFileNoFollow(iconBackup);
+            rollbackTemps(temps);
+            return result;
         }
+        temps.append(iconBackup);
     }
 
     const QVector<InstalledApp> registrySnap = m_registry->snapshot();
     const bool destWasLive = QFile::exists(destPath);
+    const bool desktopExisted = QFile::exists(app.desktopPath);
+    const bool iconExisted = !app.iconPath.isEmpty() && QFile::exists(app.iconPath);
 
     if (!SafeFs::renameOver(staging, destPath, &copyError)) {
         result.error = copyError;
@@ -301,9 +338,15 @@ IntegrateResult IntegrationService::integrate(const IntegrateRequest &request, s
         }
         if (!desktopBackup.isEmpty() && QFile::exists(desktopBackup)) {
             SafeFs::renameOver(desktopBackup, app.desktopPath);
+        } else if (!desktopExisted) {
+            SafeFs::removeFileNoFollow(app.desktopPath);
         }
         if (!iconBackup.isEmpty() && QFile::exists(iconBackup)) {
             SafeFs::renameOver(iconBackup, replacing.iconPath.isEmpty() ? app.iconPath : replacing.iconPath);
+        } else if (!iconExisted) {
+            if (!app.iconPath.isEmpty()) {
+                SafeFs::removeFileNoFollow(app.iconPath);
+            }
         }
         m_registry->restoreApps(registrySnap);
     };
@@ -313,6 +356,7 @@ IntegrateResult IntegrationService::integrate(const IntegrateRequest &request, s
         result.error = m_failPoint == IntegrateFailPoint::DesktopInstall
             ? QStringLiteral("Forced desktop install failure")
             : (copyError.isEmpty() ? QStringLiteral("Desktop integration failed") : copyError);
+        result.app = app;
         restoreLive();
         rollbackTemps(temps);
         return result;
@@ -323,6 +367,7 @@ IntegrateResult IntegrationService::integrate(const IntegrateRequest &request, s
     m_registry->upsert(app);
     if (m_failPoint == IntegrateFailPoint::RegistrySave || !m_registry->save(&copyError)) {
         result.error = m_failPoint == IntegrateFailPoint::RegistrySave ? QStringLiteral("Forced registry save failure") : copyError;
+        result.app = app;
         restoreLive();
         if (!rollbackCopy.isEmpty() && !QFile::exists(destPath) && QFile::exists(rollbackCopy)) {
             SafeFs::renameOver(rollbackCopy, destPath);

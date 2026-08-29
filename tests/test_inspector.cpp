@@ -4,6 +4,8 @@
 #include "core/ManagedRegistry.h"
 #include "core/SettingsStore.h"
 
+#include <QDir>
+#include <QFile>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -178,6 +180,52 @@ private Q_SLOTS:
         for (const auto &call : runner.calls) {
             QVERIFY(!call.second.contains(QStringLiteral("-e")));
         }
+    }
+    void unsafeExtractStillVerifiesTree()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        SettingsStore settings(nullptr, home.path() + QStringLiteral("/cfg"));
+        settings.setUnsafeExtractionFallback(true);
+        ManagedRegistry registry(&settings);
+        class PlantSymlinkRunner : public FakeProcessRunner
+        {
+        public:
+            ProcessResult run(const ProcessRequest &request, std::atomic<bool> *cancel = nullptr) override
+            {
+                ProcessResult result = FakeProcessRunner::run(request, cancel);
+                if (request.arguments.contains(QStringLiteral("--appimage-extract"))) {
+                    const QString tree = request.workingDirectory + QStringLiteral("/squashfs-root");
+                    QDir().mkpath(tree);
+                    QFile::link(QStringLiteral("/etc/passwd"), tree + QStringLiteral("/evil"));
+                }
+                return result;
+            }
+        };
+        PlantSymlinkRunner runner;
+        FakeProcessRunner::Rule unsquash;
+        unsquash.contains = QStringList{QStringLiteral("unsquashfs")};
+        unsquash.result.failedToStart = true;
+        runner.rules.append(unsquash);
+        FakeProcessRunner::Rule seven;
+        seven.contains = QStringList{QStringLiteral("7zz")};
+        seven.result.failedToStart = true;
+        runner.rules.append(seven);
+        AppImageInspector inspector(&runner, &settings, &registry);
+        const QString path = TestFixt::writeFile(home.path(), QStringLiteral("Demo.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2));
+        InspectOptions options;
+        options.allowUnsafeExtract = true;
+        options.confirmUnsafeExtract = true;
+        const InspectionResult result = inspector.inspect(path, options);
+        QVERIFY(!result.extractionUsedUnsafeFallback);
+        bool sawExtract = false;
+        for (const auto &call : runner.calls) {
+            if (call.second.contains(QStringLiteral("--appimage-extract"))) {
+                sawExtract = true;
+            }
+        }
+        QVERIFY(sawExtract);
+        QVERIFY(!result.warnings.isEmpty());
     }
 };
 

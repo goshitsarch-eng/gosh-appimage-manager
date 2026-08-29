@@ -25,7 +25,12 @@ Kirigami.ScrollablePage {
             Controls.Button { text: i18n("Check update"); onClicked: Store.checkUpdate(details.uuid) }
             Controls.Button {
                 text: i18n("Update now")
-                onClicked: details.running ? forceDialog.open() : Store.updateApp(details.uuid, false)
+                onClicked: {
+                    if (details.running && !forceBox.checked)
+                        forceDialog.open()
+                    else
+                        Store.updateApp(details.uuid, forceBox.checked)
+                }
             }
         }
 
@@ -38,8 +43,10 @@ Kirigami.ScrollablePage {
 
         Kirigami.FormLayout {
             Repeater {
+                id: argRepeater
                 model: details.arguments || []
                 delegate: RowLayout {
+                    property alias token: argField.text
                     Controls.TextField {
                         id: argField
                         text: modelData
@@ -49,8 +56,11 @@ Kirigami.ScrollablePage {
                     Controls.Button {
                         text: i18n("Remove")
                         onClicked: {
-                            const next = (details.arguments || []).slice()
-                            next.splice(index, 1)
+                            const next = []
+                            for (let i = 0; i < argRepeater.count; ++i) {
+                                if (i !== index)
+                                    next.push(argRepeater.itemAt(i).token)
+                            }
                             Store.setArguments(details.uuid, next)
                             details = Store.selectedDetails()
                         }
@@ -69,10 +79,24 @@ Kirigami.ScrollablePage {
                     onClicked: {
                         if (newArg.text.length === 0)
                             return
-                        const next = (details.arguments || []).slice()
+                        const next = []
+                        for (let i = 0; i < argRepeater.count; ++i)
+                            next.push(argRepeater.itemAt(i).token)
                         next.push(newArg.text)
                         Store.setArguments(details.uuid, next)
                         newArg.text = ""
+                        details = Store.selectedDetails()
+                    }
+                }
+                Controls.Button {
+                    objectName: "saveArgumentsButton"
+                    text: i18n("Save arguments")
+                    Accessible.name: i18n("Save arguments")
+                    onClicked: {
+                        const next = []
+                        for (let i = 0; i < argRepeater.count; ++i)
+                            next.push(argRepeater.itemAt(i).token)
+                        Store.setArguments(details.uuid, next)
                         details = Store.selectedDetails()
                     }
                 }

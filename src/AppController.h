@@ -5,6 +5,7 @@
 #include "core/Types.h"
 #include "models/Models.h"
 
+#include <QHash>
 #include <QObject>
 #include <QPointer>
 #include <QTimer>
@@ -27,6 +28,7 @@ class LaunchService;
 class UpdateService;
 class AppImageLibrary;
 class TaskQueue;
+class UpdateNotifier;
 
 class AppController : public QObject
 {
@@ -48,13 +50,16 @@ class AppController : public QObject
     Q_PROPERTY(bool inspecting READ inspecting NOTIFY inspectingChanged)
     Q_PROPERTY(int inspectProgress READ inspectProgress NOTIFY inspectProgressChanged)
     Q_PROPERTY(QString updateSummary READ updateSummary NOTIFY updateSummaryChanged)
+    Q_PROPERTY(bool conflictsResolved READ conflictsResolved NOTIFY inspectSummaryChanged)
+    Q_PROPERTY(int taskTick READ taskTick NOTIFY taskTickChanged)
 
 public:
     explicit AppController(QObject *parent = nullptr,
                            ProcessRunner *runner = nullptr,
                            NetworkClient *network = nullptr,
                            ProcessTable *processes = nullptr,
-                           bool ownServices = true);
+                           bool ownServices = true,
+                           UpdateNotifier *notifier = nullptr);
     ~AppController() override;
 
     LibraryModel *libraryModel() const { return m_libraryModel; }
@@ -76,6 +81,9 @@ public:
     bool inspecting() const { return m_inspecting; }
     int inspectProgress() const { return m_inspectProgress; }
     QString updateSummary() const { return m_updateSummary; }
+    bool conflictsResolved() const;
+    int taskTick() const { return m_taskTick; }
+    UpdateNotifier *notifier() const { return m_notifier; }
 
     ManagedRegistry *registry() const { return m_registry; }
     AppImageInspector *inspector() const { return m_inspector; }
@@ -118,6 +126,10 @@ public:
     Q_INVOKABLE void setManagedFolderFromUrl(const QString &url);
     Q_INVOKABLE QStringList qmlActionNames() const;
     Q_INVOKABLE void loadSyntheticCatalog();
+    Q_INVOKABLE QString updateTaskId(const QString &uuid) const;
+    Q_INVOKABLE int updateProgress(const QString &uuid) const;
+    Q_INVOKABLE QString updateStatus(const QString &uuid) const;
+    InspectionResult pendingCandidate(int row) const;
 
 Q_SIGNALS:
     void searchChanged();
@@ -128,6 +140,7 @@ Q_SIGNALS:
     void inspectingChanged();
     void inspectProgressChanged();
     void updateSummaryChanged();
+    void taskTickChanged();
     void toast(const QString &message);
     void confirmInspect();
     void confirmRemove(const QString &uuid, const QString &path, bool permanent);
@@ -140,13 +153,16 @@ private:
     void syncBackgroundChecks();
     void applyDebugLogging();
     void notifyUpdates(int count);
+    bool persistAppEdits(InstalledApp app, QString *error);
     ProcessRunner *m_runner = nullptr;
     NetworkClient *m_network = nullptr;
     ProcessTable *m_processes = nullptr;
+    UpdateNotifier *m_notifier = nullptr;
     bool m_own = true;
     bool m_ownRunner = false;
     bool m_ownNetwork = false;
     bool m_ownProcesses = false;
+    bool m_ownNotifier = false;
     SettingsStore *m_settings = nullptr;
     ThemeController *m_theme = nullptr;
     ManagedRegistry *m_registry = nullptr;
@@ -177,6 +193,8 @@ private:
     int m_updateAllRemaining = 0;
     int m_updateAllFailed = 0;
     int m_updateAllSucceeded = 0;
+    int m_taskTick = 0;
+    QHash<QString, QString> m_updateTaskIds;
 };
 
 } // namespace GoshAim

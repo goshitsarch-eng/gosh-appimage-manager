@@ -9,6 +9,7 @@
 #include "core/SettingsStore.h"
 #include "core/UpdateService.h"
 #include "core/UpdateSources.h"
+#include "core/UpdateNotifier.h"
 
 #include <KLocalizedContext>
 #include <KLocalizedString>
@@ -212,12 +213,17 @@ int runCli(AppController &controller, const QStringList &arguments, bool interac
                 return int(ExitCode::NotIntegrated);
             }
             req.replaceUuid = owned.uuid;
+        } else if (keepBoth) {
+            req.conflict = ConflictPolicy::KeepBoth;
         } else {
-            req.conflict = keepBoth ? ConflictPolicy::KeepBoth : ConflictPolicy::KeepBoth;
+            req.conflict = ConflictPolicy::Unspecified;
         }
         const IntegrateResult result = controller.integration()->integrate(req);
         if (!result.ok) {
             err() << result.error << Qt::endl;
+            if (result.error.contains(QLatin1String("keep-both")) || result.error.contains(QLatin1String("replace"))) {
+                return int(ExitCode::Validation);
+            }
             return int(ExitCode::Failure);
         }
         err() << QStringLiteral("Integrated %1\n").arg(result.app.managedPath);
@@ -230,7 +236,9 @@ int runCli(AppController &controller, const QStringList &arguments, bool interac
                 return int(ExitCode::NeedsConfirmation);
             }
             int failures = 0;
-            for (const InstalledApp &app : controller.registry()->apps()) {
+            const QVector<UpdateOffer> offers = controller.updates()->listUpdates(nullptr, false);
+            for (const UpdateOffer &offer : offers) {
+                const InstalledApp app = controller.registry()->byUuid(offer.uuid);
                 if (!app.owned) {
                     continue;
                 }
@@ -346,6 +354,9 @@ int runCli(AppController &controller, const QStringList &arguments, bool interac
             for (const UpdateOffer &offer : offers) {
                 err() << offer.name << QStringLiteral(" ") << offer.currentVersion << QStringLiteral(" -> ")
                       << offer.availableVersion << Qt::endl;
+            }
+            if (controller.notifier()) {
+                controller.notifier()->notifyUpdatesAvailable(offers.size());
             }
         }
         return int(ExitCode::Ok);

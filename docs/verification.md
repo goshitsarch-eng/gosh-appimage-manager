@@ -10,6 +10,8 @@ SDK: `org.kde.Sdk//6.10` and `org.kde.Platform//6.10` from Flathub.
 No command mutated the operator's real `~/AppImages`, desktop entries, icons,
 or application configuration. Mutation tests used `QStandardPaths` test mode
 and isolated temporary directories. Inspection never executed an AppImage.
+Automated tests inject a recording notifier and never send a desktop
+notification.
 
 ## 1. CMake configure and Ninja compile (KDE 6.10 SDK)
 
@@ -20,8 +22,8 @@ flatpak run --filesystem=/root/projects/gosh-appimage-manager-grok --share=netwo
 ```
 
 Configure succeeded (ECM 6.10, Qt 6.10.3, KF6 6.27.0 including Kirigami,
-I18n, Config, DBusAddons). Ninja linked `build/bin/gosh-appimage-manager`
-and the test binaries.
+I18n, Config, DBusAddons, Notifications). Ninja linked
+`build/bin/gosh-appimage-manager` and the test binaries.
 
 ## 2. CTest
 
@@ -33,7 +35,7 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure
 
 ```
 100% tests passed, 0 tests failed out of 15
-Total Test time (real) =   6.08 sec
+Total Test time (real) =   6.37 sec
 ```
 
 Tests: `appstreamtest`, `test_elf`, `test_hash`, `test_desktop`,
@@ -52,24 +54,35 @@ Production-path coverage that these tests actually exercise:
 - desktop parser, Exec token rewriting, environment name/value validation
 - archive absolute/`..`/symlink-escape/count/size bounds, 7z and DwarFS listing parsers
 - inspector extractors list then filter; unsafe paths never reach extract args;
-  candidate path is never the executed program without setting+consent
-- transactional integrate copy/replace; desktop-install and registry-save
-  failures restore prior AppImage/desktop/registry bytes; move-source failure
-  is reported; no `.gosh-*` orphans
-- missing executable reconciles registry; permanent-delete containment for `/` and `$HOME`
+  candidate path is never the executed program without setting+consent; after
+  consented unsafe extract, extracted-tree verification still fails closed
+- transactional integrate copy/replace; new-integration registry-save and
+  partial desktop/icon install failures delete dest/desktop/icon and leave no
+  `.gosh-*` leftovers; backup-creation failure is fail-closed before overwrite;
+  replace desktop-install and registry-save failures restore prior bytes
+- missing executable reconciles registry for both Trash and Permanent; permanent-delete containment for `/` and `$HOME`
 - launch is start-only detached; running-process guard uses a real temp file
 - URL guards reject `file:`, credentials, and private/loopback hosts
 - GitHub API host validation; advertised digest mismatch leaves the install;
-  matching digest replaces and keeps arguments; FTP `allowFtp`; static same
-  ETag is not an update; update desktop-install failure restores bytes
+  matching digest replaces and keeps arguments; FTP `allowFtp` and invalid FTP
+  config fail closed; static same ETag is not an update; zsync same SHA-1 is
+  not available; zsync changed SHA-1 is available; apply refuses `!available`;
+  update-all with zero offers enqueues nothing; update backup failure leaves bytes
 - QtNetworkClient local HTTP: size abort, timeout, cancellation; resolver
-  rejects private/rebind addresses
-- CLI `--list-installed --json` stdout parsed for `schema_version` and
-  `installed` (not `items`); `--integrate` without TTY needs confirmation;
-  `--replace --replace-uuid` succeeds for owned and refuses missing UUID
-- task mutation serialisation, cancel, join-safe shutdown, no live-thread
-  destruction warnings
-- inspectPaths returns before completion; checkAll does not target empty UUID
+  rejects private/rebind addresses; fetch pins the validated public address so
+  a later private resolve cannot write a body
+- CLI `--list-installed --json` and `--list-updates --json` stdout parsed for
+  `schema_version` 1 and `installed`/`updates` (not `items`); `--integrate`
+  without TTY needs confirmation; `--yes` without `--keep-both` does not
+  suffix `*-2`; `--replace --replace-uuid` succeeds for owned and refuses
+  missing UUID; `--fetch-updates` calls the notifier once for offers, zero for
+  none, and does not save `registry.json`
+- task mutation serialisation; cancelling queued B leaves running A successful;
+  join-safe shutdown; no live-thread destruction warnings
+- Inspect keep-both/replace: selecting Replace on row 0 sets that row only;
+  single-candidate Replace is in range; QML required-index seam; Integrate
+  waits for explicit choices; argument token save round-trips `["a b","c"]`
+  after editing the second token; cancel of update X does not cancel inspect
 
 ## 3. QML lint
 
@@ -110,7 +123,7 @@ kept. Screenshot metadata is present; the original PNG is
 ## 5. Native/SDK offscreen `--self-test`
 
 ```
-QT_QPA_PLATFORM=offscreen HOME=/tmp/gosh-aim-selftest-home3 \
+QT_QPA_PLATFORM=offscreen HOME=/tmp/gosh-aim-selftest-home-fix2 \
   build/bin/gosh-appimage-manager --self-test
 ```
 
@@ -125,8 +138,8 @@ build/bin/gosh-appimage-manager --list-update-managers
 
 Printed: `static`, `github`, `gitlab`, `codeberg`, `forgejo`, `ftp`.
 
-CTest `test_cli` captured `--list-installed --json` stdout and asserted
-`schema_version` 1 and the `installed` array.
+CTest `test_cli` captured `--list-installed --json` and `--list-updates --json`
+stdout and asserted `schema_version` 1 plus the `installed`/`updates` arrays.
 
 ## 7. Flatpak builder
 
@@ -138,16 +151,18 @@ flatpak-builder --force-clean --user --install-deps-from=flathub \
 Exit 0. Manifest has no `--filesystem=host:rw`. Bundled
 `/app/bin/unsquashfs`, `/app/bin/7zz`, `/app/bin/dwarfsextract`.
 Corresponding source and licenses installed under
-`/app/share/gosh-appimage-manager/`.
+`/app/share/gosh-appimage-manager/`. KF6 Notifications is linked; notifyrc is
+installed at `/app/share/knotifications6/gosh-appimage-manager.notifyrc`.
+`--talk-name=org.freedesktop.Notifications` is granted.
 
-Exported commit: `c2950bf49f59ec2d5928f87a62c8428df1b6a1f802aa8febd9bac25412f9d484`
-(app), debug `1c411b00a7da695593e8a7cdedb69aad5c2f821e5fae8f1e4bcc9c5273d8fc89`.
+Exported commit: `b001e77417a83e8e7ac9da3be8e0b03a4d03de26351758097823cbd6de5f924d`
+(app), debug `0cbac907b611388629fcc44c096485b55a10f309c20cf5bc3191051ee60d0b69`.
 
 ## 8. Packaged offscreen `--self-test`
 
 ```
 flatpak-builder --run build-dir packaging/com.goshapps.AppImageManager.yml \
-  env QT_QPA_PLATFORM=offscreen HOME=/tmp/gosh-aim-flatpak-home \
+  env QT_QPA_PLATFORM=offscreen HOME=/tmp/gosh-aim-flatpak-home2 \
   gosh-appimage-manager --self-test
 ```
 
@@ -157,7 +172,7 @@ Exit 0.
 
 ```
 flatpak-builder --run build-dir packaging/com.goshapps.AppImageManager.yml \
-  env QT_QPA_PLATFORM=offscreen HOME=/tmp/gosh-aim-flatpak-home \
+  env QT_QPA_PLATFORM=offscreen HOME=/tmp/gosh-aim-flatpak-home2 \
   gosh-appimage-manager --probe-host
 ```
 
@@ -175,7 +190,7 @@ The sandbox cannot see host `/tmp` from outside (intentional; no `host:rw`).
 The fixture was written inside the sandbox `/tmp` and inspected there:
 
 ```
-magic_valid=true type=type-2 unsafe_fallback=false
+{"architecture":"unknown","error":"","extractor":"","magic_valid":true,"name":"synth","path":"/tmp/synth.AppImage","schema_version":1,"sha256":"b09afa18211d28a0db0d8995aa90dce1e2604e2f65ed7f5494586a15a3d48091","size":256,"type":"type-2","unsafe_fallback":false}
 INSPECT_NO_EXECUTION
 ```
 

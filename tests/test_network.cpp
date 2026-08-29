@@ -2,9 +2,11 @@
 #include "core/NetworkClient.h"
 #include "core/UrlGuard.h"
 
+#include <QFile>
 #include <QHash>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTemporaryDir>
 #include <QThread>
 #include <QtTest>
 #include <atomic>
@@ -166,6 +168,45 @@ private Q_SLOTS:
     {
         QVERIFY(!UrlGuard::validate(QStringLiteral("https://user:pass@example.com/x")).ok);
         QVERIFY(!UrlGuard::validate(QStringLiteral("http://example.com/x")).ok);
+    }
+    void fetchPinsPublicAndIgnoresLaterPrivateResolve()
+    {
+        MiniHttpServer secret;
+        QVERIFY(secret.start());
+        secret.payload = QByteArrayLiteral("PWNED");
+        secret.serveOnce();
+
+        class FlipResolver : public HostResolver
+        {
+        public:
+            int calls = 0;
+            QList<QHostAddress> resolve(const QString &host) override
+            {
+                Q_UNUSED(host);
+                ++calls;
+                if (calls == 1) {
+                    return {QHostAddress(QStringLiteral("8.8.8.8"))};
+                }
+                return {QHostAddress(QStringLiteral("127.0.0.1"))};
+            }
+        };
+        FlipResolver resolver;
+        QtNetworkClient client(&resolver);
+        QTemporaryDir tmp;
+        const QString dest = tmp.path() + QStringLiteral("/body.bin");
+        NetworkRequest req;
+        req.url = QUrl(QStringLiteral("http://rebind.test:%1/secret").arg(secret.port()));
+        req.allowHttp = true;
+        req.destinationPath = dest;
+        req.timeoutMs = 800;
+        const NetworkResult result = client.fetch(req);
+        QVERIFY(!result.ok);
+        if (QFile::exists(dest)) {
+            QFile file(dest);
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            QVERIFY(!file.readAll().contains("PWNED"));
+        }
+        QVERIFY(resolver.calls >= 1);
     }
 };
 

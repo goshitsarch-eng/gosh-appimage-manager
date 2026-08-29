@@ -20,6 +20,8 @@ struct UpdateCheckResult {
     qint64 size = -1;
     QString digest;
     QString digestAlgo;
+    QString etag;
+    QString lastModified;
     bool reducedVerification = false;
     QString error;
     QString manager;

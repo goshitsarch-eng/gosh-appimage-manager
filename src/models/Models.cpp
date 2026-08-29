@@ -347,6 +347,10 @@ QVariant CandidateModel::data(const QModelIndex &index, int role) const
         return item.needsConflictDecision;
     case ExistingManagedRole:
         return item.existingManagedId;
+    case ChosenPolicyRole:
+        return int(item.chosenPolicy);
+    case ChosenReplaceUuidRole:
+        return item.chosenReplaceUuid;
     default:
         return {};
     }
@@ -373,7 +377,9 @@ QHash<int, QByteArray> CandidateModel::roleNames() const
             {ConflictingUuidRole, "conflictingUuid"},
             {ConflictingNameRole, "conflictingName"},
             {NeedsDecisionRole, "needsDecision"},
-            {ExistingManagedRole, "existingManagedId"}};
+            {ExistingManagedRole, "existingManagedId"},
+            {ChosenPolicyRole, "chosenPolicy"},
+            {ChosenReplaceUuidRole, "chosenReplaceUuid"}};
 }
 
 void CandidateModel::setCandidates(const QVector<InspectionResult> &candidates)

@@ -1,0 +1,9 @@
+[Global]
+IconName=com.goshapps.AppImageManager
+Comment=Gosh AppImage Manager
+Name=Gosh AppImage Manager
+
+[Event/updatesAvailable]
+Name=Updates available
+Comment=An AppImage update is available
+Action=Popup

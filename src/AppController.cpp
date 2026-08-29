@@ -12,9 +12,11 @@
 #include "core/ProcessTable.h"
 #include "core/RemovalLaunch.h"
 #include "core/SafeFs.h"
+#include "core/Limits.h"
 #include "core/TaskQueue.h"
 #include "core/UpdateService.h"
 #include "core/UpdateSources.h"
+#include "core/UpdateNotifier.h"
 
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -26,11 +28,6 @@
 #include <QStandardPaths>
 #include <QUrl>
 
-#if __has_include(<KNotification>)
-#include <KNotification>
-#define GOSHAIM_HAVE_KNOTIFICATIONS
-#endif
-
 Q_LOGGING_CATEGORY(lcGoshAim, "gosh.aim")
 
 namespace GoshAim {
@@ -39,7 +36,8 @@ AppController::AppController(QObject *parent,
                              ProcessRunner *runner,
                              NetworkClient *network,
                              ProcessTable *processes,
-                             bool ownServices)
+                             bool ownServices,
+                             UpdateNotifier *notifier)
     : QObject(parent)
     , m_own(ownServices)
 {
@@ -49,6 +47,15 @@ AppController::AppController(QObject *parent,
     m_runner = runner ? runner : new QtProcessRunner();
     m_network = network ? network : new QtNetworkClient();
     m_processes = processes ? processes : new ProcProcessTable(m_runner);
+    if (notifier) {
+        m_notifier = notifier;
+    } else if (QStandardPaths::isTestModeEnabled()) {
+        m_notifier = new NullUpdateNotifier();
+        m_ownNotifier = true;
+    } else {
+        m_notifier = new KdeUpdateNotifier();
+        m_ownNotifier = true;
+    }
     m_settings = new SettingsStore(this);
     m_theme = new ThemeController(this);
     m_theme->setAppearance(m_settings->appearanceName());
@@ -69,7 +76,11 @@ AppController::AppController(QObject *parent,
     m_backgroundTimer = new QTimer(this);
     m_backgroundTimer->setInterval(6 * 60 * 60 * 1000);
     connect(m_backgroundTimer, &QTimer::timeout, this, &AppController::checkAll);
-    connect(m_tasks, &TaskQueue::tasksChanged, this, &AppController::reloadTasks);
+    connect(m_tasks, &TaskQueue::tasksChanged, this, [this]() {
+        reloadTasks();
+        ++m_taskTick;
+        Q_EMIT taskTickChanged();
+    });
     connect(m_tasks, &TaskQueue::finished, this, [this](const QString &, bool ok, const QString &) {
         refreshLibrary();
         if (m_updateAllRemaining > 0) {
@@ -125,6 +136,9 @@ AppController::~AppController()
     if (m_ownProcesses) {
         delete m_processes;
     }
+    if (m_ownNotifier) {
+        delete m_notifier;
+    }
 }
 
 void AppController::applyDebugLogging()
@@ -151,13 +165,23 @@ void AppController::syncBackgroundChecks()
     const QString desktopPath = autostartDir + QStringLiteral("/com.goshapps.AppImageManager-updates.desktop");
     if (enabled) {
         QDir().mkpath(autostartDir);
+        QString execLine;
+        if (QFile::exists(QStringLiteral("/.flatpak-info"))
+            || qEnvironmentVariable("FLATPAK_ID") == QLatin1String("com.goshapps.AppImageManager")) {
+            execLine = QStringLiteral("flatpak run com.goshapps.AppImageManager --fetch-updates");
+        } else {
+            const QString exe = QCoreApplication::applicationFilePath();
+            execLine = QStringLiteral("\"%1\" --fetch-updates").arg(exe);
+        }
         const QByteArray body = QByteArrayLiteral(
-            "[Desktop Entry]\n"
-            "Type=Application\n"
-            "Name=Gosh AppImage Manager update checks\n"
-            "Exec=gosh-appimage-manager --fetch-updates\n"
-            "X-GNOME-Autostart-enabled=true\n"
-            "OnlyShowIn=KDE;GNOME;\n");
+                                    "[Desktop Entry]\n"
+                                    "Type=Application\n"
+                                    "Name=Gosh AppImage Manager update checks\n"
+                                    "Exec=")
+            + execLine.toUtf8() + QByteArrayLiteral(
+                                    "\n"
+                                    "X-GNOME-Autostart-enabled=true\n"
+                                    "OnlyShowIn=KDE;\n");
         QFile file(desktopPath);
         if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
             file.write(body);
@@ -173,12 +197,9 @@ void AppController::notifyUpdates(int count)
         return;
     }
     const QString text = tr("%1 AppImage update(s) available").arg(count);
-#ifdef GOSHAIM_HAVE_KNOTIFICATIONS
-    auto *notification = new KNotification(QStringLiteral("updatesAvailable"), KNotification::CloseOnTimeout, this);
-    notification->setTitle(tr("Gosh AppImage Manager"));
-    notification->setText(text);
-    notification->sendEvent();
-#endif
+    if (m_notifier) {
+        m_notifier->notifyUpdatesAvailable(count);
+    }
     setStatus(text);
 }
 
@@ -345,32 +366,45 @@ void AppController::setCandidateConflict(int row, int policy, const QString &rep
     if (row < 0 || row >= m_pendingInspect.size()) {
         return;
     }
-    m_pendingInspect[row].chosenPolicy = policy == int(ConflictPolicy::Replace) ? ConflictPolicy::Replace : ConflictPolicy::KeepBoth;
-    m_pendingInspect[row].chosenReplaceUuid = replaceUuid;
+    if (policy == int(ConflictPolicy::Replace)) {
+        m_pendingInspect[row].chosenPolicy = ConflictPolicy::Replace;
+        m_pendingInspect[row].chosenReplaceUuid = replaceUuid.isEmpty() ? m_pendingInspect[row].conflictingUuid : replaceUuid;
+    } else if (policy == int(ConflictPolicy::KeepBoth)) {
+        m_pendingInspect[row].chosenPolicy = ConflictPolicy::KeepBoth;
+        m_pendingInspect[row].chosenReplaceUuid.clear();
+    } else {
+        m_pendingInspect[row].chosenPolicy = ConflictPolicy::Unspecified;
+        m_pendingInspect[row].chosenReplaceUuid.clear();
+    }
+    m_integration->applyConflictChoice(&m_pendingInspect[row]);
     m_candidateModel->setCandidates(m_pendingInspect);
+    Q_EMIT inspectSummaryChanged();
 }
 
 void AppController::confirmIntegrate(int conflictPolicy, bool moveSource, const QString &replaceUuid)
 {
-    const ConflictPolicy fallback = conflictPolicy == int(ConflictPolicy::Replace) ? ConflictPolicy::Replace : ConflictPolicy::KeepBoth;
+    Q_UNUSED(conflictPolicy);
+    Q_UNUSED(replaceUuid);
     const QVector<InspectionResult> pending = m_pendingInspect;
     m_pendingInspect.clear();
     m_candidateModel->setCandidates({});
+    Q_EMIT inspectSummaryChanged();
     QPointer<AppController> self(this);
     for (const InspectionResult &item : pending) {
         if (!item.error.isEmpty() || !item.magicValid) {
             continue;
         }
         ConflictPolicy policy = item.chosenPolicy;
-        QString uuid = item.chosenReplaceUuid;
-        if (policy == ConflictPolicy::KeepBoth && fallback == ConflictPolicy::Replace) {
-            policy = ConflictPolicy::Replace;
-        }
-        if (uuid.isEmpty()) {
-            uuid = replaceUuid.isEmpty() ? item.conflictingUuid : replaceUuid;
-        }
-        if (item.needsConflictDecision && policy != ConflictPolicy::Replace && policy != ConflictPolicy::KeepBoth) {
-            continue;
+        QString uuid;
+        if (item.needsConflictDecision) {
+            if (policy != ConflictPolicy::Replace && policy != ConflictPolicy::KeepBoth) {
+                continue;
+            }
+            if (policy == ConflictPolicy::Replace) {
+                uuid = item.chosenReplaceUuid;
+            }
+        } else {
+            policy = ConflictPolicy::KeepBoth;
         }
         m_tasks->enqueue(
             TaskKind::Integrate,
@@ -560,7 +594,7 @@ void AppController::updateApp(const QString &uuid, bool force)
         return;
     }
     QPointer<AppController> self(this);
-    m_tasks->enqueue(
+    const QString id = m_tasks->enqueue(
         TaskKind::Update,
         tr("Update %1").arg(app.name),
         app.managedPath,
@@ -575,6 +609,11 @@ void AppController::updateApp(const QString &uuid, bool force)
             }
         },
         true);
+    if (!id.isEmpty()) {
+        m_updateTaskIds.insert(uuid, id);
+        ++m_taskTick;
+        Q_EMIT taskTickChanged();
+    }
 }
 
 void AppController::updateAll(bool force)
@@ -582,14 +621,17 @@ void AppController::updateAll(bool force)
     m_updateAllSucceeded = 0;
     m_updateAllFailed = 0;
     m_updateAllRemaining = 0;
-    for (const InstalledApp &app : m_registry->apps()) {
-        if (app.owned) {
-            ++m_updateAllRemaining;
-            updateApp(app.uuid, force);
+    const int count = m_updatesModel ? m_updatesModel->rowCount() : 0;
+    for (int i = 0; i < count; ++i) {
+        const UpdateOffer offer = m_updatesModel->at(i);
+        if (offer.uuid.isEmpty()) {
+            continue;
         }
+        ++m_updateAllRemaining;
+        updateApp(offer.uuid, force);
     }
     if (m_updateAllRemaining == 0) {
-        m_updateSummary = tr("No owned AppImages to update");
+        m_updateSummary = tr("No updates are currently offered");
         Q_EMIT updateSummaryChanged();
     }
 }
@@ -664,12 +706,10 @@ void AppController::setArguments(const QString &uuid, const QStringList &argumen
         }
     }
     app.arguments = cleaned;
-    m_registry->upsert(app);
-    m_registry->save();
     QString error;
-    const QString staged = SafeFs::siblingTemp(app.desktopPath, QStringLiteral(".gosh-desk-"));
-    if (m_desktop->writeStaged(app, staged, {}, &error)) {
-        m_desktop->install(app, staged, {}, &error);
+    if (!persistAppEdits(app, &error)) {
+        setStatus(error);
+        return;
     }
     refreshLibrary();
 }
@@ -691,12 +731,10 @@ void AppController::setEnvironment(const QString &uuid, const QVariantMap &env)
         }
     }
     app.environment = pairs;
-    m_registry->upsert(app);
-    m_registry->save();
     QString error;
-    const QString staged = SafeFs::siblingTemp(app.desktopPath, QStringLiteral(".gosh-desk-"));
-    if (m_desktop->writeStaged(app, staged, {}, &error)) {
-        m_desktop->install(app, staged, {}, &error);
+    if (!persistAppEdits(app, &error)) {
+        setStatus(error);
+        return;
     }
     refreshLibrary();
 }
@@ -839,6 +877,98 @@ void AppController::loadSyntheticCatalog()
     fake.owned = true;
     fake.managedPath = QDir::tempPath() + QStringLiteral("/gosh-aim-self-test.AppImage");
     m_libraryModel->setApps({fake});
+}
+
+bool AppController::conflictsResolved() const
+{
+    if (m_inspecting || m_pendingInspect.isEmpty()) {
+        return false;
+    }
+    for (const InspectionResult &item : m_pendingInspect) {
+        if (!item.error.isEmpty() || !item.magicValid) {
+            continue;
+        }
+        if (item.needsConflictDecision
+            && item.chosenPolicy != ConflictPolicy::KeepBoth
+            && item.chosenPolicy != ConflictPolicy::Replace) {
+            return false;
+        }
+    }
+    return true;
+}
+
+QString AppController::updateTaskId(const QString &uuid) const
+{
+    return m_updateTaskIds.value(uuid);
+}
+
+int AppController::updateProgress(const QString &uuid) const
+{
+    if (!m_tasks) {
+        return 0;
+    }
+    return m_tasks->task(m_updateTaskIds.value(uuid)).progress;
+}
+
+QString AppController::updateStatus(const QString &uuid) const
+{
+    if (!m_tasks) {
+        return {};
+    }
+    const TaskItem item = m_tasks->task(m_updateTaskIds.value(uuid));
+    if (item.id.isEmpty()) {
+        return {};
+    }
+    if (!item.error.isEmpty()) {
+        return item.error;
+    }
+    return item.statusText;
+}
+
+InspectionResult AppController::pendingCandidate(int row) const
+{
+    if (row < 0 || row >= m_pendingInspect.size()) {
+        return {};
+    }
+    return m_pendingInspect.at(row);
+}
+
+bool AppController::persistAppEdits(InstalledApp app, QString *error)
+{
+    const QVector<InstalledApp> snap = m_registry->snapshot();
+    QByteArray desktopBytes;
+    if (!app.desktopPath.isEmpty() && QFile::exists(app.desktopPath)) {
+        QFile file(app.desktopPath);
+        if (file.open(QIODevice::ReadOnly)) {
+            desktopBytes = file.read(kMaxDesktopFileBytes);
+        }
+    }
+    const QString staged = SafeFs::siblingTemp(app.desktopPath, QStringLiteral(".gosh-desk-"));
+    QString localError;
+    if (!m_desktop->writeStaged(app, staged, {}, &localError) || !m_desktop->install(app, staged, {}, &localError)) {
+        SafeFs::removeFileNoFollow(staged);
+        if (!desktopBytes.isEmpty()) {
+            SafeFs::atomicWrite(app.desktopPath, desktopBytes, nullptr, 0644);
+        }
+        m_registry->restoreApps(snap);
+        if (error) {
+            *error = localError.isEmpty() ? QStringLiteral("Desktop update failed") : localError;
+        }
+        return false;
+    }
+    m_registry->upsert(app);
+    if (!m_registry->save(&localError)) {
+        m_registry->restoreApps(snap);
+        m_registry->save();
+        if (!desktopBytes.isEmpty()) {
+            SafeFs::atomicWrite(app.desktopPath, desktopBytes, nullptr, 0644);
+        }
+        if (error) {
+            *error = localError.isEmpty() ? QStringLiteral("Registry save failed") : localError;
+        }
+        return false;
+    }
+    return true;
 }
 
 } // namespace GoshAim

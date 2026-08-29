@@ -87,10 +87,6 @@ RemovalResult RemovalService::remove(const RemovalRequest &request, std::atomic<
     QString pathError;
     QString canonical = SafeFs::canonicalExisting(app.managedPath, &pathError);
     const bool missing = canonical.isEmpty();
-    if (missing && request.mode != RemovalMode::Trash) {
-        result.error = pathError;
-        return result;
-    }
     if (!missing && request.mode == RemovalMode::Permanent) {
         if (SafeFs::isForbiddenPermanentTarget(canonical)) {
             result.error = QStringLiteral("Refusing to permanently delete a protected path");
@@ -109,8 +105,18 @@ RemovalResult RemovalService::remove(const RemovalRequest &request, std::atomic<
             return result;
         }
     }
+
     QString artifactError;
-    const bool artifactsOk = m_desktop->removeOwnedArtifacts(app, &artifactError);
+    bool artifactsOk = true;
+    if (!app.desktopPath.isEmpty() && QFile::exists(app.desktopPath)) {
+        artifactsOk = m_desktop->removeOwnedArtifacts(app, &artifactError);
+    } else if (!app.iconPath.isEmpty() && QFile::exists(app.iconPath) && app.iconPath.contains(app.uuid)) {
+        artifactsOk = m_desktop->removeOwnedArtifacts(app, &artifactError);
+    } else if (!app.desktopPath.isEmpty() || !app.iconPath.isEmpty()) {
+        if (!app.iconPath.isEmpty() && app.iconPath.contains(app.uuid) && QFile::exists(app.iconPath)) {
+            SafeFs::removeFileNoFollow(app.iconPath);
+        }
+    }
     m_registry->removeUuid(app.uuid);
     QString saveError;
     const bool saved = m_registry->save(&saveError);
@@ -123,6 +129,9 @@ RemovalResult RemovalService::remove(const RemovalRequest &request, std::atomic<
         return result;
     }
     result.ok = true;
+    if (missing) {
+        result.error = QStringLiteral("already gone");
+    }
     return result;
 }
 

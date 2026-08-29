@@ -107,7 +107,10 @@ Kirigami.ScrollablePage {
                     visible: !model.owned
                     Accessible.name: i18n("Adopt %1", model.name)
                     Controls.ToolTip.text: i18n("Register this unmanaged AppImage without rewriting files")
-                    onClicked: Store.adoptApp(model.uuid)
+                    onClicked: {
+                        Store.selectApp(model.uuid)
+                        adoptDialog.open()
+                    }
                 }
             }
         }
@@ -119,5 +122,13 @@ Kirigami.ScrollablePage {
         fileMode: FileDialog.OpenFiles
         nameFilters: [i18n("AppImage files (*.AppImage *.appimage)"), i18n("All files (*)")]
         onAccepted: Store.openAppImages(selectedFiles)
+    }
+
+    Kirigami.PromptDialog {
+        id: adoptDialog
+        title: i18n("Adopt unmanaged AppImage?")
+        subtitle: i18n("Adoption records this discovered AppImage in the Gosh registry without rewriting or deleting the AppImage, desktop file, or icon. After adoption this application may update or remove it.")
+        standardButtons: Kirigami.Dialog.Ok | Kirigami.Dialog.Cancel
+        onAccepted: Store.adoptApp(Store.selectedUuid)
     }
 }

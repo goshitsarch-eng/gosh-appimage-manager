@@ -15,6 +15,7 @@ add_library(goshaimcore STATIC
     core/UpdateSources.cpp
     core/UpdateService.cpp
     core/CheckStateStore.cpp
+    core/UpdateNotifier.cpp
     core/AppImageLibrary.cpp
     core/TaskQueue.cpp
     models/Models.cpp
@@ -34,6 +35,7 @@ target_link_libraries(goshaimcore PUBLIC
     KF6::I18n
     KF6::ConfigCore
     KF6::CoreAddons
+    KF6::Notifications
 )
 
 qt_add_resources(goshaimcore "core_license"
