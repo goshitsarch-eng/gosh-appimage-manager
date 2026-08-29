@@ -180,23 +180,52 @@ bool AppImageInspector::extractWithUnsquashfs(InspectionResult &result, const QS
     list.program = QStringLiteral("unsquashfs");
     list.arguments = QStringList{QStringLiteral("-o"),
                                  QString::number(result.payloadOffset < 0 ? 0 : result.payloadOffset),
-                                 QStringLiteral("-l"),
+                                 QStringLiteral("-ll"),
                                  result.identity.path};
     list.timeoutMs = kExtractTimeoutMs;
-    list.maxStdoutBytes = 256 * 1024;
-    const ProcessResult listed = m_runner->run(list, cancel);
+    list.maxStdoutBytes = kMaxProcessOutputBytes;
+    ProcessResult listed = m_runner->run(list, cancel);
+    if (listed.refused || listed.failedToStart || listed.timedOut || listed.cancelled || listed.exitCode != 0) {
+        list.arguments[2] = QStringLiteral("-l");
+        listed = m_runner->run(list, cancel);
+    }
+    if (listed.truncated) {
+        result.warnings.append(QStringLiteral("Archive listing exceeded output bound"));
+        return false;
+    }
     if (listed.refused || listed.failedToStart || listed.timedOut || listed.cancelled || listed.exitCode != 0) {
         return false;
     }
-    QStringList entries;
-    for (const QByteArray &line : listed.standardOutput.split('\n')) {
-        QString path = QString::fromUtf8(line).trimmed();
-        path.replace(QLatin1String("squashfs-root/"), QString());
-        if (path.startsWith(QLatin1Char('/'))) {
-            path = path.mid(1);
+    QString parseError;
+    QVector<ArchiveEntry> entries = ArchiveGuard::parseUnsquashfsList(listed.standardOutput, &parseError);
+    if (!parseError.isEmpty()) {
+        result.warnings.append(parseError);
+        return false;
+    }
+    if (entries.isEmpty()) {
+        QStringList paths;
+        for (const QByteArray &line : listed.standardOutput.split('\n')) {
+            QString path = QString::fromUtf8(line).trimmed();
+            path.replace(QLatin1String("squashfs-root/"), QString());
+            if (path.startsWith(QLatin1Char('/'))) {
+                path = path.mid(1);
+            }
+            if (!path.isEmpty()) {
+                paths.append(path);
+            }
         }
-        if (!path.isEmpty()) {
-            entries.append(path);
+        QString filterError;
+        const QStringList wantedFallback = ArchiveGuard::filterExtractable(paths, &filterError);
+        if (!filterError.isEmpty() || wantedFallback.isEmpty()) {
+            if (!filterError.isEmpty()) {
+                result.warnings.append(filterError);
+            }
+            return false;
+        }
+        for (const QString &path : wantedFallback) {
+            ArchiveEntry entry;
+            entry.path = path;
+            entries.append(entry);
         }
     }
     QString filterError;
@@ -218,8 +247,15 @@ bool AppImageInspector::extractWithUnsquashfs(InspectionResult &result, const QS
         extract.arguments << QStringLiteral("-e") << entry;
     }
     extract.timeoutMs = kExtractTimeoutMs;
+    extract.maxStdoutBytes = kMaxProcessOutputBytes;
     const ProcessResult extracted = m_runner->run(extract, cancel);
-    if (extracted.exitCode != 0 || extracted.failedToStart || extracted.refused) {
+    if (extracted.exitCode != 0 || extracted.failedToStart || extracted.refused || extracted.truncated) {
+        return false;
+    }
+    QString walkError;
+    if (!ArchiveGuard::verifyExtractedTree(dest, kMaxExtractedBytes, &walkError)) {
+        result.warnings.append(walkError);
+        SafeFs::removeTreeNoFollow(dest);
         return false;
     }
     result.extractorUsed = QStringLiteral("unsquashfs");
@@ -231,26 +267,65 @@ bool AppImageInspector::extractWith7z(InspectionResult &result, const QString &d
     if (!m_runner) {
         return false;
     }
-    ProcessRequest req;
-    req.program = QStringLiteral("7zz");
-    req.arguments = QStringList{QStringLiteral("x"),
-                                result.identity.path,
-                                QStringLiteral("-o") + dest,
-                                QStringLiteral("-y"),
-                                QStringLiteral("-bso0"),
-                                QStringLiteral("-bsp0"),
-                                QStringLiteral("*.desktop"),
-                                QStringLiteral(".DirIcon")};
-    req.timeoutMs = kExtractTimeoutMs;
-    ProcessResult extracted = m_runner->run(req, cancel);
-    if (extracted.failedToStart) {
-        req.program = QStringLiteral("7z");
-        extracted = m_runner->run(req, cancel);
+    auto listWith = [&](const QString &program) {
+        ProcessRequest list;
+        list.program = program;
+        list.arguments = QStringList{QStringLiteral("l"), QStringLiteral("-slt"), result.identity.path};
+        list.timeoutMs = kExtractTimeoutMs;
+        list.maxStdoutBytes = kMaxProcessOutputBytes;
+        return m_runner->run(list, cancel);
+    };
+    ProcessResult listed = listWith(QStringLiteral("7zz"));
+    QString program = QStringLiteral("7zz");
+    if (listed.failedToStart) {
+        listed = listWith(QStringLiteral("7z"));
+        program = QStringLiteral("7z");
     }
-    if (extracted.exitCode != 0 || extracted.failedToStart || extracted.refused) {
+    if (listed.truncated) {
+        result.warnings.append(QStringLiteral("Archive listing exceeded output bound"));
         return false;
     }
-    result.extractorUsed = req.program;
+    if (listed.refused || listed.failedToStart || listed.timedOut || listed.cancelled || listed.exitCode != 0) {
+        return false;
+    }
+    QString parseError;
+    const QVector<ArchiveEntry> entries = ArchiveGuard::parse7zList(listed.standardOutput, &parseError);
+    if (!parseError.isEmpty()) {
+        result.warnings.append(parseError);
+        return false;
+    }
+    QString filterError;
+    const QStringList wanted = ArchiveGuard::filterExtractable(entries, &filterError);
+    if (!filterError.isEmpty() || wanted.isEmpty()) {
+        if (!filterError.isEmpty()) {
+            result.warnings.append(filterError);
+        }
+        return false;
+    }
+    ProcessRequest extract;
+    extract.program = program;
+    extract.arguments = QStringList{QStringLiteral("x"),
+                                    result.identity.path,
+                                    QStringLiteral("-o") + dest,
+                                    QStringLiteral("-y"),
+                                    QStringLiteral("-bso0"),
+                                    QStringLiteral("-bsp0")};
+    for (const QString &entry : wanted) {
+        extract.arguments << entry;
+    }
+    extract.timeoutMs = kExtractTimeoutMs;
+    extract.maxStdoutBytes = kMaxProcessOutputBytes;
+    const ProcessResult extracted = m_runner->run(extract, cancel);
+    if (extracted.exitCode != 0 || extracted.failedToStart || extracted.refused || extracted.truncated) {
+        return false;
+    }
+    QString walkError;
+    if (!ArchiveGuard::verifyExtractedTree(dest, kMaxExtractedBytes, &walkError)) {
+        result.warnings.append(walkError);
+        SafeFs::removeTreeNoFollow(dest);
+        return false;
+    }
+    result.extractorUsed = program;
     return true;
 }
 
@@ -259,12 +334,57 @@ bool AppImageInspector::extractWithDwarfs(InspectionResult &result, const QStrin
     if (!m_runner) {
         return false;
     }
-    ProcessRequest req;
-    req.program = QStringLiteral("dwarfsextract");
-    req.arguments = QStringList{QStringLiteral("--input=") + result.identity.path, QStringLiteral("--output=") + dest};
-    req.timeoutMs = kExtractTimeoutMs;
-    const ProcessResult extracted = m_runner->run(req, cancel);
-    if (extracted.exitCode != 0 || extracted.failedToStart || extracted.refused) {
+    ProcessRequest list;
+    list.program = QStringLiteral("dwarfsck");
+    list.arguments = QStringList{QStringLiteral("--input=") + result.identity.path, QStringLiteral("--list")};
+    list.timeoutMs = kExtractTimeoutMs;
+    list.maxStdoutBytes = kMaxProcessOutputBytes;
+    ProcessResult listed = m_runner->run(list, cancel);
+    if (listed.failedToStart || listed.exitCode != 0) {
+        list.arguments = QStringList{QStringLiteral("-i"), result.identity.path, QStringLiteral("-l")};
+        listed = m_runner->run(list, cancel);
+    }
+    if (listed.truncated) {
+        result.warnings.append(QStringLiteral("Archive listing exceeded output bound"));
+        return false;
+    }
+    if (listed.refused || listed.failedToStart || listed.timedOut || listed.cancelled || listed.exitCode != 0) {
+        result.warnings.append(QStringLiteral("DwarFS listing is required; refusing unbounded extraction"));
+        return false;
+    }
+    QString parseError;
+    const QVector<ArchiveEntry> entries = ArchiveGuard::parseDwarfsList(listed.standardOutput, &parseError);
+    if (!parseError.isEmpty()) {
+        result.warnings.append(parseError);
+        return false;
+    }
+    QString filterError;
+    const QStringList wanted = ArchiveGuard::filterExtractable(entries, &filterError);
+    if (!filterError.isEmpty() || wanted.isEmpty()) {
+        if (!filterError.isEmpty()) {
+            result.warnings.append(filterError);
+        } else {
+            result.warnings.append(QStringLiteral("No safe DwarFS metadata entries"));
+        }
+        return false;
+    }
+    for (const QString &entry : wanted) {
+        ProcessRequest extract;
+        extract.program = QStringLiteral("dwarfsextract");
+        extract.arguments = QStringList{QStringLiteral("--input=") + result.identity.path,
+                                        QStringLiteral("--output=") + dest,
+                                        QStringLiteral("--pattern=") + entry};
+        extract.timeoutMs = kExtractTimeoutMs;
+        extract.maxStdoutBytes = kMaxProcessOutputBytes;
+        const ProcessResult extracted = m_runner->run(extract, cancel);
+        if (extracted.exitCode != 0 || extracted.failedToStart || extracted.refused || extracted.truncated) {
+            return false;
+        }
+    }
+    QString walkError;
+    if (!ArchiveGuard::verifyExtractedTree(dest, kMaxExtractedBytes, &walkError)) {
+        result.warnings.append(walkError);
+        SafeFs::removeTreeNoFollow(dest);
         return false;
     }
     result.extractorUsed = QStringLiteral("dwarfsextract");

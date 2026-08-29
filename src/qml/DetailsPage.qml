@@ -23,19 +23,157 @@ Kirigami.ScrollablePage {
             Controls.Button { text: i18n("Launch"); Accessible.name: i18n("Launch"); onClicked: Store.launchApp(details.uuid) }
             Controls.Button { text: i18n("Reveal"); Accessible.name: i18n("Reveal in file manager"); onClicked: Store.revealApp(details.uuid) }
             Controls.Button { text: i18n("Check update"); onClicked: Store.checkUpdate(details.uuid) }
-            Controls.Button { text: i18n("Update now"); onClicked: Store.updateApp(details.uuid, false) }
+            Controls.Button {
+                text: i18n("Update now")
+                onClicked: details.running ? forceDialog.open() : Store.updateApp(details.uuid, false)
+            }
+        }
+
+        Controls.CheckBox {
+            id: forceBox
+            visible: details.running
+            text: i18n("Force update while running")
+            Accessible.name: i18n("Force update while running")
         }
 
         Kirigami.FormLayout {
-            Controls.TextField {
-                id: argsField
-                Kirigami.FormData.label: i18n("Arguments")
-                text: (details.arguments || []).join(" ")
-                Accessible.name: i18n("Command arguments")
+            Repeater {
+                model: details.arguments || []
+                delegate: RowLayout {
+                    Controls.TextField {
+                        id: argField
+                        text: modelData
+                        Accessible.name: i18n("Argument %1", index + 1)
+                        Layout.fillWidth: true
+                    }
+                    Controls.Button {
+                        text: i18n("Remove")
+                        onClicked: {
+                            const next = (details.arguments || []).slice()
+                            next.splice(index, 1)
+                            Store.setArguments(details.uuid, next)
+                            details = Store.selectedDetails()
+                        }
+                    }
+                }
             }
-            Controls.Button {
-                text: i18n("Save arguments")
-                onClicked: Store.setArguments(details.uuid, argsField.text.split(/\s+/).filter(function (item) { return item.length > 0 }))
+            RowLayout {
+                Controls.TextField {
+                    id: newArg
+                    placeholderText: i18n("New argument")
+                    Accessible.name: i18n("New argument")
+                    Layout.fillWidth: true
+                }
+                Controls.Button {
+                    text: i18n("Add argument")
+                    onClicked: {
+                        if (newArg.text.length === 0)
+                            return
+                        const next = (details.arguments || []).slice()
+                        next.push(newArg.text)
+                        Store.setArguments(details.uuid, next)
+                        newArg.text = ""
+                        details = Store.selectedDetails()
+                    }
+                }
+            }
+
+            Repeater {
+                model: Object.keys(details.environment || {})
+                delegate: RowLayout {
+                    Controls.TextField {
+                        text: modelData
+                        readOnly: true
+                        Accessible.name: i18n("Environment name")
+                    }
+                    Controls.TextField {
+                        id: envValue
+                        text: details.environment[modelData]
+                        Accessible.name: i18n("Environment value for %1", modelData)
+                        Layout.fillWidth: true
+                    }
+                    Controls.Button {
+                        text: i18n("Save")
+                        onClicked: {
+                            const env = Object.assign({}, details.environment)
+                            env[modelData] = envValue.text
+                            Store.setEnvironment(details.uuid, env)
+                            details = Store.selectedDetails()
+                        }
+                    }
+                    Controls.Button {
+                        text: i18n("Remove")
+                        onClicked: {
+                            const env = Object.assign({}, details.environment)
+                            delete env[modelData]
+                            Store.setEnvironment(details.uuid, env)
+                            details = Store.selectedDetails()
+                        }
+                    }
+                }
+            }
+            RowLayout {
+                Controls.TextField { id: envName; placeholderText: i18n("NAME"); Accessible.name: i18n("New environment name") }
+                Controls.TextField { id: envVal; placeholderText: i18n("value"); Accessible.name: i18n("New environment value"); Layout.fillWidth: true }
+                Controls.Button {
+                    text: i18n("Add environment")
+                    onClicked: {
+                        if (envName.text.length === 0)
+                            return
+                        const env = Object.assign({}, details.environment)
+                        env[envName.text] = envVal.text
+                        Store.setEnvironment(details.uuid, env)
+                        envName.text = ""
+                        envVal.text = ""
+                        details = Store.selectedDetails()
+                    }
+                }
+            }
+
+            Controls.ComboBox {
+                id: managerBox
+                Kirigami.FormData.label: i18n("Update manager")
+                model: Store.updateManagers()
+                Accessible.name: i18n("Update manager")
+            }
+            Controls.TextField {
+                id: sourceUrl
+                Kirigami.FormData.label: i18n("URL / project")
+                text: (details.updateConfig && (details.updateConfig.url || details.updateConfig.project)) || ""
+                Accessible.name: i18n("Update source configuration")
+            }
+            Controls.Label {
+                visible: managerBox.currentText === "ftp"
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+                text: i18n("FTP is a legacy insecure transport. Credentials are rejected.")
+                color: Kirigami.Theme.neutralTextColor
+            }
+            RowLayout {
+                Controls.Button {
+                    text: i18n("Save update source")
+                    onClicked: {
+                        const cfg = {}
+                        if (managerBox.currentText === "static" || managerBox.currentText === "ftp")
+                            cfg.url = sourceUrl.text
+                        else if (managerBox.currentText === "gitlab")
+                            cfg.project = sourceUrl.text
+                        else {
+                            const parts = sourceUrl.text.split("/")
+                            cfg.username = parts[0] || ""
+                            cfg.repo = parts[1] || ""
+                        }
+                        Store.setUpdateSource(details.uuid, managerBox.currentText, cfg)
+                        details = Store.selectedDetails()
+                    }
+                }
+                Controls.Button {
+                    text: i18n("Reset update source")
+                    onClicked: {
+                        Store.unsetUpdateSource(details.uuid)
+                        details = Store.selectedDetails()
+                    }
+                }
             }
         }
 
@@ -43,6 +181,13 @@ Kirigami.ScrollablePage {
             Controls.Button {
                 text: i18n("Refresh metadata")
                 onClicked: Store.refreshMetadata(details.uuid)
+            }
+            Controls.Button {
+                visible: !details.owned
+                text: i18n("Adopt")
+                Accessible.name: i18n("Adopt unmanaged AppImage")
+                Controls.ToolTip.text: i18n("Register this discovered AppImage as owned without rewriting or deleting files. Ownership means Gosh AppImage Manager may later update or remove it.")
+                onClicked: adoptDialog.open()
             }
             Controls.Button {
                 text: i18n("Move to Trash")
@@ -72,5 +217,19 @@ Kirigami.ScrollablePage {
         subtitle: i18n("This permanently deletes %1. This cannot be undone.", details.path)
         standardButtons: Kirigami.Dialog.Ok | Kirigami.Dialog.Cancel
         onAccepted: Store.removeApp(details.uuid, true)
+    }
+    Kirigami.PromptDialog {
+        id: forceDialog
+        title: i18n("Force update while running?")
+        subtitle: i18n("%1 is running. Forcing an update can crash it.", details.path)
+        standardButtons: Kirigami.Dialog.Ok | Kirigami.Dialog.Cancel
+        onAccepted: Store.updateApp(details.uuid, true)
+    }
+    Kirigami.PromptDialog {
+        id: adoptDialog
+        title: i18n("Adopt unmanaged AppImage?")
+        subtitle: i18n("Adoption records %1 in the Gosh registry without rewriting or deleting the AppImage, desktop file, or icon. After adoption this application may update or remove it.", details.path)
+        standardButtons: Kirigami.Dialog.Ok | Kirigami.Dialog.Cancel
+        onAccepted: Store.adoptApp(details.uuid)
     }
 }

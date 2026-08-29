@@ -9,12 +9,6 @@
 
 namespace GoshAim {
 
-struct DesktopAction {
-    QString id;
-    QString name;
-    QStringList arguments;
-};
-
 struct ParsedDesktop {
     bool ok = false;
     QString error;
@@ -47,6 +41,11 @@ public:
     static bool isSafeEntry(const QString &entry, QString *error = nullptr);
     static bool isSafeLinkTarget(const QString &entry, const QString &target, QString *error = nullptr);
     static QStringList filterExtractable(const QStringList &entries, QString *error = nullptr);
+    static QStringList filterExtractable(const QVector<ArchiveEntry> &entries, QString *error = nullptr);
+    static QVector<ArchiveEntry> parseUnsquashfsList(const QByteArray &listing, QString *error = nullptr);
+    static QVector<ArchiveEntry> parse7zList(const QByteArray &listing, QString *error = nullptr);
+    static QVector<ArchiveEntry> parseDwarfsList(const QByteArray &listing, QString *error = nullptr);
+    static bool verifyExtractedTree(const QString &root, qint64 maxBytes, QString *error = nullptr);
 };
 
 } // namespace GoshAim

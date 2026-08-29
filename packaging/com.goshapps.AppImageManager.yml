@@ -27,15 +27,19 @@ modules:
     build-commands:
       - XZ_SUPPORT=1 ZSTD_SUPPORT=1 LZ4_SUPPORT=1 make -C squashfs-tools -j ${FLATPAK_BUILDER_N_JOBS} unsquashfs
       - install -Dm755 squashfs-tools/unsquashfs -t ${FLATPAK_DEST}/bin/
+      - install -Dm644 COPYING ${FLATPAK_DEST}/share/gosh-appimage-manager/licenses/squashfs-tools/COPYING
     sources:
-      - type: git
-        url: https://github.com/plougher/squashfs-tools.git
-        commit: 708c59ae80853b0845017c33b42e56061cc546cd
+      - type: archive
+        url: https://github.com/plougher/squashfs-tools/archive/refs/tags/4.6.1.tar.gz
+        sha256: 9c4974e07c61547dae14af4ed1f358b7d04618ae194e54d6be72ee126f0d2f53
+        strip-components: 1
   - name: 7zip
     buildsystem: simple
     build-commands:
       - tar -xf 7z/7z.tar.xz -C 7z
       - install -Dm755 7z/7zz -t ${FLATPAK_DEST}/bin/
+      - install -Dm644 License.txt ${FLATPAK_DEST}/share/gosh-appimage-manager/licenses/7zip/License.txt
+      - install -Dm644 7z2600-src.tar.xz ${FLATPAK_DEST}/share/gosh-appimage-manager/corresponding-source/7z2600-src.tar.xz
     cleanup:
       - 7z
     sources:
@@ -53,6 +57,12 @@ modules:
         dest-filename: 7z.tar.xz
         only-arches:
           - aarch64
+      - type: file
+        url: https://github.com/ip7z/7zip/releases/download/26.00/7z2600-src.tar.xz
+        sha256: 3e596155744af055a77fc433c703d54e3ea9212246287b5b1436a6beac060f16
+        dest-filename: 7z2600-src.tar.xz
+      - type: file
+        path: ../third_party/licenses/7zip/License.txt
   - name: dwarfs
     buildsystem: simple
     cleanup:
@@ -60,6 +70,9 @@ modules:
     build-commands:
       - install -Dm755 dwarfs/bin/dwarfsextract -t ${FLATPAK_DEST}/bin/
       - install -Dm755 dwarfs/bin/dwarfsck -t ${FLATPAK_DEST}/bin/
+      - install -Dm644 LICENSE ${FLATPAK_DEST}/share/gosh-appimage-manager/licenses/dwarfs/LICENSE
+      - install -Dm644 GPL-3.0-or-later.txt ${FLATPAK_DEST}/share/gosh-appimage-manager/licenses/dwarfs/GPL-3.0-or-later.txt
+      - install -Dm644 dwarfs-0.15.3.tar.gz ${FLATPAK_DEST}/share/gosh-appimage-manager/corresponding-source/dwarfs-0.15.3.tar.gz
     sources:
       - type: archive
         sha256: 2dba61946786ec563c96783f719316199eeb55a4cbde1436e1b5796f28494fa8
@@ -73,6 +86,14 @@ modules:
         dest: dwarfs
         only-arches:
           - aarch64
+      - type: file
+        url: https://github.com/mhx/dwarfs/archive/refs/tags/v0.15.3.tar.gz
+        sha256: 63919bb7c1df16c17210dd15e5028c44b813bbd422b9067bd4a43344bcff9a96
+        dest-filename: dwarfs-0.15.3.tar.gz
+      - type: file
+        path: ../third_party/licenses/dwarfs/LICENSE
+      - type: file
+        path: ../third_party/licenses/dwarfs/GPL-3.0-or-later.txt
   - name: gosh-appimage-manager
     buildsystem: cmake-ninja
     config-opts:

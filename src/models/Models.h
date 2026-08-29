@@ -130,7 +130,14 @@ public:
         ErrorRole,
         IconRole,
         TerminalRole,
-        UpdateSourceRole
+        UpdateSourceRole,
+        PlannedTargetRole,
+        CopyOutcomeRole,
+        ConflictStatusRole,
+        ConflictingUuidRole,
+        ConflictingNameRole,
+        NeedsDecisionRole,
+        ExistingManagedRole
     };
     explicit CandidateModel(QObject *parent = nullptr);
     int rowCount(const QModelIndex &parent = {}) const override;

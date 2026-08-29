@@ -2,9 +2,16 @@
 
 #include "Limits.h"
 
+#include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QHash>
 #include <QRegularExpression>
+
+#include <fcntl.h>
+#include <ftw.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace GoshAim {
 
@@ -419,7 +426,103 @@ bool ArchiveGuard::isSafeLinkTarget(const QString &entry, const QString &target,
     return isSafeEntry(entry, error);
 }
 
+namespace {
+
+bool isWantedMetadata(const QString &entry)
+{
+    const QString base = entry.section(QLatin1Char('/'), -1);
+    if (entry.endsWith(QLatin1String(".desktop"), Qt::CaseInsensitive) && !entry.contains(QLatin1Char('/'))) {
+        return true;
+    }
+    if (entry == QLatin1String(".DirIcon") || base == QLatin1String(".DirIcon")) {
+        return true;
+    }
+    if ((entry.endsWith(QLatin1String(".png"), Qt::CaseInsensitive) || entry.endsWith(QLatin1String(".svg"), Qt::CaseInsensitive))
+        && entry.count(QLatin1Char('/')) <= 2) {
+        return true;
+    }
+    return false;
+}
+
+QString stripListPrefix(QString path)
+{
+    path = path.trimmed();
+    if (path.startsWith(QLatin1String("./"))) {
+        path = path.mid(2);
+    }
+    const QStringList prefixes = {QStringLiteral("squashfs-root/"), QStringLiteral("root/")};
+    for (const QString &prefix : prefixes) {
+        if (path.startsWith(prefix)) {
+            path = path.mid(prefix.size());
+        }
+    }
+    return path;
+}
+
+thread_local QString g_extractWalkError;
+thread_local qint64 g_extractWalkBytes = 0;
+thread_local int g_extractWalkFiles = 0;
+thread_local qint64 g_extractWalkLimit = 0;
+thread_local QString g_extractWalkRoot;
+
+int ntfwVerify(const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf)
+{
+    Q_UNUSED(ftwbuf);
+    const QString path = QString::fromLocal8Bit(fpath);
+    if (typeflag == FTW_SL || typeflag == FTW_SLN) {
+        char buf[4096];
+        const ssize_t n = ::readlink(fpath, buf, sizeof(buf) - 1);
+        if (n <= 0) {
+            g_extractWalkError = QStringLiteral("Unreadable symlink in extraction");
+            return 1;
+        }
+        buf[n] = 0;
+        const QString target = QString::fromLocal8Bit(buf);
+        QString err;
+        if (!ArchiveGuard::isSafeLinkTarget(QFileInfo(path).fileName(), target, &err)) {
+            g_extractWalkError = err;
+            return 1;
+        }
+        return 0;
+    }
+    if (S_ISCHR(sb->st_mode) || S_ISBLK(sb->st_mode) || S_ISFIFO(sb->st_mode) || S_ISSOCK(sb->st_mode)) {
+        g_extractWalkError = QStringLiteral("Device or special node in extraction");
+        return 1;
+    }
+    if (typeflag == FTW_F) {
+        ++g_extractWalkFiles;
+        g_extractWalkBytes += sb->st_size;
+        if (g_extractWalkFiles > kMaxExtractedFiles) {
+            g_extractWalkError = QStringLiteral("Too many extracted files");
+            return 1;
+        }
+        if (g_extractWalkBytes > g_extractWalkLimit) {
+            g_extractWalkError = QStringLiteral("Extracted size exceeded bound");
+            return 1;
+        }
+        if (sb->st_size > kMaxExtractedBytes) {
+            g_extractWalkError = QStringLiteral("Extracted file exceeded per-file bound");
+            return 1;
+        }
+    }
+    return 0;
+}
+
+} // namespace
+
 QStringList ArchiveGuard::filterExtractable(const QStringList &entries, QString *error)
+{
+    QVector<ArchiveEntry> typed;
+    typed.reserve(entries.size());
+    for (const QString &entry : entries) {
+        ArchiveEntry item;
+        item.path = entry;
+        typed.append(item);
+    }
+    return filterExtractable(typed, error);
+}
+
+QStringList ArchiveGuard::filterExtractable(const QVector<ArchiveEntry> &entries, QString *error)
 {
     QStringList out;
     if (entries.size() > kMaxArchiveEntries) {
@@ -428,23 +531,50 @@ QStringList ArchiveGuard::filterExtractable(const QStringList &entries, QString 
         }
         return {};
     }
-    for (const QString &entry : entries) {
+    qint64 total = 0;
+    for (const ArchiveEntry &entry : entries) {
         QString itemError;
-        if (!isSafeEntry(entry, &itemError)) {
+        if (entry.kind == ArchiveEntryKind::Device || entry.kind == ArchiveEntryKind::Other) {
+            if (error) {
+                *error = QStringLiteral("Archive contains a device or special node");
+            }
+            return {};
+        }
+        if (!isSafeEntry(entry.path, &itemError)) {
             if (error) {
                 *error = itemError;
             }
             return {};
         }
-        const QString base = entry.section(QLatin1Char('/'), -1);
-        if (entry.endsWith(QLatin1String(".desktop"), Qt::CaseInsensitive) && !entry.contains(QLatin1Char('/'))) {
-            out.append(entry);
-        } else if (entry == QLatin1String(".DirIcon") || base == QLatin1String(".DirIcon")) {
-            out.append(entry);
-        } else if ((entry.endsWith(QLatin1String(".png"), Qt::CaseInsensitive)
-                    || entry.endsWith(QLatin1String(".svg"), Qt::CaseInsensitive))
-                   && entry.count(QLatin1Char('/')) <= 2) {
-            out.append(entry);
+        if (entry.kind == ArchiveEntryKind::Symlink) {
+            if (!isSafeLinkTarget(entry.path, entry.linkTarget, &itemError)) {
+                if (error) {
+                    *error = itemError;
+                }
+                return {};
+            }
+            continue;
+        }
+        if (entry.kind == ArchiveEntryKind::Directory) {
+            continue;
+        }
+        if (entry.size < 0 || entry.size > kMaxExtractedBytes) {
+            if (entry.size > kMaxExtractedBytes) {
+                if (error) {
+                    *error = QStringLiteral("Archive member exceeds per-file bound");
+                }
+                return {};
+            }
+        }
+        total += qMax<qint64>(0, entry.size);
+        if (total > kMaxExtractedBytes) {
+            if (error) {
+                *error = QStringLiteral("Archive expanded size exceeded bound");
+            }
+            return {};
+        }
+        if (isWantedMetadata(entry.path)) {
+            out.append(entry.path);
         }
         if (out.size() > kMaxExtractedFiles) {
             if (error) {
@@ -454,6 +584,191 @@ QStringList ArchiveGuard::filterExtractable(const QStringList &entries, QString 
         }
     }
     return out;
+}
+
+QVector<ArchiveEntry> ArchiveGuard::parseUnsquashfsList(const QByteArray &listing, QString *error)
+{
+    QVector<ArchiveEntry> out;
+    const QString text = QString::fromUtf8(listing);
+    for (QString line : text.split(QLatin1Char('\n'))) {
+        line = line.trimmed();
+        if (line.isEmpty() || line.startsWith(QLatin1String("unsquashfs")) || line.startsWith(QLatin1String("Parallel"))) {
+            continue;
+        }
+        ArchiveEntry entry;
+        if (line.size() >= 10 && (line[0] == QLatin1Char('-') || line[0] == QLatin1Char('d') || line[0] == QLatin1Char('l')
+                                  || line[0] == QLatin1Char('c') || line[0] == QLatin1Char('b') || line[0] == QLatin1Char('p')
+                                  || line[0] == QLatin1Char('s'))) {
+            const QChar kind = line[0];
+            if (kind == QLatin1Char('c') || kind == QLatin1Char('b') || kind == QLatin1Char('p') || kind == QLatin1Char('s')) {
+                entry.kind = ArchiveEntryKind::Device;
+            } else if (kind == QLatin1Char('d')) {
+                entry.kind = ArchiveEntryKind::Directory;
+            } else if (kind == QLatin1Char('l')) {
+                entry.kind = ArchiveEntryKind::Symlink;
+            } else {
+                entry.kind = ArchiveEntryKind::File;
+            }
+            const int arrow = line.lastIndexOf(QLatin1String(" -> "));
+            QString rest = line;
+            if (arrow > 0) {
+                entry.linkTarget = line.mid(arrow + 4).trimmed();
+                rest = line.left(arrow);
+            }
+            const QStringList parts = rest.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+            if (parts.size() >= 6) {
+                entry.size = parts.at(2).toLongLong();
+                entry.path = stripListPrefix(parts.mid(5).join(QLatin1Char(' ')));
+            } else if (parts.size() >= 2) {
+                entry.path = stripListPrefix(parts.last());
+            }
+        } else {
+            entry.path = stripListPrefix(line);
+            entry.kind = ArchiveEntryKind::File;
+        }
+        if (entry.path.isEmpty() || entry.path == QLatin1String(".") || entry.path == QLatin1String("squashfs-root")) {
+            continue;
+        }
+        out.append(entry);
+        if (out.size() > kMaxArchiveEntries + 1) {
+            if (error) {
+                *error = QStringLiteral("Archive listing exceeded entry bound");
+            }
+            return {};
+        }
+    }
+    return out;
+}
+
+QVector<ArchiveEntry> ArchiveGuard::parse7zList(const QByteArray &listing, QString *error)
+{
+    QVector<ArchiveEntry> out;
+    ArchiveEntry current;
+    bool inItem = false;
+    const QString text = QString::fromUtf8(listing);
+    const auto flush = [&]() {
+        if (inItem && !current.path.isEmpty()) {
+            out.append(current);
+        }
+        current = {};
+        inItem = false;
+    };
+    for (QString line : text.split(QLatin1Char('\n'))) {
+        line = line.trimmed();
+        if (line.startsWith(QLatin1String("Path = "))) {
+            flush();
+            current.path = stripListPrefix(line.mid(7).trimmed());
+            inItem = true;
+        } else if (line.startsWith(QLatin1String("Size = "))) {
+            current.size = line.mid(7).trimmed().toLongLong();
+        } else if (line.startsWith(QLatin1String("Folder = "))) {
+            if (line.mid(9).trimmed() == QLatin1String("+")) {
+                current.kind = ArchiveEntryKind::Directory;
+            }
+        } else if (line.startsWith(QLatin1String("Attributes = "))) {
+            const QString attr = line.mid(13).trimmed();
+            if (attr.contains(QLatin1Char('D'))) {
+                current.kind = ArchiveEntryKind::Directory;
+            }
+        } else if (line.startsWith(QLatin1String("Symbolic Link = "))) {
+            const QString target = line.mid(16).trimmed();
+            if (!target.isEmpty()) {
+                current.kind = ArchiveEntryKind::Symlink;
+                current.linkTarget = target;
+            }
+        } else if (line.startsWith(QLatin1String("Character")) || line.startsWith(QLatin1String("Block"))
+                   || line.contains(QLatin1String("Node = "))) {
+            if (inItem) {
+                current.kind = ArchiveEntryKind::Device;
+            }
+        }
+        if (out.size() > kMaxArchiveEntries + 1) {
+            if (error) {
+                *error = QStringLiteral("Archive listing exceeded entry bound");
+            }
+            return {};
+        }
+    }
+    flush();
+    return out;
+}
+
+QVector<ArchiveEntry> ArchiveGuard::parseDwarfsList(const QByteArray &listing, QString *error)
+{
+    QVector<ArchiveEntry> out;
+    const QString text = QString::fromUtf8(listing);
+    for (QString line : text.split(QLatin1Char('\n'))) {
+        line = line.trimmed();
+        if (line.isEmpty() || line.startsWith(QLatin1Char('#'))) {
+            continue;
+        }
+        ArchiveEntry entry;
+        if (line.size() >= 10 && (line[0] == QLatin1Char('-') || line[0] == QLatin1Char('d') || line[0] == QLatin1Char('l')
+                                  || line[0] == QLatin1Char('c') || line[0] == QLatin1Char('b'))) {
+            const QChar kind = line[0];
+            if (kind == QLatin1Char('c') || kind == QLatin1Char('b')) {
+                entry.kind = ArchiveEntryKind::Device;
+            } else if (kind == QLatin1Char('d')) {
+                entry.kind = ArchiveEntryKind::Directory;
+            } else if (kind == QLatin1Char('l')) {
+                entry.kind = ArchiveEntryKind::Symlink;
+            }
+            const int arrow = line.lastIndexOf(QLatin1String(" -> "));
+            QString rest = line;
+            if (arrow > 0) {
+                entry.linkTarget = line.mid(arrow + 4).trimmed();
+                rest = line.left(arrow);
+            }
+            const QStringList parts = rest.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+            if (!parts.isEmpty()) {
+                entry.path = stripListPrefix(parts.last());
+            }
+            if (parts.size() >= 5) {
+                entry.size = parts.at(4).toLongLong();
+            }
+        } else {
+            const QStringList parts = line.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+            if (parts.size() >= 2 && parts.first().at(0).isDigit()) {
+                entry.size = parts.first().toLongLong();
+                entry.path = stripListPrefix(parts.last());
+            } else {
+                entry.path = stripListPrefix(line);
+            }
+        }
+        if (entry.path.isEmpty() || entry.path == QLatin1String(".")) {
+            continue;
+        }
+        out.append(entry);
+        if (out.size() > kMaxArchiveEntries + 1) {
+            if (error) {
+                *error = QStringLiteral("Archive listing exceeded entry bound");
+            }
+            return {};
+        }
+    }
+    return out;
+}
+
+bool ArchiveGuard::verifyExtractedTree(const QString &root, qint64 maxBytes, QString *error)
+{
+    g_extractWalkError.clear();
+    g_extractWalkBytes = 0;
+    g_extractWalkFiles = 0;
+    g_extractWalkLimit = maxBytes;
+    g_extractWalkRoot = root;
+    if (::nftw(root.toLocal8Bit().constData(), ntfwVerify, 16, FTW_PHYS) != 0) {
+        if (error) {
+            *error = g_extractWalkError.isEmpty() ? QStringLiteral("Extracted tree failed safety walk") : g_extractWalkError;
+        }
+        return false;
+    }
+    if (!g_extractWalkError.isEmpty()) {
+        if (error) {
+            *error = g_extractWalkError;
+        }
+        return false;
+    }
+    return true;
 }
 
 } // namespace GoshAim

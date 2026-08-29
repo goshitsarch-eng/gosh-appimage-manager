@@ -6,22 +6,79 @@
 #include "core/ManagedRegistry.h"
 #include "core/SettingsStore.h"
 
+#include <QCryptographicHash>
+#include <QDir>
+#include <QFile>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QtTest>
 
 using namespace GoshAim;
 
+class FailingRegistry : public ManagedRegistry
+{
+public:
+    using ManagedRegistry::ManagedRegistry;
+    bool failSave = false;
+    bool save(QString *error = nullptr) override
+    {
+        if (failSave) {
+            if (error) {
+                *error = QStringLiteral("Forced registry save failure");
+            }
+            return false;
+        }
+        return ManagedRegistry::save(error);
+    }
+};
+
+class FailingDesktop : public DesktopIntegration
+{
+public:
+    using DesktopIntegration::DesktopIntegration;
+    bool failWrite = false;
+    bool failInstall = false;
+    bool writeStaged(const InstalledApp &app, const QString &stagedDesktop, const QString &stagedIcon, QString *error) override
+    {
+        if (failWrite) {
+            if (error) {
+                *error = QStringLiteral("Forced desktop write failure");
+            }
+            return false;
+        }
+        return DesktopIntegration::writeStaged(app, stagedDesktop, stagedIcon, error);
+    }
+    bool install(const InstalledApp &app, const QString &stagedDesktop, const QString &stagedIcon, QString *error) override
+    {
+        if (failInstall) {
+            if (error) {
+                *error = QStringLiteral("Forced desktop install failure");
+            }
+            return false;
+        }
+        return DesktopIntegration::install(app, stagedDesktop, stagedIcon, error);
+    }
+};
+
 class TestIntegration : public QObject
 {
     Q_OBJECT
     QTemporaryDir m_home;
     SettingsStore *m_settings = nullptr;
-    ManagedRegistry *m_registry = nullptr;
+    FailingRegistry *m_registry = nullptr;
     FakeProcessRunner m_runner;
     AppImageInspector *m_inspector = nullptr;
-    DesktopIntegration *m_desktop = nullptr;
+    FailingDesktop *m_desktop = nullptr;
     IntegrationService *m_service = nullptr;
+
+    static QByteArray fileBytes(const QString &path)
+    {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            return {};
+        }
+        return file.readAll();
+    }
 
     void setup()
     {
@@ -29,11 +86,24 @@ class TestIntegration : public QObject
         qputenv("HOME", m_home.path().toUtf8());
         m_settings = new SettingsStore(this, m_home.path() + QStringLiteral("/cfg"));
         m_settings->setManagedFolder(m_home.path() + QStringLiteral("/AppImages"));
-        m_registry = new ManagedRegistry(m_settings);
+        m_registry = new FailingRegistry(m_settings);
         m_inspector = new AppImageInspector(&m_runner, m_settings, m_registry);
-        m_desktop = new DesktopIntegration(m_settings, &m_runner);
+        m_desktop = new FailingDesktop(m_settings, &m_runner);
         m_service = new IntegrationService(m_settings, m_registry, m_inspector, m_desktop, &m_runner);
     }
+
+    bool noOrphans() const
+    {
+        const QDir dir(m_settings->managedFolder());
+        const QFileInfoList entries = dir.entryInfoList(QDir::Files);
+        for (const QFileInfo &info : entries) {
+            if (info.fileName().contains(QLatin1String(".gosh-"))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
 private Q_SLOTS:
     void initTestCase() { setup(); }
     void copiesAndOwns()
@@ -53,6 +123,7 @@ private Q_SLOTS:
         const QByteArray text = desktop.readAll();
         QVERIFY(text.contains("X-Gosh-AppImage-Manager=true"));
         QVERIFY(text.contains("TryExec="));
+        QVERIFY(noOrphans());
     }
     void rollbackOnCopyCancel()
     {
@@ -64,6 +135,7 @@ private Q_SLOTS:
         const IntegrateResult result = m_service->integrate(req, &cancel);
         QVERIFY(!result.ok);
         QVERIFY(QFile::exists(src));
+        QVERIFY(noOrphans());
     }
     void replaceRequiresOwned()
     {
@@ -74,11 +146,143 @@ private Q_SLOTS:
         const IntegrateResult result = m_service->integrate(req);
         QVERIFY(!result.ok);
     }
+    void replaceSuccessPreservesSettings()
+    {
+        const QByteArray original = TestFixt::makeElf64(Architecture::X86_64, 2, QByteArray(), QByteArray(32, 'A'));
+        const QString src1 = TestFixt::writeFile(m_home.path(), QStringLiteral("Orig.AppImage"), original);
+        IntegrateRequest req;
+        req.sourcePath = src1;
+        req.conflict = ConflictPolicy::KeepBoth;
+        const IntegrateResult first = m_service->integrate(req);
+        QVERIFY(first.ok);
+        InstalledApp app = first.app;
+        app.arguments = QStringList{QStringLiteral("keep me")};
+        EnvPair env;
+        env.name = QStringLiteral("FOO");
+        env.value = QStringLiteral("bar");
+        app.environment.append(env);
+        app.updateManager = QStringLiteral("static");
+        m_registry->upsert(app);
+        m_registry->save();
+        const QByteArray replacement = TestFixt::makeElf64(Architecture::X86_64, 2, QByteArray(), QByteArray(48, 'B'));
+        const QString src2 = TestFixt::writeFile(m_home.path(), QStringLiteral("New.AppImage"), replacement);
+        IntegrateRequest replace;
+        replace.sourcePath = src2;
+        replace.conflict = ConflictPolicy::Replace;
+        replace.replaceUuid = app.uuid;
+        const IntegrateResult result = m_service->integrate(replace);
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(fileBytes(result.app.managedPath), replacement);
+        QCOMPARE(m_registry->byUuid(app.uuid).arguments, QStringList{QStringLiteral("keep me")});
+        QVERIFY(QFile::exists(src2));
+        QVERIFY(noOrphans());
+    }
+    void replaceDesktopInstallFailureRestoresBytes()
+    {
+        const QByteArray original = TestFixt::makeElf64(Architecture::X86_64, 2, QByteArray(), QByteArray(16, 'C'));
+        const QString src1 = TestFixt::writeFile(m_home.path(), QStringLiteral("Live.AppImage"), original);
+        IntegrateRequest req;
+        req.sourcePath = src1;
+        req.conflict = ConflictPolicy::KeepBoth;
+        const IntegrateResult first = m_service->integrate(req);
+        QVERIFY(first.ok);
+        const QString dest = first.app.managedPath;
+        const QByteArray before = fileBytes(dest);
+        const QString desktopBefore = first.app.desktopPath;
+        QFile desk(desktopBefore);
+        QVERIFY(desk.open(QIODevice::ReadOnly));
+        const QByteArray desktopBytes = desk.readAll();
+        desk.close();
+        m_desktop->failInstall = true;
+        const QByteArray replacement = TestFixt::makeElf64(Architecture::X86_64, 2, QByteArray(), QByteArray(24, 'D'));
+        const QString src2 = TestFixt::writeFile(m_home.path(), QStringLiteral("FailInstall.AppImage"), replacement);
+        IntegrateRequest replace;
+        replace.sourcePath = src2;
+        replace.conflict = ConflictPolicy::Replace;
+        replace.replaceUuid = first.app.uuid;
+        const IntegrateResult result = m_service->integrate(replace);
+        m_desktop->failInstall = false;
+        QVERIFY(!result.ok);
+        QCOMPARE(fileBytes(dest), before);
+        QFile desk2(desktopBefore);
+        QVERIFY(desk2.open(QIODevice::ReadOnly));
+        QCOMPARE(desk2.readAll(), desktopBytes);
+        QVERIFY(QFile::exists(src2));
+        QVERIFY(noOrphans());
+    }
+    void replaceRegistrySaveFailureRestores()
+    {
+        const QByteArray original = TestFixt::makeElf64(Architecture::X86_64, 2, QByteArray(), QByteArray(16, 'E'));
+        const QString src1 = TestFixt::writeFile(m_home.path(), QStringLiteral("Reg.AppImage"), original);
+        IntegrateRequest req;
+        req.sourcePath = src1;
+        req.conflict = ConflictPolicy::KeepBoth;
+        const IntegrateResult first = m_service->integrate(req);
+        QVERIFY(first.ok);
+        const QByteArray before = fileBytes(first.app.managedPath);
+        m_registry->failSave = true;
+        const QByteArray replacement = TestFixt::makeElf64(Architecture::X86_64, 2, QByteArray(), QByteArray(24, 'F'));
+        const QString src2 = TestFixt::writeFile(m_home.path(), QStringLiteral("FailReg.AppImage"), replacement);
+        IntegrateRequest replace;
+        replace.sourcePath = src2;
+        replace.conflict = ConflictPolicy::Replace;
+        replace.replaceUuid = first.app.uuid;
+        const IntegrateResult result = m_service->integrate(replace);
+        m_registry->failSave = false;
+        QVERIFY(!result.ok);
+        QCOMPARE(fileBytes(first.app.managedPath), before);
+        QCOMPARE(m_registry->byUuid(first.app.uuid).sha256, first.app.sha256);
+        QVERIFY(QFile::exists(src2));
+        QVERIFY(noOrphans());
+    }
+    void desktopWriteFailureLeavesSource()
+    {
+        m_desktop->failWrite = true;
+        const QString src = TestFixt::writeFile(m_home.path(), QStringLiteral("WriteFail.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2));
+        IntegrateRequest req;
+        req.sourcePath = src;
+        req.conflict = ConflictPolicy::KeepBoth;
+        const IntegrateResult result = m_service->integrate(req);
+        m_desktop->failWrite = false;
+        QVERIFY(!result.ok);
+        QVERIFY(QFile::exists(src));
+        QVERIFY(noOrphans());
+    }
+    void moveSourceFailureIsReported()
+    {
+        const QString src = TestFixt::writeFile(m_home.path(), QStringLiteral("MoveFail.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2));
+        IntegrateRequest req;
+        req.sourcePath = src;
+        req.conflict = ConflictPolicy::KeepBoth;
+        req.copyMode = CopyMode::Move;
+        m_service->setFailPoint(IntegrateFailPoint::SourceDelete);
+        const IntegrateResult result = m_service->integrate(req);
+        m_service->setFailPoint(IntegrateFailPoint::None);
+        QVERIFY(!result.ok);
+        QVERIFY(result.partial);
+        QVERIFY(QFile::exists(src));
+        QVERIFY(QFile::exists(result.app.managedPath));
+    }
+    void unspecifiedConflictRequiresDecision()
+    {
+        const QString src = TestFixt::writeFile(m_home.path(), QStringLiteral("Conflict.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2));
+        IntegrateRequest first;
+        first.sourcePath = src;
+        first.conflict = ConflictPolicy::KeepBoth;
+        QVERIFY(m_service->integrate(first).ok);
+        IntegrateRequest second;
+        second.sourcePath = src;
+        second.conflict = ConflictPolicy::Unspecified;
+        const IntegrateResult result = m_service->integrate(second);
+        QVERIFY(!result.ok);
+        QVERIFY(result.error.contains(QLatin1String("keep-both")));
+    }
     void keepBothNames()
     {
-        const InspectionResult fake;
+        InspectionResult fake;
+        fake.metadata.name = QStringLiteral("Demo");
         const QString name = m_service->chooseDestinationName(fake, false);
-        QVERIFY(name.endsWith(QLatin1String(".AppImage")) || name == QStringLiteral("AppImage.AppImage") || !name.isEmpty());
+        QVERIFY(name.endsWith(QLatin1String(".AppImage")));
     }
 };
 

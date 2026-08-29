@@ -86,6 +86,11 @@ bool ManagedRegistry::removeUuid(const QString &uuid)
     return false;
 }
 
+void ManagedRegistry::restoreApps(const QVector<InstalledApp> &apps)
+{
+    m_apps = apps;
+}
+
 namespace {
 
 QJsonObject envToJson(const QVector<EnvPair> &env)

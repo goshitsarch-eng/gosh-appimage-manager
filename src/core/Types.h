@@ -39,6 +39,23 @@ struct EnvPair {
     QString value;
 };
 
+struct DesktopAction {
+    QString id;
+    QString name;
+    QStringList arguments;
+};
+
+enum class IntegrateFailPoint { None, AfterStage, DesktopWrite, DesktopInstall, RegistrySave, SourceDelete };
+enum class UpdateFailPoint { None, AfterDownload, AfterReplace, DesktopInstall, RegistrySave };
+enum class ArchiveEntryKind { File, Directory, Symlink, Device, Other };
+
+struct ArchiveEntry {
+    QString path;
+    ArchiveEntryKind kind = ArchiveEntryKind::File;
+    QString linkTarget;
+    qint64 size = 0;
+};
+
 struct FileIdentity {
     QString path;
     qint64 size = 0;
@@ -59,6 +76,7 @@ struct AppImageMetadata {
     QString tryExec;
     QString website;
     QString startupWmClass;
+    QVector<DesktopAction> actions;
 };
 
 struct EmbeddedUpdateInfo {
@@ -84,6 +102,15 @@ struct InspectionResult {
     bool extractionUsedUnsafeFallback = false;
     qint64 payloadOffset = -1;
     QString extractorUsed;
+    QString plannedTarget;
+    QString copyOutcome;
+    QString conflictStatus;
+    QString conflictingUuid;
+    QString conflictingPath;
+    QString conflictingName;
+    bool needsConflictDecision = false;
+    ConflictPolicy chosenPolicy = ConflictPolicy::KeepBoth;
+    QString chosenReplaceUuid;
 };
 
 struct InspectOptions {
@@ -126,6 +153,7 @@ struct InstalledApp {
     bool adopted = false;
     QString website;
     bool terminal = false;
+    QVector<DesktopAction> actions;
 };
 
 struct IntegrateRequest {
@@ -138,9 +166,17 @@ struct IntegrateRequest {
 
 struct IntegrateResult {
     bool ok = false;
+    bool partial = false;
     QString error;
     InstalledApp app;
     QStringList rolledBack;
+    bool sourceRemoved = false;
+};
+
+struct RemovalResult {
+    bool ok = false;
+    bool partial = false;
+    QString error;
 };
 
 struct RemovalRequest {

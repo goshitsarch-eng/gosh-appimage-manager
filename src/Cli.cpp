@@ -15,6 +15,7 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -77,11 +78,11 @@ QJsonObject appJson(const InstalledApp &app)
     return obj;
 }
 
-int printJson(const QJsonArray &items)
+int printJson(const QString &key, const QJsonArray &items)
 {
     QJsonObject root;
     root.insert(QStringLiteral("schema_version"), kJsonSchemaVersion);
-    root.insert(QStringLiteral("items"), items);
+    root.insert(key, items);
     const QByteArray data = QJsonDocument(root).toJson(QJsonDocument::Compact);
     fwrite(data.constData(), 1, static_cast<size_t>(data.size()), stdout);
     fputc('\n', stdout);
@@ -131,11 +132,11 @@ int runCli(AppController &controller, const QStringList &arguments, bool interac
                 out() << copy.name << QLatin1Char('\t') << copy.managedPath << QLatin1Char('\t') << copy.version << Qt::endl;
             }
         }
-        return json ? printJson(items) : int(ExitCode::Ok);
+        return json ? printJson(QStringLiteral("installed"), items) : int(ExitCode::Ok);
     }
 
     if (hasArg(arguments, QStringLiteral("--list-updates"))) {
-        const QVector<UpdateOffer> offers = controller.updates()->listUpdates();
+        const QVector<UpdateOffer> offers = controller.updates()->listUpdates(nullptr, false);
         QJsonArray items;
         for (const UpdateOffer &offer : offers) {
             if (json) {
@@ -155,13 +156,13 @@ int runCli(AppController &controller, const QStringList &arguments, bool interac
                       << Qt::endl;
             }
         }
-        return json ? printJson(items) : int(ExitCode::Ok);
+        return json ? printJson(QStringLiteral("updates"), items) : int(ExitCode::Ok);
     }
 
     if (hasArg(arguments, QStringLiteral("--integrate"))) {
         const QString path = argValue(arguments, QStringLiteral("--integrate"));
         if (path.isEmpty()) {
-            err() << QStringLiteral("Usage: --integrate <path> [--keep-both|--replace] [--yes]\n");
+            err() << QStringLiteral("Usage: --integrate <path> [--keep-both|--replace|--replace-uuid UUID|--target PATH] [--yes]\n");
             return int(ExitCode::Usage);
         }
         if (!yes && !confirm(QStringLiteral("Integrate %1?").arg(path), yes, interactiveTty)) {
@@ -169,9 +170,51 @@ int runCli(AppController &controller, const QStringList &arguments, bool interac
         }
         IntegrateRequest req;
         req.sourcePath = path;
-        req.conflict = replace ? ConflictPolicy::Replace : (keepBoth ? ConflictPolicy::KeepBoth : ConflictPolicy::KeepBoth);
         req.copyMode = controller.settings()->moveSource() ? CopyMode::Move : CopyMode::Copy;
         req.assumeYes = yes;
+        if (replace) {
+            req.conflict = ConflictPolicy::Replace;
+            QString target = argValue(arguments, QStringLiteral("--replace-uuid"));
+            if (target.isEmpty()) {
+                target = argValue(arguments, QStringLiteral("--target"));
+            }
+            InstalledApp owned;
+            if (!target.isEmpty()) {
+                owned = controller.registry()->byUuid(target);
+                if (owned.uuid.isEmpty()) {
+                    owned = controller.registry()->byPath(target);
+                }
+            } else {
+                owned = controller.registry()->byPath(path);
+                if (owned.uuid.isEmpty()) {
+                    InspectOptions options;
+                    options.allowUnsafeExtract = false;
+                    const InspectionResult inspected = controller.inspector()->inspect(path, options);
+                    if (!inspected.existingManagedId.isEmpty()) {
+                        owned = controller.registry()->byUuid(inspected.existingManagedId);
+                    }
+                    QVector<InstalledApp> matches;
+                    for (const InstalledApp &app : controller.registry()->apps()) {
+                        if (app.owned && QFileInfo(app.managedPath).fileName() == QFileInfo(path).fileName()) {
+                            matches.append(app);
+                        }
+                    }
+                    if (owned.uuid.isEmpty() && matches.size() == 1) {
+                        owned = matches.first();
+                    } else if (owned.uuid.isEmpty() && matches.size() > 1) {
+                        err() << QStringLiteral("Replace is ambiguous; pass --replace-uuid\n");
+                        return int(ExitCode::Validation);
+                    }
+                }
+            }
+            if (owned.uuid.isEmpty() || !owned.owned) {
+                err() << QStringLiteral("Replace requires a specific owned managed installation\n");
+                return int(ExitCode::NotIntegrated);
+            }
+            req.replaceUuid = owned.uuid;
+        } else {
+            req.conflict = keepBoth ? ConflictPolicy::KeepBoth : ConflictPolicy::KeepBoth;
+        }
         const IntegrateResult result = controller.integration()->integrate(req);
         if (!result.ok) {
             err() << result.error << Qt::endl;
@@ -297,8 +340,14 @@ int runCli(AppController &controller, const QStringList &arguments, bool interac
     }
 
     if (hasArg(arguments, QStringLiteral("--fetch-updates"))) {
-        const QVector<UpdateOffer> offers = controller.updates()->listUpdates();
+        const QVector<UpdateOffer> offers = controller.updates()->listUpdates(nullptr, false);
         err() << QStringLiteral("%1 update(s) available\n").arg(offers.size());
+        if (!offers.isEmpty()) {
+            for (const UpdateOffer &offer : offers) {
+                err() << offer.name << QStringLiteral(" ") << offer.currentVersion << QStringLiteral(" -> ")
+                      << offer.availableVersion << Qt::endl;
+            }
+        }
         return int(ExitCode::Ok);
     }
 
@@ -311,6 +360,17 @@ int runSelfTest(QApplication &app, AppController &controller)
     if (!controller.modelsReady()) {
         return 4;
     }
+    if (!controller.inspector() || !controller.integration() || !controller.updates() || !controller.taskQueue()) {
+        return 7;
+    }
+    if (controller.qmlActionNames().size() < 6) {
+        return 8;
+    }
+    controller.loadSyntheticCatalog();
+    if (controller.libraryModel()->rowCount() < 1) {
+        return 9;
+    }
+    controller.refreshLibrary();
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextObject(new KLocalizedContext(&engine));
     engine.rootContext()->setContextProperty(QStringLiteral("Store"), &controller);

@@ -19,16 +19,24 @@ TaskQueue::~TaskQueue()
 
 void TaskQueue::shutdown()
 {
-    m_stop.store(true);
+    const bool already = m_stop.exchange(true);
     cancelAll();
     m_cv.wakeAll();
     if (m_thread) {
-        m_thread->quit();
-        if (!m_thread->wait(15000)) {
-            m_thread->wait(15000);
+        if (!m_thread->wait(30000)) {
+            m_thread->wait();
         }
-        delete m_thread;
-        m_thread = nullptr;
+        if (m_thread->isRunning()) {
+            QObject::connect(m_thread, &QThread::finished, m_thread, &QObject::deleteLater);
+            m_thread->setParent(nullptr);
+            m_thread = nullptr;
+        } else {
+            delete m_thread;
+            m_thread = nullptr;
+        }
+    }
+    if (already) {
+        return;
     }
     QMutexLocker locker(&m_mutex);
     qDeleteAll(m_queue);

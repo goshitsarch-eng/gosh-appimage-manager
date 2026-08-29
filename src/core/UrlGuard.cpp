@@ -2,6 +2,7 @@
 
 #include <QAbstractSocket>
 #include <QHostAddress>
+#include <QHostInfo>
 #include <QRegularExpression>
 
 namespace GoshAim {
@@ -53,6 +54,66 @@ bool UrlGuard::isPrivateHost(const QString &host)
         }
     }
     return false;
+}
+
+bool UrlGuard::isDisallowedAddress(const QHostAddress &address)
+{
+    if (address.isNull()) {
+        return true;
+    }
+    if (address.isLoopback() || address.isLinkLocal() || address.isMulticast() || address.isBroadcast()) {
+        return true;
+    }
+    if (address == QHostAddress::Any || address == QHostAddress::AnyIPv4 || address == QHostAddress::AnyIPv6) {
+        return true;
+    }
+    return isPrivateHost(address.toString());
+}
+
+QList<QHostAddress> QtHostResolver::resolve(const QString &host)
+{
+    const QHostInfo info = QHostInfo::fromName(host);
+    return info.addresses();
+}
+
+UrlCheck UrlGuard::validateResolved(const QUrl &url, HostResolver *resolver, bool allowHttp, bool allowPrivate, bool allowFtp)
+{
+    UrlCheck check = validate(url, allowHttp, allowPrivate, allowFtp);
+    if (!check.ok) {
+        return check;
+    }
+    const QString host = url.host();
+    QHostAddress literal(host);
+    if (!literal.isNull()) {
+        check.resolved = {literal};
+        if (isDisallowedAddress(literal) && !allowPrivate) {
+            check.ok = false;
+            check.privateHost = true;
+            check.error = QStringLiteral("Private, loopback or link-local destinations are not allowed");
+        }
+        return check;
+    }
+    if (!resolver) {
+        return check;
+    }
+    const QList<QHostAddress> addresses = resolver->resolve(host);
+    check.resolved = addresses;
+    if (addresses.isEmpty()) {
+        check.ok = false;
+        check.error = QStringLiteral("DNS resolution failed");
+        return check;
+    }
+    for (const QHostAddress &address : addresses) {
+        if (isDisallowedAddress(address)) {
+            check.privateHost = true;
+            if (!allowPrivate) {
+                check.ok = false;
+                check.error = QStringLiteral("Resolved address is private, loopback, link-local, multicast or unspecified");
+                return check;
+            }
+        }
+    }
+    return check;
 }
 
 bool UrlGuard::isSafeRepoComponent(const QString &value)

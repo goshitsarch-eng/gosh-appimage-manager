@@ -1,0 +1,13 @@
+Bundled extraction tools
+========================
+
+Gosh AppImage Manager packages unsquashfs, 7zz, and dwarfsextract so AppImage
+metadata can be inspected without executing the candidate.
+
+Corresponding source is downloaded by the Flatpak manifest (pinned SHA-256)
+and installed to /app/share/gosh-appimage-manager/corresponding-source/.
+License texts are installed to /app/share/gosh-appimage-manager/licenses/.
+
+- squashfs-tools 4.6.1, GPL-2.0-or-later
+- 7-Zip 26.00, GNU LGPL with unRAR restriction (see License.txt)
+- dwarfs 0.15.3, GPL-3.0-or-later

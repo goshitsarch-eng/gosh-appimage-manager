@@ -45,6 +45,18 @@ private Q_SLOTS:
         QVERIFY(ArchiveGuard::filterExtractable(entries, &error).isEmpty());
         QVERIFY(!error.isEmpty());
     }
+    void parse7zRejectsAbsolute()
+    {
+        QString error;
+        const QVector<ArchiveEntry> entries = ArchiveGuard::parse7zList(QByteArray("Path = /etc/passwd\nSize = 1\n"), &error);
+        QVERIFY(ArchiveGuard::filterExtractable(entries, &error).isEmpty());
+    }
+    void parseDwarfsDeviceRejected()
+    {
+        QString error;
+        const QVector<ArchiveEntry> entries = ArchiveGuard::parseDwarfsList(QByteArray("crw-rw-rw- 1 0 0 1, 3 /dev/null\n"), &error);
+        QVERIFY(ArchiveGuard::filterExtractable(entries, &error).isEmpty());
+    }
 };
 
 QTEST_GUILESS_MAIN(TestArchive)

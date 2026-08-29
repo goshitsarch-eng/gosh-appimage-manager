@@ -1,4 +1,5 @@
 #include "core/TaskQueue.h"
+#include "QtWarnGuard.h"
 
 #include <QSignalSpy>
 #include <QThread>
@@ -13,6 +14,7 @@ class TestTasks : public QObject
 private Q_SLOTS:
     void serializesMutations()
     {
+        QtWarnGuard guard;
         TaskQueue queue;
         std::atomic<int> ran{0};
         const QString a = queue.enqueue(TaskKind::Integrate, QStringLiteral("a"), QStringLiteral("/tmp/x"),
@@ -23,9 +25,11 @@ private Q_SLOTS:
         QVERIFY(b.isEmpty());
         QTRY_VERIFY(ran.load() >= 1);
         queue.shutdown();
+        QVERIFY(!guard.sawLiveDestruction());
     }
     void cancelQueued()
     {
+        QtWarnGuard guard;
         TaskQueue queue;
         std::atomic<bool> started{false};
         queue.enqueue(TaskKind::Inspect, QStringLiteral("hang"), QStringLiteral("/tmp/y"),
@@ -39,13 +43,16 @@ private Q_SLOTS:
         QTRY_VERIFY(started.load());
         queue.cancelAll();
         queue.shutdown();
+        QVERIFY(!guard.sawLiveDestruction());
     }
     void shutdownJoinSafe()
     {
+        QtWarnGuard guard;
         auto *queue = new TaskQueue;
         queue->enqueue(TaskKind::Inspect, QStringLiteral("x"), QStringLiteral("/tmp/z"),
                        [](TaskItem &, std::atomic<bool> *) { QThread::msleep(20); }, false);
         delete queue;
+        QVERIFY(!guard.sawLiveDestruction());
     }
 };
 

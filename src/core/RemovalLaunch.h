@@ -22,6 +22,7 @@ public:
                    ProcessRunner *runner);
 
     bool trashFile(const QString &path, QString *error);
+    RemovalResult remove(const RemovalRequest &request, std::atomic<bool> *cancel = nullptr);
     bool remove(const RemovalRequest &request, QString *error, std::atomic<bool> *cancel = nullptr);
 
 private:

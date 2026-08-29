@@ -102,6 +102,13 @@ Kirigami.ScrollablePage {
                         applicationWindow().pageStack.push(Qt.resolvedUrl("DetailsPage.qml"))
                     }
                 }
+                Controls.Button {
+                    text: i18n("Adopt")
+                    visible: !model.owned
+                    Accessible.name: i18n("Adopt %1", model.name)
+                    Controls.ToolTip.text: i18n("Register this unmanaged AppImage without rewriting files")
+                    onClicked: Store.adoptApp(model.uuid)
+                }
             }
         }
     }

@@ -6,7 +6,11 @@
 #include "models/Models.h"
 
 #include <QObject>
+#include <QPointer>
+#include <QTimer>
 #include <QVariantMap>
+#include <atomic>
+#include <functional>
 #include <memory>
 
 namespace GoshAim {
@@ -41,6 +45,9 @@ class AppController : public QObject
     Q_PROPERTY(QString licenseText READ licenseText CONSTANT)
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     Q_PROPERTY(QString inspectSummary READ inspectSummary NOTIFY inspectSummaryChanged)
+    Q_PROPERTY(bool inspecting READ inspecting NOTIFY inspectingChanged)
+    Q_PROPERTY(int inspectProgress READ inspectProgress NOTIFY inspectProgressChanged)
+    Q_PROPERTY(QString updateSummary READ updateSummary NOTIFY updateSummaryChanged)
 
 public:
     explicit AppController(QObject *parent = nullptr,
@@ -66,6 +73,9 @@ public:
     QString licenseText() const;
     bool busy() const;
     QString inspectSummary() const { return m_inspectSummary; }
+    bool inspecting() const { return m_inspecting; }
+    int inspectProgress() const { return m_inspectProgress; }
+    QString updateSummary() const { return m_updateSummary; }
 
     ManagedRegistry *registry() const { return m_registry; }
     AppImageInspector *inspector() const { return m_inspector; }
@@ -75,18 +85,23 @@ public:
     UpdateService *updates() const { return m_updates; }
     TaskQueue *taskQueue() const { return m_tasks; }
     ProcessRunner *runner() const { return m_runner; }
+    DesktopIntegration *desktop() const { return m_desktop; }
 
     Q_INVOKABLE void refreshLibrary();
     Q_INVOKABLE void inspectPaths(const QStringList &paths);
-    Q_INVOKABLE void confirmIntegrate(int conflictPolicy, bool moveSource);
+    Q_INVOKABLE void confirmIntegrate(int conflictPolicy, bool moveSource, const QString &replaceUuid = {});
+    Q_INVOKABLE void setCandidateConflict(int row, int policy, const QString &replaceUuid);
     Q_INVOKABLE void cancelInspect();
+    Q_INVOKABLE void confirmUnsafeExtractFor(const QString &path, bool allow);
     Q_INVOKABLE void launchApp(const QString &uuid);
     Q_INVOKABLE void revealApp(const QString &uuid);
     Q_INVOKABLE void removeApp(const QString &uuid, bool permanent);
     Q_INVOKABLE void checkUpdate(const QString &uuid);
+    Q_INVOKABLE void checkAll();
     Q_INVOKABLE void updateApp(const QString &uuid, bool force);
     Q_INVOKABLE void updateAll(bool force);
     Q_INVOKABLE void cancelTask(const QString &id);
+    Q_INVOKABLE void retryTask(const QString &id);
     Q_INVOKABLE void refreshMetadata(const QString &uuid);
     Q_INVOKABLE void setArguments(const QString &uuid, const QStringList &arguments);
     Q_INVOKABLE void setEnvironment(const QString &uuid, const QVariantMap &env);
@@ -99,6 +114,10 @@ public:
     Q_INVOKABLE QString formatSize(qint64 bytes) const;
     Q_INVOKABLE QStringList updateManagers() const;
     Q_INVOKABLE void openAppImages(const QStringList &urls);
+    Q_INVOKABLE QString localPathFromUrl(const QString &url) const;
+    Q_INVOKABLE void setManagedFolderFromUrl(const QString &url);
+    Q_INVOKABLE QStringList qmlActionNames() const;
+    Q_INVOKABLE void loadSyntheticCatalog();
 
 Q_SIGNALS:
     void searchChanged();
@@ -106,6 +125,9 @@ Q_SIGNALS:
     void statusMessageChanged();
     void busyChanged();
     void inspectSummaryChanged();
+    void inspectingChanged();
+    void inspectProgressChanged();
+    void updateSummaryChanged();
     void toast(const QString &message);
     void confirmInspect();
     void confirmRemove(const QString &uuid, const QString &path, bool permanent);
@@ -114,6 +136,10 @@ Q_SIGNALS:
 private:
     void setStatus(const QString &message);
     void reloadTasks();
+    void finishInspect(const QVector<InspectionResult> &results, int generation);
+    void syncBackgroundChecks();
+    void applyDebugLogging();
+    void notifyUpdates(int count);
     ProcessRunner *m_runner = nullptr;
     NetworkClient *m_network = nullptr;
     ProcessTable *m_processes = nullptr;
@@ -136,12 +162,21 @@ private:
     UpdatesModel *m_updatesModel = nullptr;
     TaskModel *m_taskModel = nullptr;
     CandidateModel *m_candidateModel = nullptr;
+    QTimer *m_backgroundTimer = nullptr;
     QString m_search;
     QString m_sort = QStringLiteral("name");
     QString m_selectedUuid;
     QString m_status;
     QString m_inspectSummary;
+    QString m_updateSummary;
     QVector<InspectionResult> m_pendingInspect;
+    QString m_inspectTaskId;
+    int m_inspectGeneration = 0;
+    int m_inspectProgress = 0;
+    bool m_inspecting = false;
+    int m_updateAllRemaining = 0;
+    int m_updateAllFailed = 0;
+    int m_updateAllSucceeded = 0;
 };
 
 } // namespace GoshAim

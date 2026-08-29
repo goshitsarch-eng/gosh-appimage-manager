@@ -78,6 +78,107 @@ private Q_SLOTS:
         const InspectionResult result = inspector.inspect(home.path(), options);
         QVERIFY(!result.error.isEmpty());
     }
+    void unsquashfsRejectsAbsoluteAndNeverExtractsIt()
+    {
+        QTemporaryDir home;
+        SettingsStore settings(nullptr, home.path() + QStringLiteral("/cfg"));
+        ManagedRegistry registry(&settings);
+        FakeProcessRunner runner;
+        FakeProcessRunner::Rule list;
+        list.contains = QStringList{QStringLiteral("unsquashfs")};
+        list.result.exitCode = 0;
+        list.result.standardOutput = QByteArray("squashfs-root/demo.desktop\n/etc/passwd\n");
+        runner.rules.append(list);
+        AppImageInspector inspector(&runner, &settings, &registry);
+        const QString path = TestFixt::writeFile(home.path(), QStringLiteral("Demo.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2));
+        InspectOptions options;
+        inspector.inspect(path, options);
+        for (const auto &call : runner.calls) {
+            QVERIFY(!call.second.contains(QStringLiteral("/etc/passwd")));
+            QVERIFY(call.first != path);
+        }
+        for (const auto &call : runner.detachedCalls) {
+            QVERIFY(call.first != path);
+        }
+    }
+    void sevenZipListingUnsafeNeverExtracted()
+    {
+        QTemporaryDir home;
+        SettingsStore settings(nullptr, home.path() + QStringLiteral("/cfg"));
+        ManagedRegistry registry(&settings);
+        FakeProcessRunner runner;
+        FakeProcessRunner::Rule unsquash;
+        unsquash.contains = QStringList{QStringLiteral("unsquashfs")};
+        unsquash.result.failedToStart = true;
+        unsquash.result.exitCode = -1;
+        runner.rules.append(unsquash);
+        FakeProcessRunner::Rule list;
+        list.contains = QStringList{QStringLiteral("7zz"), QStringLiteral("l")};
+        list.result.exitCode = 0;
+        list.result.standardOutput = QByteArray("Path = ../etc/passwd\nSize = 12\nAttributes = A\n");
+        runner.rules.append(list);
+        AppImageInspector inspector(&runner, &settings, &registry);
+        const QString path = TestFixt::writeFile(home.path(), QStringLiteral("T1.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 1));
+        InspectOptions options;
+        inspector.inspect(path, options);
+        for (const auto &call : runner.calls) {
+            if (call.second.contains(QStringLiteral("x"))) {
+                QVERIFY(!call.second.contains(QStringLiteral("../etc/passwd")));
+            }
+            QVERIFY(call.first != path);
+        }
+    }
+    void dwarfsOversizedListingFailsClosed()
+    {
+        QTemporaryDir home;
+        SettingsStore settings(nullptr, home.path() + QStringLiteral("/cfg"));
+        ManagedRegistry registry(&settings);
+        FakeProcessRunner runner;
+        FakeProcessRunner::Rule unsquash;
+        unsquash.contains = QStringList{QStringLiteral("unsquashfs")};
+        unsquash.result.failedToStart = true;
+        runner.rules.append(unsquash);
+        FakeProcessRunner::Rule seven;
+        seven.contains = QStringList{QStringLiteral("7zz")};
+        seven.result.failedToStart = true;
+        runner.rules.append(seven);
+        QByteArray listing;
+        for (int i = 0; i < 80; ++i) {
+            listing += QByteArray("f") + QByteArray::number(i) + ".desktop\n";
+        }
+        FakeProcessRunner::Rule dwarfs;
+        dwarfs.contains = QStringList{QStringLiteral("dwarfsck")};
+        dwarfs.result.exitCode = 0;
+        dwarfs.result.standardOutput = listing;
+        runner.rules.append(dwarfs);
+        AppImageInspector inspector(&runner, &settings, &registry);
+        const QString path = TestFixt::writeFile(home.path(), QStringLiteral("D.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2, {}, QByteArray("DWARFS\0\0", 8)));
+        InspectOptions options;
+        inspector.inspect(path, options);
+        QVERIFY(!runner.sawProgram(QStringLiteral("dwarfsextract")));
+        for (const auto &call : runner.calls) {
+            QVERIFY(call.first != path);
+        }
+    }
+    void expandedSizeBoundFailsClosed()
+    {
+        QTemporaryDir home;
+        SettingsStore settings(nullptr, home.path() + QStringLiteral("/cfg"));
+        ManagedRegistry registry(&settings);
+        FakeProcessRunner runner;
+        FakeProcessRunner::Rule list;
+        list.contains = QStringList{QStringLiteral("unsquashfs")};
+        list.result.exitCode = 0;
+        list.result.standardOutput = QByteArray("-rw-r--r-- user/group 99999999 2020-01-01 00:00 squashfs-root/demo.desktop\n");
+        runner.rules.append(list);
+        AppImageInspector inspector(&runner, &settings, &registry);
+        const QString path = TestFixt::writeFile(home.path(), QStringLiteral("Big.AppImage"), TestFixt::makeElf64(Architecture::X86_64, 2));
+        InspectOptions options;
+        inspector.inspect(path, options);
+        for (const auto &call : runner.calls) {
+            QVERIFY(!call.second.contains(QStringLiteral("-e")));
+        }
+    }
 };
 
 QTEST_GUILESS_MAIN(TestInspector)

@@ -40,8 +40,11 @@ public:
     static bool isForbiddenPermanentTarget(const QString &canonicalPath);
     static QString siblingTemp(const QString &destination, const QString &prefix);
     static HashResult sha256File(const QString &path, qint64 maxBytes, std::atomic<bool> *cancel = nullptr);
+    static HashResult sha1File(const QString &path, qint64 maxBytes, std::atomic<bool> *cancel = nullptr);
     static QString hexSha256(const QByteArray &digest);
     static QByteArray sha256Bytes(const QByteArray &data);
+    static QString normalizeDigest(const QString &digest);
+    static bool digestMatches(const QString &advertised, const QByteArray &rawDigest);
 };
 
 } // namespace GoshAim

@@ -50,7 +50,13 @@ public:
 class QtNetworkClient : public NetworkClient
 {
 public:
+    explicit QtNetworkClient(HostResolver *resolver = nullptr);
+    void setResolver(HostResolver *resolver);
     NetworkResult fetch(const NetworkRequest &request, std::atomic<bool> *cancel = nullptr) override;
+
+private:
+    HostResolver *m_resolver = nullptr;
+    QtHostResolver m_defaultResolver;
 };
 
 } // namespace GoshAim

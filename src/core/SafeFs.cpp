@@ -480,6 +480,46 @@ HashResult SafeFs::sha256File(const QString &path, qint64 maxBytes, std::atomic<
     return result;
 }
 
+HashResult SafeFs::sha1File(const QString &path, qint64 maxBytes, std::atomic<bool> *cancel)
+{
+    HashResult result;
+    QString error;
+    if (!isRegularFile(path, &error)) {
+        result.error = error;
+        return result;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        result.error = QStringLiteral("Cannot read %1").arg(path);
+        return result;
+    }
+    QCryptographicHash hash(QCryptographicHash::Sha1);
+    QByteArray buffer(64 * 1024, Qt::Uninitialized);
+    qint64 total = 0;
+    while (!file.atEnd()) {
+        if (cancel && cancel->load()) {
+            result.cancelled = true;
+            result.error = QStringLiteral("Cancelled");
+            return result;
+        }
+        const qint64 n = file.read(buffer.data(), buffer.size());
+        if (n < 0) {
+            result.error = QStringLiteral("Read failed");
+            return result;
+        }
+        total += n;
+        if (total > maxBytes) {
+            result.truncated = true;
+            result.error = QStringLiteral("Hash exceeded size bound");
+            return result;
+        }
+        hash.addData(QByteArrayView(buffer.constData(), static_cast<int>(n)));
+    }
+    result.bytesRead = total;
+    result.sha256 = hash.result();
+    return result;
+}
+
 QString SafeFs::hexSha256(const QByteArray &digest)
 {
     return QString::fromLatin1(digest.toHex());
@@ -488,6 +528,29 @@ QString SafeFs::hexSha256(const QByteArray &digest)
 QByteArray SafeFs::sha256Bytes(const QByteArray &data)
 {
     return QCryptographicHash::hash(data, QCryptographicHash::Sha256);
+}
+
+QString SafeFs::normalizeDigest(const QString &digest)
+{
+    QString value = digest.trimmed().toLower();
+    if (value.startsWith(QLatin1String("sha256:"))) {
+        value = value.mid(7);
+    } else if (value.startsWith(QLatin1String("sha1:"))) {
+        value = value.mid(5);
+    } else if (value.startsWith(QLatin1String("sha-1:"))) {
+        value = value.mid(6);
+    }
+    value.remove(QLatin1Char(' '));
+    value.remove(QLatin1Char('"'));
+    return value;
+}
+
+bool SafeFs::digestMatches(const QString &advertised, const QByteArray &rawDigest)
+{
+    if (advertised.trimmed().isEmpty() || rawDigest.isEmpty()) {
+        return false;
+    }
+    return normalizeDigest(advertised) == QString::fromLatin1(rawDigest.toHex()).toLower();
 }
 
 } // namespace GoshAim

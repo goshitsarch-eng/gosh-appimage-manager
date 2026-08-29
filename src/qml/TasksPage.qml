@@ -25,13 +25,22 @@ Kirigami.ScrollablePage {
             contentItem: ColumnLayout {
                 Controls.Label { text: model.title; font.bold: true }
                 Controls.Label { text: i18n("%1 · %2", model.kind, model.state) }
-                Controls.ProgressBar { value: model.progress / 100.0; from: 0; to: 1; visible: model.state === "running"; Layout.fillWidth: true }
+                Controls.Label { text: model.statusText; visible: model.statusText.length > 0 }
+                Controls.ProgressBar { value: model.progress / 100.0; from: 0; to: 1; visible: model.state === "running" || model.state === "queued"; Layout.fillWidth: true }
                 Controls.Label { text: model.error; visible: model.error.length > 0; wrapMode: Text.WordWrap; Layout.fillWidth: true; color: Kirigami.Theme.negativeTextColor }
-                Controls.Button {
-                    text: i18n("Cancel")
-                    visible: model.state === "queued" || model.state === "running"
-                    Accessible.name: i18n("Cancel task %1", model.title)
-                    onClicked: Store.cancelTask(model.id)
+                RowLayout {
+                    Controls.Button {
+                        text: i18n("Cancel")
+                        visible: model.state === "queued" || model.state === "running" || model.state === "cancelling"
+                        Accessible.name: i18n("Cancel task %1", model.title)
+                        onClicked: Store.cancelTask(model.id)
+                    }
+                    Controls.Button {
+                        text: i18n("Retry")
+                        visible: model.retryable && (model.state === "failed" || model.state === "cancelled")
+                        Accessible.name: i18n("Retry task %1", model.title)
+                        onClicked: Store.retryTask(model.id)
+                    }
                 }
             }
         }

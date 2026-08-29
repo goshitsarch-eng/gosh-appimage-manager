@@ -79,5 +79,18 @@ Kirigami.ApplicationWindow {
         function onConfirmInspect() {
             pageStack.push(Qt.resolvedUrl("InspectPage.qml"))
         }
+        function onConfirmUnsafeExtract(path) {
+            unsafeDialog.unsafePath = path
+            unsafeDialog.open()
+        }
+    }
+
+    Kirigami.PromptDialog {
+        id: unsafeDialog
+        property string unsafePath: ""
+        title: i18n("Execute untrusted AppImage code?")
+        subtitle: i18n("Unsafe extraction runs %1 with --appimage-extract. This executes untrusted code. Continue only if you accept that risk.", unsafePath)
+        standardButtons: Kirigami.Dialog.Ok | Kirigami.Dialog.Cancel
+        onAccepted: Store.confirmUnsafeExtractFor(unsafePath, true)
     }
 }

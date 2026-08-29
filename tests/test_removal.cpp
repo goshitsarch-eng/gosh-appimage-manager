@@ -20,7 +20,7 @@ class TestRemoval : public QObject
     Q_OBJECT
 private Q_SLOTS:
     void initTestCase() { QStandardPaths::setTestModeEnabled(true); }
-    void trashFailureLeavesFiles()
+    void permanentRemovesOwnedAndRegistry()
     {
         QTemporaryDir home;
         qputenv("HOME", home.path().toUtf8());
@@ -28,11 +28,6 @@ private Q_SLOTS:
         settings.setManagedFolder(home.path() + QStringLiteral("/AppImages"));
         ManagedRegistry registry(&settings);
         FakeProcessRunner runner;
-        FakeProcessRunner::Rule gio;
-        gio.contains = QStringList{QStringLiteral("gio"), QStringLiteral("trash")};
-        gio.result.exitCode = 1;
-        gio.result.failedToStart = true;
-        runner.rules.append(gio);
         DesktopIntegration desktop(&settings, &runner);
         FakeProcessTable processes;
         RemovalService removal(&settings, &registry, &desktop, &processes, &runner);
@@ -46,13 +41,38 @@ private Q_SLOTS:
         QVERIFY(integrated.ok);
         RemovalRequest rem;
         rem.pathOrUuid = integrated.app.uuid;
+        rem.mode = RemovalMode::Permanent;
+        QString error;
+        QVERIFY2(removal.remove(rem, &error), qPrintable(error));
+        QVERIFY(!QFile::exists(integrated.app.managedPath));
+        QVERIFY(registry.byUuid(integrated.app.uuid).uuid.isEmpty());
+        QVERIFY(QFile::exists(src));
+    }
+    void missingExecutableReconcilesRegistry()
+    {
+        QTemporaryDir home;
+        qputenv("HOME", home.path().toUtf8());
+        SettingsStore settings(nullptr, home.path() + QStringLiteral("/cfg"));
+        settings.setManagedFolder(home.path() + QStringLiteral("/AppImages"));
+        ManagedRegistry registry(&settings);
+        FakeProcessRunner runner;
+        DesktopIntegration desktop(&settings, &runner);
+        FakeProcessTable processes;
+        RemovalService removal(&settings, &registry, &desktop, &processes, &runner);
+        InstalledApp app;
+        app.uuid = QStringLiteral("gone");
+        app.owned = true;
+        app.managedPath = home.path() + QStringLiteral("/missing.AppImage");
+        app.desktopPath = settings.applicationsDir() + QStringLiteral("/gosh-appimage-gone.desktop");
+        registry.upsert(app);
+        registry.save();
+        RemovalRequest rem;
+        rem.pathOrUuid = app.uuid;
         rem.mode = RemovalMode::Trash;
         QString error;
-        const bool ok = QFile::moveToTrash(integrated.app.managedPath);
-        if (!ok) {
-            QVERIFY(!removal.remove(rem, &error) || QFile::exists(integrated.app.managedPath) || !error.isEmpty());
-        }
-        QVERIFY(QFile::exists(src));
+        const bool ok = removal.remove(rem, &error);
+        Q_UNUSED(ok);
+        QVERIFY(registry.byUuid(app.uuid).uuid.isEmpty());
     }
     void permanentRefusesRoot()
     {
@@ -73,6 +93,7 @@ private Q_SLOTS:
         rem.pathOrUuid = QStringLiteral("nope");
         QString error;
         QVERIFY(!removal.remove(rem, &error));
+        QVERIFY(!error.isEmpty());
     }
 };
 

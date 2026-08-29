@@ -3,7 +3,9 @@
 #include "core/RemovalLaunch.h"
 #include "core/Types.h"
 
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QtTest>
 
 using namespace GoshAim;
@@ -48,14 +50,19 @@ private Q_SLOTS:
     {
         FakeProcessRunner runner;
         FakeProcessTable table;
+        const QString path = QDir::tempPath() + QStringLiteral("/gosh-aim-running.AppImage");
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("x");
+        file.close();
         table.running = {1234};
-        table.matchPath = QStringLiteral("/tmp/Demo.AppImage");
+        table.matchPath = QFileInfo(path).canonicalFilePath();
         LaunchService launch(&runner, &table);
         InstalledApp app;
-        app.managedPath = QStringLiteral("/tmp/Demo.AppImage");
-        QFile::remove(app.managedPath);
-        QVERIFY(!launch.isRunning(app) || table.pidsForExecutable(app.managedPath).isEmpty() || true);
-        QCOMPARE(table.pidsForExecutable(QStringLiteral("/tmp/Demo.AppImage")).size(), 1);
+        app.managedPath = path;
+        QVERIFY(launch.isRunning(app));
+        QCOMPARE(table.pidsForExecutable(table.matchPath).size(), 1);
+        QFile::remove(path);
     }
     void refusesShell()
     {

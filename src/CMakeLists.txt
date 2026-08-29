@@ -14,6 +14,7 @@ add_library(goshaimcore STATIC
     core/RemovalLaunch.cpp
     core/UpdateSources.cpp
     core/UpdateService.cpp
+    core/CheckStateStore.cpp
     core/AppImageLibrary.cpp
     core/TaskQueue.cpp
     models/Models.cpp

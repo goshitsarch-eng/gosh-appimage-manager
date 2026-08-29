@@ -164,11 +164,38 @@ UpdateCheckResult StaticFileSource::check(const InstalledApp &app, NetworkClient
     result.size = head.contentLength;
     result.digest = head.etag;
     result.reducedVerification = head.etag.isEmpty();
-    result.available = head.ok;
     result.version = head.lastModified;
     if (!head.ok) {
         result.error = head.error;
+        return result;
     }
+    const QString lastEtag = app.updateConfig.value(QStringLiteral("_last_etag")).toString();
+    const QString lastModified = app.updateConfig.value(QStringLiteral("_last_modified")).toString();
+    const qint64 lastSize = app.updateConfig.value(QStringLiteral("_last_size")).toLongLong();
+    const QString lastVersion = app.updateConfig.value(QStringLiteral("_last_version")).toString();
+    const QString lastDigest = app.updateConfig.value(QStringLiteral("_last_digest")).toString();
+    bool changed = false;
+    if (!head.etag.isEmpty() && !lastEtag.isEmpty()) {
+        changed = head.etag != lastEtag;
+    } else if (!head.lastModified.isEmpty() && !lastModified.isEmpty()) {
+        changed = head.lastModified != lastModified;
+    } else if (head.contentLength > 0 && lastSize > 0) {
+        changed = head.contentLength != lastSize;
+    } else if (!head.lastModified.isEmpty() && !lastVersion.isEmpty()) {
+        changed = head.lastModified != lastVersion;
+    } else if (!head.etag.isEmpty() && !lastDigest.isEmpty()) {
+        changed = head.etag != lastDigest;
+    } else if (head.contentLength > 0 && app.size > 0) {
+        changed = head.contentLength != app.size;
+    } else if (!app.version.isEmpty() && !head.lastModified.isEmpty()) {
+        changed = head.lastModified != app.version;
+    } else {
+        changed = lastEtag.isEmpty() && lastModified.isEmpty() && lastSize <= 0;
+        if (changed && app.size > 0 && head.contentLength == app.size) {
+            changed = false;
+        }
+    }
+    result.available = changed;
     return result;
 }
 
@@ -304,16 +331,68 @@ UpdateCheckResult GitLabSource::check(const InstalledApp &app, NetworkClient *ne
     result.ok = true;
     result.version = jsonString(rel, QStringLiteral("tag_name"));
     const QJsonArray links = rel.value(QStringLiteral("assets")).toObject().value(QStringLiteral("links")).toArray();
-    if (!pickAsset(links, filename, QStringLiteral("name"), QStringLiteral("url"), QStringLiteral("direct_asset_url"), QStringLiteral("checksum"), &result)) {
+    if (!pickAsset(links, filename, QStringLiteral("name"), QStringLiteral("url"), QStringLiteral("size"), QStringLiteral("checksum"), &result)) {
         for (const QJsonValue &value : links) {
             const QJsonObject link = value.toObject();
-            const QString url = link.value(QStringLiteral("direct_asset_url")).toString();
+            const QString direct = link.value(QStringLiteral("direct_asset_url")).toString();
+            const QString url = direct.isEmpty() ? link.value(QStringLiteral("url")).toString() : direct;
             if (url.contains(QLatin1String(".AppImage"), Qt::CaseInsensitive)) {
                 result.url = url;
+                result.size = link.value(QStringLiteral("size")).toInteger(-1);
+                result.digest = link.value(QStringLiteral("checksum")).toString();
                 break;
             }
             if (result.url.isEmpty()) {
-                result.url = link.value(QStringLiteral("url")).toString();
+                result.url = url;
+                result.size = link.value(QStringLiteral("size")).toInteger(-1);
+            }
+        }
+    }
+    if (result.url.isEmpty() && (app.updateConfig.contains(QStringLiteral("package")) || app.updateConfig.contains(QStringLiteral("package_name")))) {
+        const QString packageName = app.updateConfig.value(QStringLiteral("package"), app.updateConfig.value(QStringLiteral("package_name"))).toString();
+        NetworkRequest pkgReq;
+        pkgReq.url = QUrl(QStringLiteral("https://%1/api/v4/projects/%2/packages")
+                              .arg(host, QString::fromUtf8(QUrl::toPercentEncoding(project))));
+        const NetworkResult pkgBody = network->fetch(pkgReq, cancel);
+        if (!pkgBody.ok) {
+            return fail(pkgBody.error, name());
+        }
+        const QJsonArray packages = QJsonDocument::fromJson(pkgBody.body).array();
+        int packageId = -1;
+        for (const QJsonValue &value : packages) {
+            const QJsonObject pkg = value.toObject();
+            if (packageName.isEmpty() || pkg.value(QStringLiteral("name")).toString() == packageName) {
+                packageId = pkg.value(QStringLiteral("id")).toInt(-1);
+                result.version = pkg.value(QStringLiteral("version")).toString();
+                break;
+            }
+        }
+        if (packageId < 0) {
+            return fail(QStringLiteral("No GitLab package matched"), name());
+        }
+        NetworkRequest filesReq;
+        filesReq.url = QUrl(QStringLiteral("https://%1/api/v4/projects/%2/packages/%3/package_files")
+                                .arg(host, QString::fromUtf8(QUrl::toPercentEncoding(project)), QString::number(packageId)));
+        const NetworkResult filesBody = network->fetch(filesReq, cancel);
+        if (!filesBody.ok) {
+            return fail(filesBody.error, name());
+        }
+        const QJsonArray files = QJsonDocument::fromJson(filesBody.body).array();
+        for (const QJsonValue &value : files) {
+            const QJsonObject file = value.toObject();
+            const QString fileName = file.value(QStringLiteral("file_name")).toString();
+            if (filename.isEmpty() || wildcardMatch(filename, fileName) || fileName.endsWith(QLatin1String(".AppImage"), Qt::CaseInsensitive)) {
+                result.url = QStringLiteral("https://%1/api/v4/projects/%2/packages/%3/package_files/%4/download")
+                                 .arg(host,
+                                      QString::fromUtf8(QUrl::toPercentEncoding(project)),
+                                      QString::number(packageId),
+                                      QString::number(file.value(QStringLiteral("id")).toInt()));
+                result.size = file.value(QStringLiteral("size")).toInteger(-1);
+                result.digest = file.value(QStringLiteral("file_sha256")).toString();
+                if (result.digest.isEmpty()) {
+                    result.digest = file.value(QStringLiteral("file_md5")).toString();
+                }
+                break;
             }
         }
     }
@@ -466,19 +545,40 @@ bool FtpSource::validateConfig(const QVariantMap &config, QString *error) const
 
 UpdateCheckResult FtpSource::check(const InstalledApp &app, NetworkClient *network, std::atomic<bool> *cancel)
 {
-    Q_UNUSED(network);
-    Q_UNUSED(cancel);
     QString error;
     if (!validateConfig(app.updateConfig, &error) && app.updateConfig.value(QStringLiteral("url")).toString().isEmpty()) {
-        return fail(error, name());
+        return fail(error.isEmpty() ? QStringLiteral("Invalid FTP URL") : error, name());
     }
+    const QString url = app.updateConfig.value(QStringLiteral("url")).toString();
+    NetworkRequest req;
+    req.url = QUrl(url);
+    req.allowFtp = true;
+    req.maxBytes = 4096;
+    const NetworkResult head = network->fetch(req, cancel);
     UpdateCheckResult result;
-    result.ok = true;
     result.manager = name();
-    result.url = app.updateConfig.value(QStringLiteral("url")).toString();
-    result.available = true;
+    result.url = url;
+    result.ok = head.ok;
+    result.size = head.contentLength;
+    result.digest = head.etag;
+    result.version = head.lastModified;
     result.reducedVerification = true;
     result.error = QStringLiteral("FTP is a legacy insecure transport");
+    if (!head.ok) {
+        result.error = head.error.isEmpty() ? result.error : head.error;
+        return result;
+    }
+    const QString lastEtag = app.updateConfig.value(QStringLiteral("_last_etag")).toString();
+    const qint64 lastSize = app.updateConfig.value(QStringLiteral("_last_size")).toLongLong();
+    if (!head.etag.isEmpty() && !lastEtag.isEmpty()) {
+        result.available = head.etag != lastEtag;
+    } else if (head.contentLength > 0 && lastSize > 0) {
+        result.available = head.contentLength != lastSize;
+    } else if (head.contentLength > 0 && app.size > 0) {
+        result.available = head.contentLength != app.size;
+    } else {
+        result.available = true;
+    }
     return result;
 }
 

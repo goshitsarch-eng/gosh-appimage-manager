@@ -14,9 +14,10 @@ class ManagedRegistry
 {
 public:
     explicit ManagedRegistry(SettingsStore *settings);
+    virtual ~ManagedRegistry() = default;
 
     bool load(QString *error = nullptr);
-    bool save(QString *error = nullptr);
+    virtual bool save(QString *error = nullptr);
 
     QVector<InstalledApp> apps() const { return m_apps; }
     InstalledApp byUuid(const QString &uuid) const;
@@ -27,6 +28,8 @@ public:
 
     void upsert(const InstalledApp &app);
     bool removeUuid(const QString &uuid);
+    void restoreApps(const QVector<InstalledApp> &apps);
+    QVector<InstalledApp> snapshot() const { return m_apps; }
 
     static QString newUuid();
 

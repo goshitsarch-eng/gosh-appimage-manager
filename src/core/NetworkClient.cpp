@@ -21,10 +21,21 @@ bool isDowngrade(const QUrl &from, const QUrl &to)
 
 } // namespace
 
+QtNetworkClient::QtNetworkClient(HostResolver *resolver)
+    : m_resolver(resolver)
+{
+}
+
+void QtNetworkClient::setResolver(HostResolver *resolver)
+{
+    m_resolver = resolver;
+}
+
 NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<bool> *cancel)
 {
     NetworkResult result;
-    UrlCheck check = UrlGuard::validate(request.url, request.allowHttp, request.allowPrivate, request.allowFtp);
+    HostResolver *resolver = m_resolver ? m_resolver : &m_defaultResolver;
+    UrlCheck check = UrlGuard::validateResolved(request.url, resolver, request.allowHttp, request.allowPrivate, request.allowFtp);
     if (!check.ok) {
         result.error = check.error;
         return result;
@@ -127,7 +138,7 @@ NetworkResult QtNetworkClient::fetch(const NetworkRequest &request, std::atomic<
                 }
                 return result;
             }
-            UrlCheck nextCheck = UrlGuard::validate(next, request.allowHttp, request.allowPrivate, request.allowFtp);
+            UrlCheck nextCheck = UrlGuard::validateResolved(next, resolver, request.allowHttp, request.allowPrivate, request.allowFtp);
             if (!nextCheck.ok) {
                 result.error = nextCheck.error;
                 reply->deleteLater();

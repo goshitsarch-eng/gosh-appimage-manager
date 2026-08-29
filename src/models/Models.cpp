@@ -333,6 +333,20 @@ QVariant CandidateModel::data(const QModelIndex &index, int role) const
         return item.metadata.terminal;
     case UpdateSourceRole:
         return item.updateInfo.raw;
+    case PlannedTargetRole:
+        return item.plannedTarget;
+    case CopyOutcomeRole:
+        return item.copyOutcome;
+    case ConflictStatusRole:
+        return item.conflictStatus;
+    case ConflictingUuidRole:
+        return item.conflictingUuid;
+    case ConflictingNameRole:
+        return item.conflictingName;
+    case NeedsDecisionRole:
+        return item.needsConflictDecision;
+    case ExistingManagedRole:
+        return item.existingManagedId;
     default:
         return {};
     }
@@ -352,7 +366,14 @@ QHash<int, QByteArray> CandidateModel::roleNames() const
             {ErrorRole, "error"},
             {IconRole, "iconPath"},
             {TerminalRole, "terminal"},
-            {UpdateSourceRole, "updateSource"}};
+            {UpdateSourceRole, "updateSource"},
+            {PlannedTargetRole, "plannedTarget"},
+            {CopyOutcomeRole, "copyOutcome"},
+            {ConflictStatusRole, "conflictStatus"},
+            {ConflictingUuidRole, "conflictingUuid"},
+            {ConflictingNameRole, "conflictingName"},
+            {NeedsDecisionRole, "needsDecision"},
+            {ExistingManagedRole, "existingManagedId"}};
 }
 
 void CandidateModel::setCandidates(const QVector<InspectionResult> &candidates)

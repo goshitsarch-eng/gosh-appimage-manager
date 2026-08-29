@@ -51,7 +51,7 @@ QByteArray DesktopIntegration::buildDesktopFile(const InstalledApp &app, const Q
         out << QStringLiteral("X-AppImage-Version=") << DesktopParser::escapeDesktopValue(app.version) << QLatin1Char('\n');
     }
     out << QStringLiteral("Exec=") << DesktopParser::buildExecLine(app.managedPath, app.arguments, app.environment) << QLatin1Char('\n');
-    out << QStringLiteral("TryExec=") << app.managedPath << QLatin1Char('\n');
+    out << QStringLiteral("TryExec=") << DesktopParser::escapeExecArg(app.managedPath) << QLatin1Char('\n');
     if (!app.iconPath.isEmpty()) {
         out << QStringLiteral("Icon=") << app.iconPath << QLatin1Char('\n');
     }
@@ -81,7 +81,7 @@ QByteArray DesktopIntegration::buildDesktopFile(const InstalledApp &app, const Q
 bool DesktopIntegration::writeStaged(const InstalledApp &app, const QString &stagedDesktop, const QString &stagedIcon, QString *error)
 {
     Q_UNUSED(stagedIcon);
-    const QByteArray data = buildDesktopFile(app);
+    const QByteArray data = buildDesktopFile(app, app.actions);
     return SafeFs::atomicWrite(stagedDesktop, data, error, 0644);
 }
 

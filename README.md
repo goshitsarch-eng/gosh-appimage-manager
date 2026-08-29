@@ -66,7 +66,7 @@ The same executable provides GUI and CLI modes. CLI commands do not start the
 GUI.
 
 ```
-gosh-appimage-manager --integrate <path> [--keep-both|--replace] [--yes]
+gosh-appimage-manager --integrate <path> [--keep-both|--replace] [--replace-uuid UUID|--target PATH] [--yes]
 gosh-appimage-manager --update <path>|--all [--yes] [--force]
 gosh-appimage-manager --remove <path> [--yes] [--delete]
 gosh-appimage-manager --remove-all [--yes]
@@ -81,7 +81,9 @@ gosh-appimage-manager --probe-host
 gosh-appimage-manager --probe-inspect <path>
 ```
 
-JSON list output uses `schema_version: 1`. Diagnostics go to stderr.
+JSON list output uses `schema_version: 1` with `installed` or `updates` arrays.
+`--fetch-updates` is non-mutating (check metadata only) and prints a notice on
+stderr. Diagnostics go to stderr so stdout remains valid JSON.
 
 ## Flatpak
 
@@ -90,7 +92,8 @@ Manifest: `packaging/com.goshapps.AppImageManager.yml`
 The manifest does not use `--filesystem=host:rw`. It grants the managed
 folder, user applications, and icon directories, plus portals and
 argument-safe `flatpak-spawn --host`. Extraction tools (unsquashfs, 7zz,
-dwarfsextract) are pinned by commit or SHA-256.
+dwarfsextract) are pinned by SHA-256. Corresponding source tarballs and
+license texts are installed beside the binaries.
 
 ```sh
 flatpak-builder --force-clean --user --install-deps-from=flathub \

@@ -14,8 +14,10 @@ ecm_add_test(test_update.cpp TEST_NAME test_update LINK_LIBRARIES ${test_libs})
 ecm_add_test(test_cli.cpp TEST_NAME test_cli LINK_LIBRARIES ${test_libs})
 ecm_add_test(test_tasks.cpp TEST_NAME test_tasks LINK_LIBRARIES ${test_libs})
 ecm_add_test(test_models.cpp TEST_NAME test_models LINK_LIBRARIES ${test_libs})
+ecm_add_test(test_network.cpp TEST_NAME test_network LINK_LIBRARIES ${test_libs})
+ecm_add_test(test_controller.cpp TEST_NAME test_controller LINK_LIBRARIES ${test_libs})
 
 set_tests_properties(
     test_elf test_hash test_desktop test_archive test_inspector test_integration
-    test_removal test_launch test_update test_cli test_tasks test_models
+    test_removal test_launch test_update test_cli test_tasks test_models test_network test_controller
     PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

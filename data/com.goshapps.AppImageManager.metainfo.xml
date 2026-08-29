@@ -47,6 +47,12 @@
   <requires>
     <display_length compare="ge">360</display_length>
   </requires>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Library of integrated AppImages in Gosh AppImage Manager</caption>
+      <image type="source" width="960" height="540">https://goshapps.com/screenshots/gosh-appimage-manager.png</image>
+    </screenshot>
+  </screenshots>
   <releases>
     <release version="0.1.0" date="2026-08-28">
       <description>

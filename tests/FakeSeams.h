@@ -123,12 +123,14 @@ public:
         bool hangUntilCancel = false;
     };
     QVector<QUrl> urls;
+    QVector<NetworkRequest> requests;
     QVector<Rule> rules;
     NetworkResult defaultResult;
 
     NetworkResult fetch(const NetworkRequest &request, std::atomic<bool> *cancel = nullptr) override
     {
         urls.append(request.url);
+        requests.append(request);
         const UrlCheck check = UrlGuard::validate(request.url, request.allowHttp, request.allowPrivate, request.allowFtp);
         if (!check.ok) {
             NetworkResult result;

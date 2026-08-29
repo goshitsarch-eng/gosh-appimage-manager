@@ -75,6 +75,6 @@ Kirigami.ScrollablePage {
     FolderDialog {
         id: folderDialog
         title: i18n("Managed folder")
-        onAccepted: Store.settings.managedFolder = selectedFolder
+        onAccepted: Store.setManagedFolderFromUrl(selectedFolder.toString())
     }
 }

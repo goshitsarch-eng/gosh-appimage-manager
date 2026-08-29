@@ -64,48 +64,75 @@ bool RemovalService::trashFile(const QString &path, QString *error)
     return false;
 }
 
-bool RemovalService::remove(const RemovalRequest &request, QString *error, std::atomic<bool> *cancel)
+RemovalResult RemovalService::remove(const RemovalRequest &request, std::atomic<bool> *cancel)
 {
     Q_UNUSED(cancel);
-    const InstalledApp app = resolve(request.pathOrUuid, error);
+    RemovalResult result;
+    QString resolveError;
+    const InstalledApp app = resolve(request.pathOrUuid, &resolveError);
     if (app.uuid.isEmpty()) {
-        return false;
+        result.error = resolveError;
+        return result;
+    }
+    if (!app.desktopPath.isEmpty() && QFile::exists(app.desktopPath)) {
+        if (!m_desktop->hasOwnershipMarkers(app.desktopPath, app.uuid)) {
+            result.error = QStringLiteral("Desktop file is missing ownership markers");
+            return result;
+        }
+    }
+    if (!app.iconPath.isEmpty() && QFile::exists(app.iconPath) && !app.iconPath.contains(app.uuid)) {
+        result.error = QStringLiteral("Icon path is not owned by this installation");
+        return result;
     }
     QString pathError;
-    const QString canonical = SafeFs::canonicalExisting(app.managedPath, &pathError);
-    if (canonical.isEmpty()) {
-        if (error) {
-            *error = pathError;
-        }
-        return false;
+    QString canonical = SafeFs::canonicalExisting(app.managedPath, &pathError);
+    const bool missing = canonical.isEmpty();
+    if (missing && request.mode != RemovalMode::Trash) {
+        result.error = pathError;
+        return result;
     }
-    if (request.mode == RemovalMode::Permanent) {
+    if (!missing && request.mode == RemovalMode::Permanent) {
         if (SafeFs::isForbiddenPermanentTarget(canonical)) {
-            if (error) {
-                *error = QStringLiteral("Refusing to permanently delete a protected path");
-            }
-            return false;
+            result.error = QStringLiteral("Refusing to permanently delete a protected path");
+            return result;
         }
         QFileInfo info(app.managedPath);
         if (info.isSymLink()) {
-            if (error) {
-                *error = QStringLiteral("Refusing to follow a symlink for permanent deletion");
-            }
-            return false;
+            result.error = QStringLiteral("Refusing to follow a symlink for permanent deletion");
+            return result;
         }
-        if (!SafeFs::removeFileNoFollow(app.managedPath, error)) {
-            return false;
+        if (!SafeFs::removeFileNoFollow(app.managedPath, &result.error)) {
+            return result;
         }
-    } else {
-        if (!trashFile(app.managedPath, error)) {
-            return false;
+    } else if (!missing) {
+        if (!trashFile(app.managedPath, &result.error)) {
+            return result;
         }
     }
-    if (!m_desktop->removeOwnedArtifacts(app, error)) {
-        return false;
-    }
+    QString artifactError;
+    const bool artifactsOk = m_desktop->removeOwnedArtifacts(app, &artifactError);
     m_registry->removeUuid(app.uuid);
-    return m_registry->save(error);
+    QString saveError;
+    const bool saved = m_registry->save(&saveError);
+    if (!artifactsOk || !saved) {
+        result.partial = true;
+        result.error = artifactsOk ? saveError : artifactError;
+        if (result.error.isEmpty()) {
+            result.error = QStringLiteral("AppImage removed but owned artifacts or registry could not be fully cleaned");
+        }
+        return result;
+    }
+    result.ok = true;
+    return result;
+}
+
+bool RemovalService::remove(const RemovalRequest &request, QString *error, std::atomic<bool> *cancel)
+{
+    const RemovalResult result = remove(request, cancel);
+    if (error) {
+        *error = result.error;
+    }
+    return result.ok;
 }
 
 LaunchService::LaunchService(ProcessRunner *runner, ProcessTable *processes)
