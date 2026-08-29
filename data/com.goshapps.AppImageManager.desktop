@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Gosh AppImage Manager
+GenericName=AppImage Manager
+Comment=Inspect, integrate, update and remove AppImages
+Exec=gosh-appimage-manager %U
+Icon=com.goshapps.AppImageManager
+Terminal=false
+StartupNotify=true
+SingleMainWindow=true
+Categories=Qt;KDE;System;Utility;
+Keywords=appimage;integrate;update;linux;
+MimeType=application/vnd.appimage;application/x-iso9660-appimage;application/x-appimage;
+StartupWMClass=com.goshapps.AppImageManager
+X-KDE-WaylandAppId=com.goshapps.AppImageManager

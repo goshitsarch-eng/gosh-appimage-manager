@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Gosh AppImage Manager</title>
+  <desc id="desc">A gold Gosh G monogram on a navy rounded square with a gold lozenge suggesting a packaged AppImage</desc>
+  <rect width="512" height="512" rx="128" fill="#0b1224"/>
+  <path d="M348 150A148 148 0 1 0 348 362" fill="none" stroke="#f4c84a" stroke-width="64" stroke-linecap="round"/>
+  <path d="M236 228h150v118h-62v-56h-88z" fill="#f4c84a"/>
+  <path d="M368 318l48 28-48 28-48-28z" fill="#f4c84a"/>
+  <path d="M368 330l28 16-28 16-28-16z" fill="#0b1224"/>
+</svg>

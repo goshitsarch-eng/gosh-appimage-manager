@@ -1,0 +1,90 @@
+id: com.goshapps.AppImageManager
+runtime: org.kde.Platform
+runtime-version: '6.10'
+sdk: org.kde.Sdk
+command: gosh-appimage-manager
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  - --share=network
+  - --talk-name=org.freedesktop.Flatpak
+  - --talk-name=org.freedesktop.portal.Desktop
+  - --own-name=com.goshapps.AppImageManager
+  - --filesystem=~/AppImages:create
+  - --filesystem=~/.local/share/applications:create
+  - --filesystem=~/.local/share/icons:create
+  - --filesystem=~/.local/share/gosh-appimage-manager:create
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/cmake
+  - /share/man
+modules:
+  - name: unsquashfs
+    buildsystem: simple
+    build-commands:
+      - XZ_SUPPORT=1 ZSTD_SUPPORT=1 LZ4_SUPPORT=1 make -C squashfs-tools -j ${FLATPAK_BUILDER_N_JOBS} unsquashfs
+      - install -Dm755 squashfs-tools/unsquashfs -t ${FLATPAK_DEST}/bin/
+    sources:
+      - type: git
+        url: https://github.com/plougher/squashfs-tools.git
+        commit: 708c59ae80853b0845017c33b42e56061cc546cd
+  - name: 7zip
+    buildsystem: simple
+    build-commands:
+      - tar -xf 7z/7z.tar.xz -C 7z
+      - install -Dm755 7z/7zz -t ${FLATPAK_DEST}/bin/
+    cleanup:
+      - 7z
+    sources:
+      - type: file
+        url: https://github.com/ip7z/7zip/releases/download/26.00/7z2600-linux-x64.tar.xz
+        sha256: c74dc4a48492cde43f5fec10d53fb2a66f520e4a62a69d630c44cb22c477edc6
+        dest: 7z
+        dest-filename: 7z.tar.xz
+        only-arches:
+          - x86_64
+      - type: file
+        url: https://github.com/ip7z/7zip/releases/download/26.00/7z2600-linux-arm64.tar.xz
+        sha256: aa8f3d0a19af9674d3af0ec788b4e261501071e626cd75ad149f1c2c176cc87d
+        dest: 7z
+        dest-filename: 7z.tar.xz
+        only-arches:
+          - aarch64
+  - name: dwarfs
+    buildsystem: simple
+    cleanup:
+      - dwarfs
+    build-commands:
+      - install -Dm755 dwarfs/bin/dwarfsextract -t ${FLATPAK_DEST}/bin/
+      - install -Dm755 dwarfs/bin/dwarfsck -t ${FLATPAK_DEST}/bin/
+    sources:
+      - type: archive
+        sha256: 2dba61946786ec563c96783f719316199eeb55a4cbde1436e1b5796f28494fa8
+        url: https://github.com/mhx/dwarfs/releases/download/v0.15.3/dwarfs-0.15.3-Linux-x86_64.tar.xz
+        dest: dwarfs
+        only-arches:
+          - x86_64
+      - type: archive
+        sha256: 70edc89104233aa8afe7548c4b83c97625baf44c34f625fa99deff4b4b01f89f
+        url: https://github.com/mhx/dwarfs/releases/download/v0.15.3/dwarfs-0.15.3-Linux-aarch64.tar.xz
+        dest: dwarfs
+        only-arches:
+          - aarch64
+  - name: gosh-appimage-manager
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - -DBUILD_TESTING=OFF
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - build
+          - build-dir
+          - .flatpak-builder
+          - repo
+          - .git
+          - .grok

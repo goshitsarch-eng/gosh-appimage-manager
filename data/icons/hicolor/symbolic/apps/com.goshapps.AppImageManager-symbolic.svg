@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">Gosh AppImage Manager symbolic</title>
+  <path d="M86 32A40 40 0 1 0 86 96" fill="none" stroke="#000" stroke-width="14" stroke-linecap="round"/>
+  <path d="M54 54h44v34h-18v-16H54z" fill="#000"/>
+  <path d="M94 82l16 10-16 10-16-10z" fill="#000"/>
+</svg>

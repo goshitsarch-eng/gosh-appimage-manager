@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.goshapps.AppImageManager</id>
+  <name>Gosh AppImage Manager</name>
+  <summary>Inspect, integrate, update and remove AppImages</summary>
+  <developer id="com.goshapps">
+    <name>Gosh-Its-Arch</name>
+  </developer>
+  <metadata_license>FSFAP</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <content_rating type="oars-1.1"/>
+  <launchable type="desktop-id">com.goshapps.AppImageManager.desktop</launchable>
+  <provides>
+    <binary>gosh-appimage-manager</binary>
+    <mediatype>application/vnd.appimage</mediatype>
+    <mediatype>application/x-iso9660-appimage</mediatype>
+    <mediatype>application/x-appimage</mediatype>
+  </provides>
+  <url type="homepage">https://goshapps.com</url>
+  <description>
+    <p>
+      Gosh AppImage Manager is a native KDE application for safely inspecting,
+      integrating, launching, organizing, updating, and removing AppImages.
+      Opening a file never integrates or executes it.
+    </p>
+    <p>
+      The application is written in C++20, Qt 6, KDE Frameworks 6, and Kirigami.
+      Gear Lever was used as a behavioural reference only. This is an independent
+      original implementation and is not endorsed by Gear Lever's authors.
+    </p>
+    <p>
+      Metadata is extracted without executing AppImages by default. Updates are
+      downloaded to staging, validated, and applied atomically with rollback.
+    </p>
+  </description>
+  <categories>
+    <category>System</category>
+    <category>Utility</category>
+    <category>Qt</category>
+    <category>KDE</category>
+  </categories>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <releases>
+    <release version="0.1.0" date="2026-08-28">
+      <description>
+        <p>Initial Gosh AppImage Manager release.</p>
+      </description>
+    </release>
+  </releases>
+  <translation type="gettext">gosh-appimage-manager</translation>
+  <branding>
+    <color type="primary" scheme_preference="light">#f4c84a</color>
+    <color type="primary" scheme_preference="dark">#0b1224</color>
+  </branding>
+</component>
