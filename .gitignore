@@ -1,12 +1,8 @@
 # Build products
-/build/
-/build-*/
-/cmake-build-*/
-/.cache/
-/.qt/
-CMakeCache.txt
-CMakeFiles/
-compile_commands.json
+/target/
+/build-dir/
+build/
+.build/
 
 # Flatpak products
 /.flatpak-builder/

@@ -1,6 +1,6 @@
-Gosh Apps / Gosh-Its-Arch
+Gosh AppImage Manager is made by Gosh (Gosh Apps / Gosh-Its-Arch).
 
-Gosh AppImage Manager is an original C++20/Qt 6/KDE Frameworks 6/Kirigami
+Gosh AppImage Manager 3.0.0 is an original Rust + libcosmic (COSMIC Epoch)
 implementation. Gear Lever by Lorenzo Paderi
 (https://github.com/mijorus/gearlever) is a GPLv3 behavioural reference
 only. This project does not copy Gear Lever source, templates, CSS, icons,

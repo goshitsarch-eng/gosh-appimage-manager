@@ -1,7 +1,9 @@
 id: com.goshapps.AppImageManager
-runtime: org.kde.Platform
-runtime-version: '6.10'
-sdk: org.kde.Sdk
+runtime: org.freedesktop.Platform
+runtime-version: '23.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
 command: gosh-appimage-manager
 finish-args:
   - --share=ipc
@@ -18,12 +20,46 @@ finish-args:
   - --filesystem=~/.local/share/icons:create
   - --filesystem=~/.local/share/gosh-appimage-manager:create
   - --filesystem=xdg-config/autostart:create
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  # The 23.08 dwz/debugedit predate rustc 1.90's DWARF and corrupt libLLVM
+  # while splitting debuginfo (zeroed program headers). The pinned toolchain
+  # in /app/rust must never go through post-processing; release binaries
+  # carry no debuginfo anyway.
+  no-debuginfo: true
 cleanup:
   - /include
   - /lib/pkgconfig
   - /lib/cmake
   - /share/man
+  - /rust
 modules:
+  # Pinned Rust 1.90.0: the 23.08 SDK extension ships Rust 1.81, which is
+  # older than this dependency graph needs (up to 1.89). The toolchain is
+  # removed from the final app by the top-level /rust cleanup above.
+  - name: rust-gosh
+    buildsystem: simple
+    build-commands:
+      - echo "Installing pinned Rust 1.90.0 toolchain (cache-buster v4)"
+      - tar -xf rust-toolchain.tar.gz
+      - ./rust-1.90.0-*/install.sh --prefix=${FLATPAK_DEST}/rust --without=rust-docs
+      - ${FLATPAK_DEST}/rust/bin/rustc -vV
+    cleanup:
+      - rust-toolchain.tar.gz
+      - rust-1.90.0-*
+    sources:
+      - type: file
+        url: https://static.rust-lang.org/dist/rust-1.90.0-x86_64-unknown-linux-gnu.tar.gz
+        sha256: e453bae1c68d02fe2eae065c5452d5731308164cd154154c6ee442d2fa590685
+        dest-filename: rust-toolchain.tar.gz
+        only-arches:
+          - x86_64
+      - type: file
+        url: https://static.rust-lang.org/dist/rust-1.90.0-aarch64-unknown-linux-gnu.tar.gz
+        sha256: 293f412e3412c3aa3398c78ebbdf898fa08eacad80c85a7332ce1a455504c5fc
+        dest-filename: rust-toolchain.tar.gz
+        only-arches:
+          - aarch64
   - name: unsquashfs
     buildsystem: simple
     build-commands:
@@ -97,17 +133,33 @@ modules:
       - type: file
         path: ../third_party/licenses/dwarfs/GPL-3.0-or-later.txt
   - name: gosh-appimage-manager
-    buildsystem: cmake-ninja
-    config-opts:
-      - -DCMAKE_BUILD_TYPE=RelWithDebInfo
-      - -DBUILD_TESTING=OFF
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_HOME: /run/build/gosh-appimage-manager/cargo
+        CARGO_NET_OFFLINE: 'true'
+        RUSTC: /app/rust/bin/rustc
+    build-commands:
+      - /app/rust/bin/cargo --offline fetch --manifest-path Cargo.toml
+      - /app/rust/bin/cargo --offline build --release --features gui
+      - install -Dm755 target/release/gosh-appimage-manager -t ${FLATPAK_DEST}/bin/
+      - install -Dm644 data/com.goshapps.AppImageManager.desktop -t ${FLATPAK_DEST}/share/applications/
+      - install -Dm644 data/com.goshapps.AppImageManager.metainfo.xml -t ${FLATPAK_DEST}/share/metainfo/
+      - install -Dm644 data/icons/hicolor/scalable/apps/com.goshapps.AppImageManager.svg -t ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/
+      - install -Dm644 data/icons/hicolor/symbolic/apps/com.goshapps.AppImageManager-symbolic.svg -t ${FLATPAK_DEST}/share/icons/hicolor/symbolic/apps/
+      - install -Dm644 COPYING ${FLATPAK_DEST}/share/gosh-appimage-manager/COPYING
+      - install -Dm644 AUTHORS ${FLATPAK_DEST}/share/gosh-appimage-manager/AUTHORS
+      - cp -r third_party/licenses ${FLATPAK_DEST}/share/gosh-appimage-manager/licenses
+      - ./target/release/gosh-appimage-manager --self-test
     sources:
       - type: dir
         path: ..
         skip:
-          - build
+          - target
           - build-dir
           - .flatpak-builder
           - repo
           - .git
           - .grok
+          - screenshots
+      - cargo-sources.json

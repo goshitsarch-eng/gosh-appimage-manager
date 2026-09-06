@@ -4,7 +4,7 @@
   <name>Gosh AppImage Manager</name>
   <summary>Inspect, integrate, update and remove AppImages</summary>
   <developer id="com.goshapps">
-    <name>Gosh-Its-Arch</name>
+    <name>Gosh</name>
   </developer>
   <metadata_license>FSFAP</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
@@ -19,12 +19,12 @@
   <url type="homepage">https://goshapps.com</url>
   <description>
     <p>
-      Gosh AppImage Manager is a native KDE application for safely inspecting,
+      Gosh AppImage Manager is a native application for safely inspecting,
       integrating, launching, organizing, updating, and removing AppImages.
-      Opening a file never integrates or executes it.
+      Opening a file never integrates or executes it. Made by Gosh.
     </p>
     <p>
-      The application is written in C++20, Qt 6, KDE Frameworks 6, and Kirigami.
+      The application is written in Rust with libcosmic (COSMIC Epoch).
       Gear Lever was used as a behavioural reference only. This is an independent
       original implementation and is not endorsed by Gear Lever's authors.
     </p>
@@ -36,8 +36,6 @@
   <categories>
     <category>System</category>
     <category>Utility</category>
-    <category>Qt</category>
-    <category>KDE</category>
   </categories>
   <supports>
     <control>pointing</control>
@@ -54,9 +52,9 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="0.1.0" date="2026-08-28">
+    <release version="3.0.0" date="2026-09-06">
       <description>
-        <p>Initial Gosh AppImage Manager release.</p>
+        <p>Native libcosmic rewrite. Made by Gosh. Full Gear Lever workflow parity with System/Light/Dark mode and multi-arch Flatpak.</p>
       </description>
     </release>
   </releases>
