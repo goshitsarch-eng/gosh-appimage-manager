@@ -258,3 +258,101 @@ fn literal_percent_is_escaped_in_exec_arguments() {
     );
     assert_eq!(line, "/apps/X.AppImage --open \"100%% done.txt\"");
 }
+
+/// Audit finding: TaskQueue could not represent work in progress. `run_task`
+/// recorded a task only after it had finished, so `active()` could never
+/// return anything and TaskState::Queued/Cancelling were never assigned. The
+/// Tasks page the brief requires had nothing it could display.
+#[test]
+fn task_queue_tracks_work_in_flight() {
+    use goshaim_core::tasks::TaskQueue;
+    use goshaim_core::types::{TaskKind, TaskState};
+
+    let mut queue = TaskQueue::new();
+    let id = queue.begin(
+        TaskKind::Update,
+        "Updating Demo",
+        "/apps/Demo.AppImage",
+        true,
+    );
+
+    let active = queue.active();
+    assert_eq!(
+        active.len(),
+        1,
+        "a started task must be visible while running"
+    );
+    assert_eq!(active[0].state, TaskState::Running);
+    assert_eq!(active[0].title, "Updating Demo");
+
+    queue.progress(&id, 42, "downloading");
+    let running = queue.get(&id).unwrap();
+    assert_eq!(running.progress, 42);
+    assert_eq!(running.status_text, "downloading");
+
+    queue.mark_cancelling(&id);
+    assert_eq!(queue.get(&id).unwrap().state, TaskState::Cancelling);
+
+    queue.finish(&id, Err("Cancelled".into()), true);
+    let done = queue.get(&id).unwrap();
+    assert_eq!(done.state, TaskState::Cancelled);
+    assert!(
+        queue.active().is_empty(),
+        "a finished task is no longer active"
+    );
+
+    // A success path, and clear_finished keeping in-flight work.
+    let ok = queue.begin(TaskKind::Integrate, "Integrating", "/x", false);
+    queue.finish(&ok, Ok(()), false);
+    assert_eq!(queue.get(&ok).unwrap().state, TaskState::Succeeded);
+    assert_eq!(queue.get(&ok).unwrap().progress, 100);
+
+    let live = queue.begin(TaskKind::Remove, "Removing", "/y", false);
+    queue.clear_finished();
+    assert_eq!(queue.history().len(), 1, "only the live task should remain");
+    assert_eq!(queue.history()[0].id, live);
+}
+
+/// History is bounded, but a running task must never be evicted by the bound.
+#[test]
+fn history_bound_never_drops_a_running_task() {
+    use goshaim_core::tasks::TaskQueue;
+    use goshaim_core::types::TaskKind;
+
+    let mut queue = TaskQueue::new();
+    let live = queue.begin(TaskKind::Update, "Long running", "/live", false);
+    for i in 0..(goshaim_core::limits::MAX_TASK_HISTORY + 40) {
+        let id = queue.begin(TaskKind::CheckUpdate, "check", &format!("/x{i}"), false);
+        queue.finish(&id, Ok(()), false);
+    }
+    assert!(
+        queue.history().len() <= goshaim_core::limits::MAX_TASK_HISTORY,
+        "history must stay bounded"
+    );
+    assert!(
+        queue.get(&live).is_some(),
+        "the still-running task must survive the bound"
+    );
+}
+
+/// Audit finding C-9. The installed desktop entry used `%U`, which hands the
+/// application URLs, while the GUI treated its positional arguments as
+/// filesystem paths -- so opening an AppImage from a file manager produced
+/// "Cannot open file: file:///...". The entry now uses `%F` (paths, and more
+/// than one of them), and the GUI also tolerates a file:// URL.
+#[test]
+fn shipped_desktop_entry_passes_paths_not_urls() {
+    let entry = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/com.goshapps.AppImageManager.desktop"
+    ))
+    .expect("the shipped desktop entry should be readable");
+    assert!(
+        entry.contains("Exec=gosh-appimage-manager %F"),
+        "the entry must pass paths, not URLs:\n{entry}"
+    );
+    assert!(
+        !entry.contains("%U"),
+        "%U hands the app URLs it cannot open:\n{entry}"
+    );
+}

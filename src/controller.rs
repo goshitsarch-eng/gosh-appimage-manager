@@ -193,6 +193,141 @@ impl AppController {
         AppImageLibrary::new(&self.settings).scan(&self.registry)
     }
 
+    /// Open the file manager at this path, selecting the file if it can.
+    ///
+    /// Uses the host's default handler through the same argument-safe spawn
+    /// path as launching, so nothing is shell-parsed.
+    pub fn reveal_in_file_manager(&self, path: &str) -> Result<(), String> {
+        let parent = std::path::Path::new(path)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".".to_string());
+        self.runner.start_detached(&crate::process::ProcessRequest {
+            program: "xdg-open".to_string(),
+            args: vec![crate::safe_fs::argv_safe_path(std::path::Path::new(
+                &parent,
+            ))],
+            host: true,
+            timeout_ms: 10_000,
+            ..Default::default()
+        })
+    }
+
+    /// Re-read an installed AppImage's metadata and rewrite its desktop entry.
+    ///
+    /// Returns the app's name so the caller can report what it refreshed.
+    pub fn refresh_metadata(
+        &mut self,
+        uuid: &str,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<String, String> {
+        let app = self
+            .registry
+            .by_uuid(uuid)
+            .ok_or_else(|| "No installed app with that id".to_string())?;
+        let inspected = self.inspect_file(&app.managed_path, cancel, Some(uuid));
+        if !inspected.magic_valid {
+            inspected.discard_staging();
+            return Err(if inspected.error.is_empty() {
+                "The managed file is no longer a valid AppImage".to_string()
+            } else {
+                inspected.error
+            });
+        }
+        let mut updated = app.clone();
+        if !inspected.metadata.name.is_empty() {
+            updated.name = inspected.metadata.name.clone();
+        }
+        updated.version = inspected.metadata.version.clone();
+        updated.comment = inspected.metadata.comment.clone();
+        updated.website = inspected.metadata.website.clone();
+        updated.terminal = inspected.metadata.terminal;
+        updated.categories = inspected.metadata.categories.clone();
+        updated.mime_types = inspected.metadata.mime_types.clone();
+        updated.startup_wm_class = inspected.metadata.startup_wm_class.clone();
+        updated.default_arguments = inspected.metadata.exec_arguments.clone();
+        updated.embedded_update = inspected.update_info.raw.clone();
+        updated.sha256 = inspected.identity.sha256.clone();
+        updated.size = inspected.identity.size;
+        updated.app_type = inspected.app_type;
+        updated.architecture = inspected.architecture;
+        // Rewrite the entry we own so the refreshed name and version show up.
+        if !updated.desktop_path.is_empty() {
+            let body = desktop::build_desktop_file(
+                &updated,
+                &updated.managed_path,
+                self.settings.terminal_omit_suffix(),
+            );
+            crate::safe_fs::atomic_write(
+                std::path::Path::new(&updated.desktop_path),
+                body.as_bytes(),
+                0o644,
+            )?;
+        }
+        inspected.discard_staging();
+        let name = updated.name.clone();
+        self.registry.upsert(updated)?;
+        Ok(name)
+    }
+
+    /// Replace an app's argument list and environment, then rewrite its entry.
+    ///
+    /// Arguments are stored and written as separate tokens, never as a shell
+    /// fragment; environment names are validated before anything is saved.
+    pub fn set_arguments_and_environment(
+        &mut self,
+        uuid: &str,
+        arguments: Vec<String>,
+        environment: Vec<crate::types::EnvPair>,
+    ) -> Result<(), String> {
+        let mut app = self
+            .registry
+            .by_uuid(uuid)
+            .ok_or_else(|| "No installed app with that id".to_string())?;
+        if arguments.len() > crate::limits::MAX_ARGUMENTS {
+            return Err(format!(
+                "Too many arguments (limit {})",
+                crate::limits::MAX_ARGUMENTS
+            ));
+        }
+        if let Some(bad) = arguments
+            .iter()
+            .find(|a| a.contains('\0') || a.len() > crate::limits::MAX_ARGUMENT_LENGTH)
+        {
+            return Err(format!("Argument is not usable: {bad}"));
+        }
+        if environment.len() > crate::limits::MAX_ENV_PAIRS {
+            return Err(format!(
+                "Too many environment variables (limit {})",
+                crate::limits::MAX_ENV_PAIRS
+            ));
+        }
+        if let Some(bad) = environment
+            .iter()
+            .find(|p| !desktop::valid_env_name(&p.name))
+        {
+            return Err(format!(
+                "Not a valid environment variable name: {}",
+                bad.name
+            ));
+        }
+        app.arguments = arguments;
+        app.environment = environment;
+        if !app.desktop_path.is_empty() {
+            let body = desktop::build_desktop_file(
+                &app,
+                &app.managed_path,
+                self.settings.terminal_omit_suffix(),
+            );
+            crate::safe_fs::atomic_write(
+                std::path::Path::new(&app.desktop_path),
+                body.as_bytes(),
+                0o644,
+            )?;
+        }
+        self.registry.upsert(app)
+    }
+
     pub fn is_running(&self, app: &crate::types::InstalledApp) -> bool {
         LaunchService::new(&*self.runner, &*self.processes).is_running(app)
     }
