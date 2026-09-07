@@ -209,7 +209,10 @@ impl ManagedRegistry {
     pub fn open(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
+                // The registry records every managed path on this machine, so
+                // the directory holding it is private too. create_dir_all
+                // applies the umask, which typically leaves it 0755.
+                crate::safe_fs::mkdir_0700(parent)
                     .map_err(|e| format!("Cannot create data dir: {e}"))?;
             }
         }
@@ -278,6 +281,12 @@ impl ManagedRegistry {
     fn connect(&self) -> Result<Connection, String> {
         let conn =
             Connection::open(&self.path).map_err(|e| format!("Cannot open registry: {e}"))?;
+        // sqlite creates the database with the umask applied, so tighten it
+        // here -- at the moment of creation -- rather than only at the end of
+        // save(). Previously a registry could sit at 0644 for the whole of the
+        // first write, and a file that already existed at 0644 stayed that way
+        // across every read-only run.
+        Self::restrict_mode(&self.path);
         conn.execute_batch(SCHEMA)
             .map_err(|e| format!("Cannot migrate registry: {e}"))?;
         conn.execute(
@@ -409,12 +418,31 @@ impl ManagedRegistry {
         }
         tx.commit()
             .map_err(|e| format!("Cannot save registry: {e}"))?;
+        Self::restrict_mode(&self.path);
+        Ok(())
+    }
+
+    /// Restrict the registry (and any sqlite sidecar) to owner-only access.
+    fn restrict_mode(path: &Path) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+            for candidate in [
+                path.to_path_buf(),
+                path.with_extension("sqlite-journal"),
+                path.with_extension("sqlite-wal"),
+                path.with_extension("sqlite-shm"),
+            ] {
+                if candidate.exists() {
+                    let _ = std::fs::set_permissions(
+                        &candidate,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+            }
         }
-        Ok(())
+        #[cfg(not(unix))]
+        let _ = path;
     }
 
     pub fn apps(&self) -> Vec<InstalledApp> {

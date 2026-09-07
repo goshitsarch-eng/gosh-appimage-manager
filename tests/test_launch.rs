@@ -161,3 +161,35 @@ fn detached_launches_do_not_leave_zombies() {
         after.saturating_sub(before)
     );
 }
+
+/// Audit finding S-11. Inside a Flatpak sandbox /proc is the sandbox's own PID
+/// namespace and shows only this process, so scanning it cannot see a running
+/// AppImage. The lookup is delegated to the host instead; these tests cover
+/// the parsing and the fail-closed behaviour of that delegation.
+#[test]
+fn host_process_lookup_parses_pids_and_fails_safe() {
+    use goshaim_core::process::FakeRunner;
+    use goshaim_core::proctable::{ProcessTable, SysTable};
+
+    // pgrep exit 0 with matches -> those PIDs.
+    let runner = FakeRunner::new().canned("pgrep", 0, b"4242\n4243\n");
+    let table = SysTable::with_host_runner(Box::new(runner));
+    let pids = table.host_pids_for_test("/apps/X.AppImage");
+    assert_eq!(pids, Some(vec![4242, 4243]));
+
+    // pgrep exit 1 means "nothing matched" -- a real answer, not a failure.
+    let runner = FakeRunner::new().canned("pgrep", 1, b"");
+    let table = SysTable::with_host_runner(Box::new(runner));
+    assert_eq!(table.host_pids_for_test("/apps/X.AppImage"), Some(vec![]));
+
+    // A refused or erroring probe must report "cannot tell" rather than
+    // "not running", so a failed probe can never silently unblock an update.
+    let runner = FakeRunner::new().canned("pgrep", 127, b"");
+    let table = SysTable::with_host_runner(Box::new(runner));
+    assert_eq!(table.host_pids_for_test("/apps/X.AppImage"), None);
+
+    // Garbage on stdout is ignored rather than parsed into bogus PIDs.
+    let runner = FakeRunner::new().canned("pgrep", 0, b"not-a-pid\n7\n\n");
+    let table = SysTable::with_host_runner(Box::new(runner));
+    assert_eq!(table.host_pids_for_test("/apps/X.AppImage"), Some(vec![7]));
+}

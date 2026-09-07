@@ -36,7 +36,10 @@ impl AppController {
         Self::with_seams(
             Box::new(SystemRunner::new()),
             Box::new(ReqwestClient::new()),
-            Box::new(SysTable::new()),
+            // Give the process table a runner of its own so it can ask the
+            // host which apps are running when we are inside a Flatpak
+            // sandbox, where our /proc shows only ourselves.
+            Box::new(SysTable::with_host_runner(Box::new(SystemRunner::new()))),
             Box::new(SystemTrash::new()),
             Dirs::from_env(),
         )
