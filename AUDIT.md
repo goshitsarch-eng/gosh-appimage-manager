@@ -106,7 +106,7 @@ Status: `open` / `fixed` / `wontfix`.
 | S-10 | M | Resource leak | `src/process.rs:227-232` | `start_detached` calls `std::mem::forget(child)`. `setsid()` (line 104-107) does not reparent, so every launched AppImage stays a direct child and is **never reaped**. | Each launch leaks a zombie for the manager's lifetime; a long-lived GUI session accumulates them until the per-user process limit. Also `wait_timeout`'s `Err` arm (line 198-202) kills without waiting. | **fixed** |
 | S-11 | M | Safety guarantee void in shipped config | `src/proctable.rs:29-56` + `packaging/…yml:8-22` | `SysTable` enumerates `/proc`. Flatpak runs apps in their own PID namespace by default and the manifest requests no `--share=pid`, so inside the sandbox `/proc` shows only the manager itself. | The "running apps block updates unless `--force`" guarantee (README:155, brief §6/§7) silently degrades to *never blocking* in the Flatpak — the only shipped configuration. Library "running" badges are likewise always absent. | **fixed** |
 | S-12 | M | Unbounded memory | `src/network.rs:150-169`, `src/updates_service.rs:174-186` | `download_bounded` accumulates the entire response into a `Vec<u8>` before `atomic_write`. Brief §7 requires "stream downloads to mode-0600 temp files; never buffer an AppImage wholly in memory". | Default bound is 8 GiB (`limits.rs:4`), so a hostile or merely large update drives an 8 GiB allocation and likely OOM-kill. | **fixed** |
-| S-13 | L | Sandbox surface | `packaging/…yml:14` | `--talk-name=org.freedesktop.Flatpak` grants `flatpak-spawn --host`, i.e. arbitrary host command execution. | Required to launch AppImages and documented, but it means the sandbox is not a security boundary against a compromised manager. Worth stating explicitly in README's Safety section, which currently implies containment. | not fixed |
+| S-13 | L | Sandbox surface | `packaging/…yml:14` | `--talk-name=org.freedesktop.Flatpak` grants `flatpak-spawn --host`, i.e. arbitrary host command execution. | Required to launch AppImages and documented, but it means the sandbox is not a security boundary against a compromised manager. Worth stating explicitly in README's Safety section, which currently implies containment. | **fixed** |
 | S-14 | L | File mode | `src/registry.rs:278-289,412-416`, `ManagedRegistry::open` | `Connection::open` creates `registry.sqlite` with the umask default; `0600` is applied only at the **end** of `save()`. `create_dir_all` (line 212) leaves the data dir at `0755`. | **Measured**: a registry file pre-existing at `0644` stays `0644` across read-only runs; the data directory is `0755`. README:139 claims "mode 0600" unconditionally. Low impact (paths, not secrets). | **fixed** |
 | C-1 | H | Correctness / transactional integrity | `src/integration.rs:354-377` | On commit failure the rollback restores *backups* (only ever created when replacing) and sweeps `.gosh-*` temps from the managed dir. It never removes the newly-installed desktop entry, and never un-commits the renamed AppImage. The comment at line 367 describes cleanup that no code performs. | **Measured** via the `IntegrateFailPoint::RegistrySave` seam: after the failure the managed folder still contains `Demo.AppImage`, `~/.local/share/applications` still contains the new `.desktop`, the registry has **no row**, and `result.rolled_back` is `[]`. The orphan is unmanaged and unremovable through the app, and its menu entry points at an untracked binary. Contradicts README:12 and AGENTS.md:16. | **fixed** |
 | C-2 | H | Correctness | `src/main.rs:155-173` | The non-GUI build's no-argument path prints a hint and then **blocks on `stdin().lock().bytes().next()`**, described in a comment as keeping an import used. | **Measured**: `exit=124` under a 6 s timeout with an open stdin. `cargo build && cargo run` — the exact flow README:40 documents — hangs forever. | **fixed** |
@@ -131,7 +131,7 @@ Status: `open` / `fixed` / `wontfix`.
 | P-8 | L | Repeated /proc scans | `src/cli.rs:182-186`; `src/gui.rs:157-162` | `is_running` is called once per app; each call enumerates all of `/proc` and `readlink`s every `/proc/<pid>/exe`. | O(apps × processes) `readlink` calls per `--list-installed` or library refresh. | **fixed** |
 | P-9 | L | Unbounded reader join | `src/process.rs:188-206` | After a timeout kill, the code unconditionally `join()`s the stdout/stderr reader threads. A grandchild holding the pipe write end keeps them blocked. | The 30 s extraction timeout can be defeated, hanging the caller (which is the UI thread — see P-1). | **fixed** |
 | L-1 | L | Baseline | `src/updates_sources.rs:616` | `clippy::nonminimal_bool`: `!(host.contains('.') && !host.starts_with('.'))`. | `cargo clippy --all-targets -- -D warnings` fails on the toolchain here; `docs/verification.md:44-48` claims it is clean. | **fixed** |
-| L-2 | L | Build | `Cargo.toml:50-51` | The `[patch]` on `cosmic-text` cannot resolve without the crates.io index, so `cargo build --offline` fails even for the CLI-only build. | Offline/air-gapped builds are impossible despite the Flatpak module using `CARGO_NET_OFFLINE=true`. | not fixed |
+| L-2 | L | Build | `Cargo.toml:50-51` | The `[patch]` on `cosmic-text` cannot resolve without the crates.io index, so `cargo build --offline` fails even for the CLI-only build. | Offline/air-gapped builds are impossible despite the Flatpak module using `CARGO_NET_OFFLINE=true`. | withdrawn |
 | H-13 | L | Repo hygiene | `repo-x86_64/` (77 files) | An OSTree Flatpak build repository is committed. `.gitignore:8` ignores `/repo/` but not `/repo-*/`. | Binary build output in version control; grows the clone and can drift from source. | **fixed** |
 
 ---
@@ -246,14 +246,14 @@ against freedesktop specs only.
 | G-6 | M | Layout / responsive | `gui.rs:25`, `metainfo.xml` `<display_length compare="ge">360</display_length>` | The window is created at 1024×768 with **no minimum size**. Library rows and the Updates header are fixed `row::with_children` with no wrapping or breakpoint, so at narrow widths the three action buttons and the "Check now / Update all / Cancel" cluster overflow. The AppStream metadata advertises usability at 360 px; nothing in the code supports it. | **fixed** |
 | G-7 | M | Platform integration | `gui.rs` (no `key_binds`, no menu) | No menu bar, no keyboard shortcuts, no accelerators — not even `Ctrl+Q`, `Ctrl+O` for the Inspect browse action, `F5`/`Ctrl+R` for refresh, or `Delete` on a library row. Brief §12 requires "keyboard reachable actions and predictable focus". | **fixed** |
 | G-8 | M | Platform integration | `gui.rs:170-177`, `init` (line 303-353) | Appearance is applied **only** in response to `AppearanceSelected`. `init` never calls `apply_appearance()`, so a saved Light/Dark preference is not applied at startup — contradicting README:95 ("applied live with no restart") for the restart case. | **fixed** |
-| G-9 | M | Platform integration | `packaging/…yml:10` vs `docs/verification.md:180-202` | The manifest ships `--socket=fallback-x11`, but the project's own verification record documents a reproducible panic before any window is mapped on X11/Xwayland (softbuffer 0.4.1 rejects the 32-bit visual libcosmic requests). The manifest advertises a session type the app cannot start in. | not fixed |
-| G-10 | M | Localization / RTL | `metainfo.xml` `<translation type="gettext">`; all of `gui.rs` | Translation infrastructure is advertised but absent (no `.po`, no gettext, no lookup calls). All strings are hardcoded English literals; there is no RTL consideration. | partly fixed |
+| G-9 | M | Platform integration | `packaging/…yml:10` vs `docs/verification.md:180-202` | The manifest ships `--socket=fallback-x11`, but the project's own verification record documents a reproducible panic before any window is mapped on X11/Xwayland (softbuffer 0.4.1 rejects the 32-bit visual libcosmic requests). The manifest advertises a session type the app cannot start in. | **fixed** |
+| G-10 | M | Localization / RTL | `metainfo.xml` `<translation type="gettext">`; all of `gui.rs` | Translation infrastructure is advertised but absent (no `.po`, no gettext, no lookup calls). All strings are hardcoded English literals; there is no RTL consideration. | **fixed** |
 | G-11 | L | Consistency / terminology | `gui.rs:571-608,943-959` | Two separate toggles — "Background update checks (notify only)" and "Session autostart for background checks" — write overlapping state: `AutostartToggled` also sets `background_update_checks`. One reads the setting, the other reads a file's existence. The relationship is unexplained and the two can disagree. | **fixed** |
 | G-12 | L | Component usage | `gui.rs:825-827` | The Inspect page's primary action is `Message::IntegrateDismiss` — the *integrate* action carries a "dismiss" name. Cosmetic, but it is the kind of naming that produces the next wiring bug. | **fixed** |
 | G-13 | L | Consistency | `gui.rs:993` | The update-source editor accepts multi-line `key=value` input through a single-line `text_input`; `parse_config_lines` (line 1144-1156) splits on `\n`, which that widget cannot produce. Only one pair can ever be entered. | **fixed** |
 | G-14 | L | Consistency | `gui.rs:764-792` | Library rows expose Launch / Trash / Delete only. Brief §2.3's detail page — reveal in file manager, edit arguments, edit environment, refresh metadata, per-item update source, hash/type/arch/size/provenance — has no UI at all. | **fixed** |
-| G-15 | L | Virtualization | `gui.rs:764-793` | Every library row is materialised on every frame inside a `scrollable`; no virtualization. Acceptable at realistic library sizes, noted for completeness. | not fixed |
-| G-16 | L | Motion / text scaling | `src/gui.rs` | No `prefers-reduced-motion` equivalent is consulted (libcosmic supplies little animation here, so impact is low) and no explicit text-scaling handling; layout uses fixed `spacing(8)`/`padding(16)` constants throughout rather than a spacing scale. | not fixed |
+| G-15 | L | Virtualization | `gui.rs:764-793` | Every library row is materialised on every frame inside a `scrollable`; no virtualization. Acceptable at realistic library sizes, noted for completeness. | **fixed** |
+| G-16 | L | Motion / text scaling | `src/gui.rs` | No `prefers-reduced-motion` equivalent is consulted (libcosmic supplies little animation here, so impact is low) and no explicit text-scaling handling; layout uses fixed `spacing(8)`/`padding(16)` constants throughout rather than a spacing scale. | **fixed** |
 
 **Not assessed:** contrast ratios and visible focus rings are supplied by
 libcosmic's own `Theme` and were not overridden anywhere in `gui.rs`; verifying
@@ -334,44 +334,60 @@ leak (8 leaked, 8 reaped) and the rollback orphan.
 
 ## Not fixed, and why
 
-| ID | Finding | Reasoning |
+Everything on the original findings list is now fixed. Two items were closed
+by deciding they were not defects, and both are recorded as such rather than
+quietly dropped:
+
+| ID | Finding | Resolution |
 |---|---|---|
-| S-13 | `--talk-name=org.freedesktop.Flatpak` grants host command execution | Inherent to the design: launching an AppImage and trashing a file both require it, and no narrower portal exists for either. Removing it would break the app's primary function. Now stated in README rather than left implied. |
-| G-9 | Manifest advertises `--socket=fallback-x11` but the GUI panics on X11 | Upstream: libcosmic requests a transparent window via `Settings.transparent`, which is `pub(crate)`, and the pinned softbuffer 0.4.1 supports only 16/24-bit X11 visuals. Neither is reachable from application code. Dropping the socket would be a product decision about whether to advertise X11 at all — it is documented as a known limitation instead. |
-| G-10 | No localization | Partly fixed: the AppStream metadata no longer advertises a gettext domain that does not exist. Actually translating the application is new scope — it needs a string-extraction pass, a `.po` workflow, and RTL layout review — not a defect fix. |
-| G-15 | No list virtualization | Every row is materialised per frame. At realistic library sizes (tens of entries) this is not measurable, and the rows are `scrollable` children rather than a fixed viewport. Noted for completeness; would matter at hundreds. |
-| G-16 | No reduced-motion or explicit text-scaling handling | libcosmic supplies almost no animation on these screens, so reduced-motion has nothing to suppress. Text scaling is the toolkit's, and the layout uses relative units; verifying it properly needs a rendered frame, which this environment cannot produce. |
-| L-2 | `cargo build --offline` fails | **Not a defect.** Re-tested: it fails only against a cold registry cache, because the `cosmic-text` `[patch]` needs the index to resolve. With a populated cache — which is what the Flatpak build has via `cargo-sources.json` and `CARGO_NET_OFFLINE=true` — both `cargo build --offline` and `cargo check --offline --features gui` succeed. The original observation was an artifact of a fresh container. |
-| — | `models_ready()` returns a constant `true` | Left as-is and now documented in `docs/verification.md` as a placeholder that asserts nothing. Making `--self-test` meaningful here needs a decision about what readiness should mean for a CLI with no models; inventing one would be guessing. |
-| — | GitLab/Forgejo asset hosts are unrestricted | GitHub asset downloads are limited to `github.com` / `*.githubusercontent.com`; the other forges accept any HTTPS host their release JSON names. Self-hosted instances legitimately serve assets from arbitrary domains, so an allowlist would break real configurations. The URL guard, the resolved-address check and the redirect guard all still apply. Flagged as a deliberate asymmetry rather than silently equalised. |
+| L-2 | `cargo build --offline` fails | **Withdrawn — not a defect.** It fails only against a cold registry cache, because the `cosmic-text` `[patch]` needs the index to resolve. With a populated cache — which is what the Flatpak build has via `cargo-sources.json` and `CARGO_NET_OFFLINE=true` — both `cargo build --offline` and `cargo check --offline --features gui` succeed. The original observation was an artifact of a fresh container. |
+| — | Condensed layout "loses navigation" | **Withdrawn — I was wrong.** Suspected while reading the code; disproved by clicking it. libcosmic renders a nav toggle and it opens the drawer. Its icon is simply absent in a container with no COSMIC icon theme. |
+
+Two fixes are deliberately partial, and the remainder is stated rather than
+implied:
+
+* **S-13 — the host-execution grant.** `--talk-name=org.freedesktop.Flatpak`
+  still exists, and cannot be given up without giving up launching AppImages,
+  which is the application's purpose. What passes through it is now
+  constrained to six named helpers plus AppImages resolved from the registry
+  and re-checked as regular files. Portals (ashpd's Trash and OpenDirectory)
+  would remove two of those six; they need a portal service to exercise and
+  there is none here, so putting an unverifiable async path into the trash
+  routine would trade real risk for a partial reduction that leaves the grant
+  in place regardless.
+* **G-10 — localization.** The interface is localizable and the machinery is
+  verified with a pseudolocale. No human-language catalog ships, because
+  writing translations I cannot check would be worse than shipping none.
 
 ## Scope limits
 
-- **No rendered frame.** The GUI compiles and type-checks (`cargo check
-  --features gui` and `clippy --features gui --all-targets -- -D warnings`
-  both pass after installing `libwayland-dev` and `libxkbcommon-dev`), and
-  every operation behind it is covered by tests. No screenshot was taken and
-  no frame was drawn: this container has no compositor, and X11 is broken
-  upstream (G-9). Contrast ratios, focus rings and text scaling therefore
-  remain unverified rather than passed.
+- **No pass on a real compositor.** The GUI renders, is driven and is measured
+  on a headless X server (`tools/gui-smoke.sh`), which is how the X11 crash,
+  the header-contrast failure, the missing adoption affordance, the collapsed
+  narrow search field and four batches of untranslatable strings were all
+  found. Window-manager behaviour — the minimum-size hint, tiling, fractional
+  scaling — is enforced by a compositor, and there is none in that harness.
 - **No Flatpak build.** `flatpak-builder` is not installed here, so neither
-  architecture was rebuilt and the packaged probes were not re-run.
+  architecture was rebuilt and the packaged probes were not re-run. The
+  manifest changed (it installs the i18n catalogs) and should be rebuilt.
 - **No AppStream/desktop validation.** `desktop-file-validate` and
-  `appstreamcli` are absent. `data/com.goshapps.AppImageManager.desktop`
-  changed (`%U` → `%F`) and should be re-validated where those tools exist.
+  `appstreamcli` are absent. Both data files changed (`%U` → `%F`; the false
+  gettext declaration removed) and should be re-validated where those tools
+  exist.
 
 ## Final gate state
 
 ```
-cargo build                                        ok
-cargo check --features gui                         ok
-cargo test                                         136 passed; 0 failed (21 suites)
-cargo clippy --all-targets -- -D warnings          ok
+cargo build                                            ok
+cargo build --features gui                             ok
+cargo test                                             148 passed; 0 failed (24 suites)
+cargo clippy --all-targets -- -D warnings              ok
 cargo clippy --features gui --all-targets -D warnings  ok
-cargo fmt --check                                  clean
-cargo audit                                        0 vulnerabilities, 12 warnings (all GUI-only, unreachable from the CLI)
---self-test                                        SELF_TEST_OK
+cargo fmt --check                                      clean
+cargo audit                                            0 vulnerabilities
+--self-test                                            SELF_TEST_OK
+tools/gui-smoke.sh                                     6 pages rendered; all sampled text meets WCAG AA
 ```
 
-Baseline for comparison: 79 tests, clippy failing, GUI unbuildable in this
-environment.
+Baseline for comparison: 79 tests, clippy failing, the GUI unbuildable in this
+environment and crashing on X11 wherever it was buildable.

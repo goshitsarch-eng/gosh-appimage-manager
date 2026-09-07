@@ -21,6 +21,14 @@ BIN="$ROOT/target/debug/gosh-appimage-manager"
 
 [ -x "$BIN" ] || { echo "build first: cargo build --features gui" >&2; exit 1; }
 
+# A plain `cargo build` overwrites the same path with a binary that has no
+# GUI, which otherwise shows up here as an unexplained startup failure.
+if "$BIN" 2>&1 </dev/null | grep -q "This build has no GUI"; then
+  echo "FAIL: $BIN was built without the gui feature." >&2
+  echo "      Run: cargo build --features gui" >&2
+  exit 1
+fi
+
 mkdir -p "$HOME_DIR" "$OUT"
 # XDG_RUNTIME_DIR must be short: the wayland socket path has a 108-byte cap.
 RT="${RT:-/run/goshaim-smoke}"
