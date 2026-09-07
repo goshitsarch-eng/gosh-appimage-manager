@@ -169,7 +169,7 @@ fn detached_launches_do_not_leave_zombies() {
 #[test]
 fn host_process_lookup_parses_pids_and_fails_safe() {
     use goshaim_core::process::FakeRunner;
-    use goshaim_core::proctable::{ProcessTable, SysTable};
+    use goshaim_core::proctable::SysTable;
 
     // pgrep exit 0 with matches -> those PIDs.
     let runner = FakeRunner::new().canned("pgrep", 0, b"4242\n4243\n");

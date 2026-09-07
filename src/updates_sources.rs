@@ -631,24 +631,28 @@ impl GitlabSource {
     }
 }
 
+/// Is this host one we refuse to treat as a public forge?
+///
+/// Delegates the address classification to url_guard so there is one
+/// definition. This used to carry its own copy, which missed IPv6
+/// unique-local and link-local entirely and had a hand-rolled dotted-name
+/// heuristic that clippy could simplify because it said nothing useful.
 fn is_private_hostname(host: &str) -> bool {
-    if host == "localhost" || host.ends_with(".local") {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return url_guard::is_local_ip(&ip);
+    }
+    let name = bare.strip_suffix('.').unwrap_or(bare);
+    if name == "localhost"
+        || name.ends_with(".localhost")
+        || name.ends_with(".local")
+        || name.ends_with(".internal")
+    {
         return true;
     }
-    if let Ok(ip) = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .parse::<std::net::IpAddr>()
-    {
-        return match ip {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_loopback() || v4.is_link_local() || v4.is_private() || v4.is_unspecified()
-            }
-            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
-        };
-    }
-    // Unknown non-public DNS names count as private until opted in.
-    !(host.contains('.') && !host.starts_with('.'))
+    // A single-label name is not a public DNS name; treat it as internal
+    // until the user opts in.
+    !name.contains('.')
 }
 
 // ---- codeberg + forgejo (Forgejo API shape) ------------------------------------

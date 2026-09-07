@@ -395,10 +395,8 @@ impl<'a> IntegrationService<'a> {
             if backup_appimage.is_some() {
                 restore_live(&backup_appimage, &destination);
                 rolled_back.push(destination.to_string_lossy().into_owned());
-            } else if committed {
-                if fs::remove_file(&destination).is_ok() {
-                    rolled_back.push(destination.to_string_lossy().into_owned());
-                }
+            } else if committed && fs::remove_file(&destination).is_ok() {
+                rolled_back.push(destination.to_string_lossy().into_owned());
             }
 
             // 2. The desktop entry, which install_files wrote before the

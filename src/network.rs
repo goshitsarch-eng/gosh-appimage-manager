@@ -245,7 +245,22 @@ fn guard_final_url(requested: &url::Url, final_url: &url::Url) -> Result<(), Str
     Ok(())
 }
 
-pub struct ReqwestClient;
+/// How long a cached client keeps its pinned address before re-resolving.
+const CLIENT_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// Clients keyed by destination and local-network policy, with the instant
+/// each was built so its pinned address can be refreshed.
+type ClientCache = HashMap<(String, u16, bool), (std::time::Instant, reqwest::blocking::Client)>;
+
+pub struct ReqwestClient {
+    /// Cached clients keyed by (host, port, local policy).
+    ///
+    /// Building a reqwest client parses the whole webpki root store and starts
+    /// an empty connection pool, and one was built per request -- so an N-app
+    /// update check paid N root-store parses and N full TLS handshakes with no
+    /// reuse. Cached entries expire so the pinned address still refreshes.
+    clients: Mutex<ClientCache>,
+}
 
 impl Default for ReqwestClient {
     fn default() -> Self {
@@ -255,7 +270,34 @@ impl Default for ReqwestClient {
 
 impl ReqwestClient {
     pub fn new() -> Self {
-        Self
+        Self {
+            clients: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn client(
+        &self,
+        host: &str,
+        port: u16,
+        allow_local: bool,
+    ) -> Result<reqwest::blocking::Client, String> {
+        let key = (host.to_string(), port, allow_local);
+        if let Ok(mut cache) = self.clients.lock() {
+            if let Some((created, client)) = cache.get(&key) {
+                if created.elapsed() < CLIENT_CACHE_TTL {
+                    return Ok(client.clone());
+                }
+            }
+            let client = client_for_with(host, port, allow_local)?;
+            // Bound the cache: a library of update sources is small, and this
+            // keeps a pathological config from growing it without limit.
+            if cache.len() > 64 {
+                cache.clear();
+            }
+            cache.insert(key, (std::time::Instant::now(), client.clone()));
+            return Ok(client);
+        }
+        client_for_with(host, port, allow_local)
     }
 }
 
@@ -271,7 +313,7 @@ impl NetworkClient for ReqwestClient {
         }
         let checked = url_guard::validate(url, false, local.allowed())?;
         let (host, port) = host_port(&checked.url)?;
-        let client = client_for_with(&host, port, local.allowed())?;
+        let client = self.client(&host, port, local.allowed())?;
         let mut request = client.get(checked.url.clone());
         for (key, value) in headers {
             request = request.header(key.as_str(), value.as_str());
@@ -295,7 +337,7 @@ impl NetworkClient for ReqwestClient {
         }
         let checked = url_guard::validate(url, false, local.allowed())?;
         let (host, port) = host_port(&checked.url)?;
-        let client = client_for_with(&host, port, local.allowed())?;
+        let client = self.client(&host, port, local.allowed())?;
         let response = client
             .head(checked.url.clone())
             .send()
@@ -320,7 +362,7 @@ impl NetworkClient for ReqwestClient {
         }
         let checked = url_guard::validate(url, false, local.allowed())?;
         let (host, port) = host_port(&checked.url)?;
-        let client = client_for_with(&host, port, local.allowed())?;
+        let client = self.client(&host, port, local.allowed())?;
         let response = client
             .get(checked.url.clone())
             .send()
@@ -350,7 +392,7 @@ impl NetworkClient for ReqwestClient {
         }
         let checked = url_guard::validate(url, false, local.allowed())?;
         let (host, port) = host_port(&checked.url)?;
-        let client = client_for_with(&host, port, local.allowed())?;
+        let client = self.client(&host, port, local.allowed())?;
         let response = client
             .get(checked.url.clone())
             .send()
