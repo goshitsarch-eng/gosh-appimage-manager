@@ -261,8 +261,9 @@ impl<'a> IntegrationService<'a> {
             let _ = fs::remove_file(&staged);
             Failure::new(e)
         })?;
-        let icon_source: Option<PathBuf> = None; // extraction staging happens below
-        let _ = icon_source;
+        // Whether these artifacts existed before this transaction decides
+        // whether rollback deletes them or restores them.
+        let desktop_existed = desktop_path.exists();
         // Extract the icon file (best effort) into a temp to stage it.
         let staged_icon_temp: Option<(PathBuf, String)> = self.stage_icon(&inspected, &app.uuid);
         let (final_desktop, final_icon) = self
@@ -273,6 +274,11 @@ impl<'a> IntegrationService<'a> {
             })?;
         app.desktop_path = final_desktop.to_string_lossy().into_owned();
         app.icon_path = final_icon.to_string_lossy().into_owned();
+        let icon_existed = !final_icon.as_os_str().is_empty() && {
+            // install_files has already written it, so "existed before" is only
+            // knowable from the replace backup taken below.
+            replacing.is_some()
+        };
         self.fail(IntegrateFailPoint::DesktopInstall).map_err(|e| {
             let _ = fs::remove_file(&staged);
             let _ = fs::remove_file(&final_desktop);
@@ -351,6 +357,7 @@ impl<'a> IntegrationService<'a> {
                 "Destination appeared before commit; refusing to overwrite".to_string(),
             ));
         }
+        let commit_ok = commit.is_ok();
         let commit_result = commit.and_then(|_| {
             // Commit desktop over the top, then persist the registry.
             self.fail(IntegrateFailPoint::RegistrySave)?;
@@ -358,13 +365,42 @@ impl<'a> IntegrationService<'a> {
             Ok(())
         });
         if let Err(error) = commit_result {
-            // Roll back: restore live backups, drop staged desktop/icon, restore snapshot.
-            restore_live(&backup_appimage, &destination);
-            restore_live(&backup_desktop, &final_desktop);
-            if !final_icon.as_os_str().is_empty() {
-                restore_live(&backup_icon, &final_icon);
+            // Roll back every artifact this transaction created, and restore
+            // every one it replaced. Anything that existed beforehand is put
+            // back; anything we introduced is removed.
+            let committed = commit_ok && destination.exists();
+
+            // 1. The AppImage. When replacing, the backup goes back over the
+            //    top. When installing fresh there is no backup, so the file we
+            //    just committed has to be removed -- leaving it behind was the
+            //    bug: it survived with no registry row, invisible to the app
+            //    and impossible to remove through it.
+            if backup_appimage.is_some() {
+                restore_live(&backup_appimage, &destination);
+                rolled_back.push(destination.to_string_lossy().into_owned());
+            } else if committed {
+                if fs::remove_file(&destination).is_ok() {
+                    rolled_back.push(destination.to_string_lossy().into_owned());
+                }
             }
-            // Remove the staged desktop file only if it did not exist before.
+
+            // 2. The desktop entry, which install_files wrote before the
+            //    commit was attempted.
+            if desktop_existed {
+                restore_live(&backup_desktop, &final_desktop);
+            } else if fs::remove_file(&final_desktop).is_ok() {
+                rolled_back.push(final_desktop.to_string_lossy().into_owned());
+            }
+
+            // 3. The icon, same rule.
+            if !final_icon.as_os_str().is_empty() {
+                if icon_existed {
+                    restore_live(&backup_icon, &final_icon);
+                } else if fs::remove_file(&final_icon).is_ok() {
+                    rolled_back.push(final_icon.to_string_lossy().into_owned());
+                }
+            }
+
             let _ = registry.restore(snapshot);
             rolled_back.extend(safe_fs::rollback_temps(&managed_dir, ".gosh-"));
             let _ = fs::remove_file(&staged);
