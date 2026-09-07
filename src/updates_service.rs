@@ -202,18 +202,25 @@ impl<'a> UpdateService<'a> {
         let live = PathBuf::from(&app.managed_path);
         let staging = safe_fs::sibling_temp(&live, ".gosh-upd-");
         let max_bytes = self.settings.max_appimage_bytes() as u64;
-        let body = match self.network.download_bounded(&checked.url, max_bytes) {
-            Ok(body) => body,
-            Err(error) => {
-                let _ = fs::remove_file(&staging);
-                result.error = error;
-                return result;
-            }
-        };
-        if let Err(error) = safe_fs::atomic_write(&staging, &body, 0o755) {
+        // Stream to the staging file rather than buffering the whole AppImage:
+        // these are routinely hundreds of megabytes and the bound defaults to
+        // 8 GiB. This is also the first point cancellation can take effect.
+        if let Err(error) = self
+            .network
+            .download_to_file(&checked.url, &staging, max_bytes, cancel)
+        {
             let _ = fs::remove_file(&staging);
             result.error = error;
             return result;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = fs::set_permissions(&staging, fs::Permissions::from_mode(0o755)) {
+                let _ = fs::remove_file(&staging);
+                result.error = format!("Cannot prepare staged update: {e}");
+                return result;
+            }
         }
         if self.fail_point == UpdateFailPoint::AfterDownload {
             let _ = fs::remove_file(&staging);

@@ -143,6 +143,19 @@ impl NetworkClient for SharedNetwork {
         }
         Ok(result.body)
     }
+
+    fn download_to_file(
+        &self,
+        url: &str,
+        dest: &Path,
+        max_bytes: u64,
+        cancel: &AtomicBool,
+    ) -> Result<u64, String> {
+        // Exercise the real streaming writer so the tests cover the same code
+        // path the production client uses to land bytes on disk.
+        let body = self.download_bounded(url, max_bytes)?;
+        goshaim_core::network::stream_to_file(body.as_slice(), dest, max_bytes, cancel)
+    }
 }
 
 #[derive(Clone, Default)]

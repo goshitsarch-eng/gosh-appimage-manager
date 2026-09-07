@@ -448,3 +448,59 @@ fn seed_arch_app(
     c.registry_mut().upsert(app.clone()).unwrap();
     app
 }
+
+/// Audit finding S-12. The payload path must not buffer the whole AppImage:
+/// the size bound defaults to 8 GiB, so an oversized body has to be refused
+/// while streaming, not after allocating it.
+#[test]
+fn oversized_download_is_refused_without_buffering_it() {
+    use goshaim_core::network::stream_to_file;
+    let tmp = tempfile::tempdir().unwrap();
+    let dest = tmp.path().join("staged.AppImage");
+    let payload = vec![0u8; 512 * 1024];
+
+    let err = stream_to_file(
+        payload.as_slice(),
+        &dest,
+        64 * 1024,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap_err();
+    assert!(err.contains("exceeds size bound"), "got: {err}");
+    assert!(
+        !dest.exists(),
+        "a refused download must not leave a partial file"
+    );
+
+    // Within the bound it lands on disk with private permissions.
+    let n = stream_to_file(
+        payload.as_slice(),
+        &dest,
+        1024 * 1024,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(n, payload.len() as u64);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "staging must not be readable by other users");
+    }
+}
+
+/// Cancellation now reaches the download, which it could not when the body was
+/// fetched in one call before anything was written.
+#[test]
+fn cancelled_download_removes_the_partial_file() {
+    use goshaim_core::network::stream_to_file;
+    let tmp = tempfile::tempdir().unwrap();
+    let dest = tmp.path().join("staged.AppImage");
+    let cancel = std::sync::atomic::AtomicBool::new(true);
+    let err = stream_to_file(vec![0u8; 4096].as_slice(), &dest, 1 << 20, &cancel).unwrap_err();
+    assert_eq!(err, "Cancelled");
+    assert!(
+        !dest.exists(),
+        "a cancelled download must not leave a partial file"
+    );
+}

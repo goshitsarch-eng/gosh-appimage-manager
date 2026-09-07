@@ -23,6 +23,74 @@ pub trait NetworkClient: Send + Sync {
     fn get(&self, url: &str, headers: &[(String, String)]) -> Result<FetchResult, String>;
     fn head_len(&self, url: &str) -> Result<Option<u64>, String>;
     fn download_bounded(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, String>;
+
+    /// Stream a download straight to `dest` (created mode 0600), returning the
+    /// byte count.
+    ///
+    /// An AppImage is routinely hundreds of megabytes and the configured bound
+    /// defaults to 8 GiB, so `download_bounded` -- which accumulates the whole
+    /// body into a Vec before anything is written -- is not usable for the
+    /// payload path: a large or hostile response drives an allocation of that
+    /// size and the process is OOM-killed. Nothing here holds more than one
+    /// buffer at a time.
+    fn download_to_file(
+        &self,
+        url: &str,
+        dest: &std::path::Path,
+        max_bytes: u64,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<u64, String>;
+}
+
+/// Copy `reader` into `dest` with a byte ceiling and cancellation, creating the
+/// file mode 0600 and removing it on any failure.
+pub fn stream_to_file<R: Read>(
+    mut reader: R,
+    dest: &std::path::Path,
+    max_bytes: u64,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<u64, String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(dest)
+        .map_err(|e| format!("Cannot write {}: {e}", dest.display()))?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut total: u64 = 0;
+    loop {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            drop(file);
+            let _ = std::fs::remove_file(dest);
+            return Err("Cancelled".to_string());
+        }
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                drop(file);
+                let _ = std::fs::remove_file(dest);
+                return Err(format!("Network read failed (Download): {e}"));
+            }
+        };
+        total = total.saturating_add(n as u64);
+        if total > max_bytes {
+            drop(file);
+            let _ = std::fs::remove_file(dest);
+            return Err(format!("Download exceeds size bound ({max_bytes} bytes)"));
+        }
+        if let Err(e) = file.write_all(&buf[..n]) {
+            drop(file);
+            let _ = std::fs::remove_file(dest);
+            return Err(format!("Cannot write {}: {e}", dest.display()));
+        }
+    }
+    file.flush()
+        .map_err(|e| format!("Cannot write {}: {e}", dest.display()))?;
+    Ok(total)
 }
 
 /// Resolve `host` and pin the request to a single address.
@@ -231,6 +299,34 @@ impl NetworkClient for ReqwestClient {
         let cap = max_bytes.min(64 * 1024 * 1024 * 1024) as usize;
         read_bounded(response, cap, "Download")
     }
+
+    fn download_to_file(
+        &self,
+        url: &str,
+        dest: &std::path::Path,
+        max_bytes: u64,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<u64, String> {
+        if url.starts_with("ftp://") || url.starts_with("FTP://") {
+            let body = ftp_download(url, max_bytes)?;
+            return stream_to_file(body.as_slice(), dest, max_bytes, cancel);
+        }
+        let checked = url_guard::validate(url, false, false)?;
+        let (host, port) = host_port(&checked.url)?;
+        let client = client_for(&host, port)?;
+        let response = client
+            .get(checked.url.clone())
+            .send()
+            .map_err(|e| format!("Network request failed: {e}"))?;
+        guard_final_url(&checked.url, response.url())?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "Network request failed: HTTP {}",
+                response.status()
+            ));
+        }
+        stream_to_file(response, dest, max_bytes, cancel)
+    }
 }
 
 // ---- Legacy FTP (explicit opt-in only) ------------------------------------
@@ -420,5 +516,16 @@ impl NetworkClient for FakeNetwork {
             return Err(format!("Download exceeds size bound ({max_bytes} bytes)"));
         }
         Ok(result.body)
+    }
+
+    fn download_to_file(
+        &self,
+        url: &str,
+        dest: &std::path::Path,
+        max_bytes: u64,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<u64, String> {
+        let body = self.download_bounded(url, max_bytes)?;
+        stream_to_file(body.as_slice(), dest, max_bytes, cancel)
     }
 }
