@@ -366,30 +366,61 @@ impl UpdateSource for GithubSource {
 
 fn asset_matches(asset_name: &str, wanted: &str) -> bool {
     if wanted.contains('*') || wanted.contains('?') {
+        // Both operands come from untrusted sources; cap them so even the
+        // linear matcher cannot be handed a pathological amount of work.
+        if wanted.len() > limits::MAX_GLOB_PATTERN_LENGTH
+            || asset_name.len() > limits::MAX_GLOB_TEXT_LENGTH
+        {
+            return false;
+        }
         return glob_match(wanted, asset_name);
     }
     asset_name == wanted
 }
 
+/// Linear-time `*`/`?` matcher.
+///
+/// The previous recursive form branched on every `*` (`for i in 0..=t.len()`
+/// then recursing), which is exponential: a pattern of `*a` repeated blows up
+/// ~8x per two characters. Both inputs are hostile — the pattern is the
+/// `filename` config, which `config_from_embedded` lifts straight out of an
+/// AppImage's `.upd_info` section, and the text is an asset name from a remote
+/// release document — so the cost has to be bounded by construction.
+///
+/// This is the standard backtrack-once greedy walk: remember the most recent
+/// `*` and the text position it matched to, and on a mismatch resume from
+/// there having consumed one more character. Worst case O(pattern x text),
+/// with no recursion and so no stack growth either.
 fn glob_match(pattern: &str, text: &str) -> bool {
-    fn go(p: &[u8], t: &[u8]) -> bool {
-        if p.is_empty() {
-            return t.is_empty();
-        }
-        match p[0] {
-            b'*' => {
-                for i in 0..=t.len() {
-                    if go(&p[1..], &t[i..]) {
-                        return true;
-                    }
-                }
-                false
-            }
-            b'?' => !t.is_empty() && go(&p[1..], &t[1..]),
-            c => !t.is_empty() && t[0] == c && go(&p[1..], &t[1..]),
+    let p = pattern.as_bytes();
+    let t = text.as_bytes();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    // Position of the last `*` in the pattern, and where in the text it
+    // currently starts matching.
+    let mut star: Option<usize> = None;
+    let mut star_text = 0usize;
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == b'?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == b'*' {
+            star = Some(pi);
+            star_text = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            // Give the last `*` one more character and retry from just after it.
+            pi = s + 1;
+            star_text += 1;
+            ti = star_text;
+        } else {
+            return false;
         }
     }
-    go(pattern.as_bytes(), text.as_bytes())
+    // Trailing `*`s may match the empty remainder.
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+    pi == p.len()
 }
 
 fn github_asset_host_allowed(url: &str) -> bool {

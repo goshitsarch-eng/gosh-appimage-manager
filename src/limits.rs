@@ -31,6 +31,11 @@ pub const REGISTRY_SCHEMA_VERSION: i64 = 1;
 pub const JSON_SCHEMA_VERSION: i64 = 1;
 pub const ELF_HEADER_READ_BYTES: u64 = 1024 * 1024;
 pub const MAX_UPD_INFO_BYTES: usize = 4096;
+/// Asset-name glob bounds. The pattern reaches us from an AppImage's
+/// `.upd_info` and the text from a remote release document, so both are
+/// untrusted and both are capped before matching.
+pub const MAX_GLOB_PATTERN_LENGTH: usize = 256;
+pub const MAX_GLOB_TEXT_LENGTH: usize = 512;
 
 pub const APP_ID: &str = "com.goshapps.AppImageManager";
 pub const EXECUTABLE_NAME: &str = "gosh-appimage-manager";
