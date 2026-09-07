@@ -7,6 +7,10 @@ build/
 # Flatpak products
 /.flatpak-builder/
 /repo/
+# ostree repositories flatpak-builder writes per architecture; `/repo/` alone
+# did not match these, so a build tree ended up committed.
+/repo-*/
+/build-dir-*/
 /bundle-build-dir/
 *.flatpak
 *.flatpakref
