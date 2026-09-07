@@ -200,9 +200,63 @@ fn legacy_app_from_json(item: &serde_json::Value) -> InstalledApp {
     app
 }
 
+const INSERT_SQL: &str = "INSERT OR REPLACE INTO apps(
+    uuid, name, version, comment, managed_path, desktop_id, desktop_path, icon_path, sha256,
+    app_type, architecture, size, arguments, default_arguments, environment, update_manager,
+    update_config, embedded_update, last_update_check, available_version, available_url,
+    available_size, update_available, digest, reduced_verification, external_folder, owned,
+    adopted, website, terminal, actions)
+ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+
+fn bind_app(stmt: &mut rusqlite::Statement<'_>, app: &InstalledApp) -> Result<(), String> {
+    stmt.execute(params![
+        app.uuid,
+        app.name,
+        app.version,
+        app.comment,
+        app.managed_path,
+        app.desktop_id,
+        app.desktop_path,
+        app.icon_path,
+        hex::encode(&app.sha256),
+        app_type_to_int(app.app_type),
+        arch_to_int(app.architecture),
+        app.size,
+        serde_json::to_string(&app.arguments).unwrap_or_else(|_| "[]".into()),
+        serde_json::to_string(&app.default_arguments).unwrap_or_else(|_| "[]".into()),
+        serde_json::to_string(&app.environment).unwrap_or_else(|_| "[]".into()),
+        app.update_manager,
+        serde_json::to_string(&app.update_config).unwrap_or_else(|_| "{}".into()),
+        app.embedded_update,
+        app.last_update_check,
+        app.available_version,
+        app.available_url,
+        app.available_size,
+        i64::from(app.update_available),
+        app.digest,
+        i64::from(app.reduced_verification),
+        i64::from(app.external_folder),
+        i64::from(app.owned),
+        i64::from(app.adopted),
+        app.website,
+        i64::from(app.terminal),
+        serde_json::to_string(&app.actions).unwrap_or_else(|_| "[]".into()),
+    ])
+    .map(|_| ())
+    .map_err(|e| format!("Cannot save registry: {e}"))
+}
+
 pub struct ManagedRegistry {
     path: PathBuf,
     apps: Vec<InstalledApp>,
+    /// Canonical managed path per row, resolved lazily.
+    ///
+    /// by_path used to call canonical_bounded -- an lstat plus readlink hops --
+    /// for *every* row on *every* lookup, and the library scan calls by_path
+    /// once per discovered file, so a scan cost O(files x apps) syscalls.
+    path_index: std::cell::RefCell<Option<Vec<(String, PathBuf)>>>,
+    /// Held open across calls; see `connect`.
+    conn: std::cell::RefCell<Option<Connection>>,
 }
 
 impl ManagedRegistry {
@@ -220,6 +274,8 @@ impl ManagedRegistry {
         let mut registry = Self {
             path: path.to_path_buf(),
             apps: Vec::new(),
+            path_index: std::cell::RefCell::new(None),
+            conn: std::cell::RefCell::new(None),
         };
         if fresh {
             // One-time upgrade from the v2 (Qt) registry.json beside us.
@@ -278,23 +334,34 @@ impl ManagedRegistry {
         uuid::Uuid::new_v4().to_string()
     }
 
-    fn connect(&self) -> Result<Connection, String> {
-        let conn =
-            Connection::open(&self.path).map_err(|e| format!("Cannot open registry: {e}"))?;
-        // sqlite creates the database with the umask applied, so tighten it
-        // here -- at the moment of creation -- rather than only at the end of
-        // save(). Previously a registry could sit at 0644 for the whole of the
-        // first write, and a file that already existed at 0644 stayed that way
-        // across every read-only run.
-        Self::restrict_mode(&self.path);
-        conn.execute_batch(SCHEMA)
+    /// The open connection, created and migrated on first use.
+    ///
+    /// This used to open a fresh Connection, re-run the whole schema batch and
+    /// re-upsert the meta row on *every* call -- and every read and write went
+    /// through it. Opening and migrating dominated the cost of a single-row
+    /// update.
+    fn connect(&self) -> Result<std::cell::Ref<'_, Connection>, String> {
+        if self.conn.borrow().is_none() {
+            let conn =
+                Connection::open(&self.path).map_err(|e| format!("Cannot open registry: {e}"))?;
+            // sqlite creates the database with the umask applied, so tighten
+            // it here -- at the moment of creation -- rather than only after a
+            // successful write. A registry could otherwise sit world-readable
+            // for the whole of its first write, and one that already existed at
+            // 0644 stayed that way across every read-only run.
+            Self::restrict_mode(&self.path);
+            conn.execute_batch(SCHEMA)
+                .map_err(|e| format!("Cannot migrate registry: {e}"))?;
+            conn.execute(
+                "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
+                params![limits::REGISTRY_SCHEMA_VERSION.to_string()],
+            )
             .map_err(|e| format!("Cannot migrate registry: {e}"))?;
-        conn.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
-            params![limits::REGISTRY_SCHEMA_VERSION.to_string()],
-        )
-        .map_err(|e| format!("Cannot migrate registry: {e}"))?;
-        Ok(conn)
+            *self.conn.borrow_mut() = Some(conn);
+        }
+        Ok(std::cell::Ref::map(self.conn.borrow(), |c| {
+            c.as_ref().expect("connection was just established")
+        }))
     }
 
     fn load(&mut self) -> Result<(), String> {
@@ -352,11 +419,14 @@ impl ManagedRegistry {
                 })
             })
             .map_err(|e| format!("Cannot read registry: {e}"))?;
-        self.apps.clear();
+        let mut collected = Vec::new();
         for row in rows {
-            self.apps
-                .push(row.map_err(|e| format!("Cannot read registry: {e}"))?);
+            collected.push(row.map_err(|e| format!("Cannot read registry: {e}"))?);
         }
+        drop(stmt);
+        drop(conn);
+        self.apps = collected;
+        self.invalidate_path_index();
         Ok(())
     }
 
@@ -369,51 +439,10 @@ impl ManagedRegistry {
             .map_err(|e| format!("Cannot save registry: {e}"))?;
         {
             let mut stmt = tx
-                .prepare(
-                    "INSERT INTO apps(uuid, name, version, comment, managed_path, desktop_id,
-                     desktop_path, icon_path, sha256, app_type, architecture, size, arguments,
-                     default_arguments, environment, update_manager, update_config,
-                     embedded_update, last_update_check, available_version, available_url,
-                     available_size, update_available, digest, reduced_verification,
-                     external_folder, owned, adopted, website, terminal, actions)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                )
+                .prepare(INSERT_SQL)
                 .map_err(|e| format!("Cannot save registry: {e}"))?;
             for app in &self.apps {
-                stmt.execute(params![
-                    app.uuid,
-                    app.name,
-                    app.version,
-                    app.comment,
-                    app.managed_path,
-                    app.desktop_id,
-                    app.desktop_path,
-                    app.icon_path,
-                    hex::encode(&app.sha256),
-                    app_type_to_int(app.app_type),
-                    arch_to_int(app.architecture),
-                    app.size,
-                    serde_json::to_string(&app.arguments).unwrap_or_else(|_| "[]".into()),
-                    serde_json::to_string(&app.default_arguments).unwrap_or_else(|_| "[]".into()),
-                    serde_json::to_string(&app.environment).unwrap_or_else(|_| "[]".into()),
-                    app.update_manager,
-                    serde_json::to_string(&app.update_config).unwrap_or_else(|_| "{}".into()),
-                    app.embedded_update,
-                    app.last_update_check,
-                    app.available_version,
-                    app.available_url,
-                    app.available_size,
-                    i64::from(app.update_available),
-                    app.digest,
-                    i64::from(app.reduced_verification),
-                    i64::from(app.external_folder),
-                    i64::from(app.owned),
-                    i64::from(app.adopted),
-                    app.website,
-                    i64::from(app.terminal),
-                    serde_json::to_string(&app.actions).unwrap_or_else(|_| "[]".into()),
-                ])
-                .map_err(|e| format!("Cannot save registry: {e}"))?;
+                bind_app(&mut stmt, app)?;
             }
         }
         tx.commit()
@@ -453,8 +482,11 @@ impl ManagedRegistry {
         self.apps.clone()
     }
 
+    /// Replace the whole table (transaction rollback). This is the one
+    /// caller that genuinely needs a full rewrite.
     pub fn restore(&mut self, snapshot: Vec<InstalledApp>) -> Result<(), String> {
         self.apps = snapshot;
+        self.invalidate_path_index();
         self.save()
     }
 
@@ -463,35 +495,82 @@ impl ManagedRegistry {
     }
 
     /// Lookup by canonical managed path (symlink-hop bounded).
+    ///
+    /// The cheap exact-string match is tried first; canonicalisation only
+    /// happens when that misses, and its results are cached until the next
+    /// mutation.
     pub fn by_path(&self, path: &str) -> Option<InstalledApp> {
+        if let Some(app) = self.apps.iter().find(|a| a.managed_path == path) {
+            return Some(app.clone());
+        }
         let needle = Path::new(path);
         let needle_canon =
             crate::safe_fs::canonical_bounded(needle).unwrap_or_else(|_| needle.to_path_buf());
-        self.apps
+        self.ensure_path_index();
+        let index = self.path_index.borrow();
+        let uuid = index
+            .as_ref()?
             .iter()
-            .find(|a| {
+            .find(|(_, canon)| *canon == needle_canon)
+            .map(|(uuid, _)| uuid.clone())?;
+        self.apps.iter().find(|a| a.uuid == uuid).cloned()
+    }
+
+    fn ensure_path_index(&self) {
+        if self.path_index.borrow().is_some() {
+            return;
+        }
+        let built: Vec<(String, PathBuf)> = self
+            .apps
+            .iter()
+            .map(|a| {
                 let p = Path::new(&a.managed_path);
                 let canon =
                     crate::safe_fs::canonical_bounded(p).unwrap_or_else(|_| p.to_path_buf());
-                canon == needle_canon
+                (a.uuid.clone(), canon)
             })
-            .cloned()
+            .collect();
+        *self.path_index.borrow_mut() = Some(built);
     }
 
+    fn invalidate_path_index(&self) {
+        *self.path_index.borrow_mut() = None;
+    }
+
+    /// Insert or update one row.
+    ///
+    /// Writes just that row. This used to call save(), which opens a fresh
+    /// connection, re-runs the schema batch, then DELETEs every row and
+    /// re-INSERTs the whole table -- so changing one field rewrote the
+    /// library, and removing N apps did N full-table rewrites.
     pub fn upsert(&mut self, app: InstalledApp) -> Result<(), String> {
         if app.uuid.is_empty() {
             return Err("Refusing to register an app without a UUID".to_string());
+        }
+        {
+            let conn = self.connect()?;
+            let mut stmt = conn
+                .prepare(INSERT_SQL)
+                .map_err(|e| format!("Cannot save registry: {e}"))?;
+            bind_app(&mut stmt, &app)?;
         }
         match self.apps.iter_mut().find(|a| a.uuid == app.uuid) {
             Some(slot) => *slot = app,
             None => self.apps.push(app),
         }
-        self.save()
+        self.invalidate_path_index();
+        Ok(())
     }
 
     pub fn remove_uuid(&mut self, uuid: &str) -> Result<(), String> {
+        {
+            let conn = self.connect()?;
+            conn.execute("DELETE FROM apps WHERE uuid = ?", params![uuid])
+                .map_err(|e| format!("Cannot save registry: {e}"))?;
+        }
         self.apps.retain(|a| a.uuid != uuid);
-        self.save()
+        self.invalidate_path_index();
+        Ok(())
     }
 
     /// Adopt an external AppImage: a registry row, and nothing else.
