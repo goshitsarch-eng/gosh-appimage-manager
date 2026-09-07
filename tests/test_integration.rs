@@ -97,30 +97,43 @@ fn no_temp_leftovers_after_success() {
     assert!(leftovers.is_empty(), "leftovers: {leftovers:?}");
 }
 
+/// A successful replace reuses the identity and customisation of the row it
+/// replaces, and does not multiply registry rows.
+///
+/// Rollback at an injected failure point is covered separately, in
+/// tests/test_rollback.rs, which drives the IntegrateFailPoint seam directly.
+/// This test previously carried that name while conceding in its own comment
+/// that it could not reach the seam.
 #[test]
-fn fail_point_rolls_back_without_touching_live() {
+fn replace_reuses_identity_and_customisation() {
     let h = Harness::new();
     let mut c = h.controller();
     let cancel = AtomicBool::new(false);
-    // First a live install.
     let path = write_fixture(h.tmp.path(), "Demo.AppImage");
     let first = c.integrate(&req(path.to_str().unwrap()), &cancel);
     assert!(first.ok, "error: {}", first.error);
-    let live_bytes = std::fs::read(&first.app.managed_path).unwrap();
 
-    // Replace with an injected failure before commit: live must survive.
+    // Give the installed row some customisation to preserve.
+    let mut customised = c.registry().by_uuid(&first.app.uuid).unwrap();
+    customised.arguments = vec!["--flag".to_string()];
+    customised.update_manager = "github".to_string();
+    c.registry_mut().upsert(customised).unwrap();
+
     let src2 = h.tmp.path().join("src2");
     std::fs::create_dir_all(&src2).unwrap();
     let path2 = write_fixture(&src2, "Demo.AppImage");
     let mut replace = req(path2.to_str().unwrap());
     replace.conflict = ConflictPolicy::Replace;
     replace.replace_uuid = first.app.uuid.clone();
-    // Simulate the race window by pre-creating... use the service fail point
-    // through a fresh controller facade is not exposed; emulate by removing
-    // write permission? Instead assert plain replace preserves customisation.
+
     let second = c.integrate(&replace, &cancel);
     assert!(second.ok, "error: {}", second.error);
-    assert_eq!(second.app.uuid, first.app.uuid);
-    assert_eq!(c.registry().apps().len(), 1);
-    let _ = live_bytes;
+    assert_eq!(second.app.uuid, first.app.uuid, "identity must be reused");
+    assert_eq!(
+        second.app.arguments,
+        vec!["--flag".to_string()],
+        "custom arguments must survive a replace"
+    );
+    assert_eq!(second.app.update_manager, "github");
+    assert_eq!(c.registry().apps().len(), 1, "replace must not add a row");
 }

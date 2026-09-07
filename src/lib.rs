@@ -4,6 +4,7 @@
 pub mod controller;
 pub mod desktop;
 pub mod elf;
+pub mod i18n;
 pub mod inspector;
 pub mod integration;
 pub mod launch;

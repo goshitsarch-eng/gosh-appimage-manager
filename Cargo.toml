@@ -21,7 +21,7 @@ path = "src/main.rs"
 default = []
 # COSMIC Epoch GUI (libcosmic, iced-based). Enabled in the Flatpak build.
 # Requires network (git checkout) on first build.
-gui = ["dep:libcosmic"]
+gui = ["dep:libcosmic", "dep:tokio"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -36,7 +36,11 @@ percent-encoding = "2"
 trash = "5"
 notify-rust = "4"
 wait-timeout = "0.2"
-libcosmic = { git = "https://github.com/pop-os/libcosmic", tag = "v0.12", optional = true, default-features = false, features = ["tokio", "winit", "xdg-portal", "single-instance"] }
+libcosmic = { git = "https://github.com/pop-os/libcosmic", tag = "v0.12", optional = true, default-features = false, features = ["tokio", "winit", "wgpu", "a11y", "xdg-portal", "single-instance"] }
+# GUI only: long-running work (hashing, extraction, network, downloads) runs on
+# a blocking worker so the window keeps repainting. libcosmic already runs on
+# tokio; this is the handle to its blocking pool.
+tokio = { version = "1", optional = true, default-features = false, features = ["rt"] }
 
 [dev-dependencies]
 tempfile = "3"

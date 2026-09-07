@@ -179,8 +179,10 @@ pub fn run_cli(
 
     if has_arg(args, "--list-installed") {
         let mut items = Vec::new();
-        for mut app in controller.registry().apps() {
-            app.running = controller.is_running(&app);
+        let apps = controller.registry().apps();
+        let running = controller.running_uuids(&apps);
+        for mut app in apps {
+            app.running = running.contains(&app.uuid);
             if json {
                 items.push(app_json(&app));
             } else {
@@ -199,9 +201,17 @@ pub fn run_cli(
     }
 
     if has_arg(args, "--list-updates") {
-        let offers = controller.check_updates(&cancel);
+        let scan = controller.scan_updates(&cancel);
+        let offers = &scan.offers;
+        for failure in &scan.failures {
+            let _ = writeln!(
+                stderr,
+                "{}: update check failed ({}): {}",
+                failure.name, failure.manager, failure.error
+            );
+        }
         let mut items = Vec::new();
-        for offer in &offers {
+        for offer in offers {
             if json {
                 let app = controller.registry().by_uuid(&offer.uuid);
                 let mut obj = serde_json::Map::new();
@@ -250,10 +260,103 @@ pub fn run_cli(
                 );
             }
         }
+        if json {
+            print_json("updates", items, stdout);
+        }
+        // stdout stays a valid, complete JSON document either way; the exit
+        // code is what tells a script the list may be short.
+        return if scan.failures.is_empty() {
+            ExitCode::Ok
+        } else {
+            ExitCode::Network
+        };
+    }
+
+    if has_arg(args, "--list-discovered") {
+        // Discovery and adoption were fully implemented but reachable from no
+        // command and no UI, so external AppImages could never be adopted.
+        let discovered = controller.discover();
+        let mut items = Vec::new();
+        for app in &discovered {
+            if json {
+                let mut obj = serde_json::Map::new();
+                obj.insert("name".into(), serde_json::Value::String(app.name.clone()));
+                obj.insert("path".into(), serde_json::Value::String(app.path.clone()));
+                obj.insert("managed".into(), serde_json::Value::Bool(app.managed));
+                obj.insert("uuid".into(), serde_json::Value::String(app.uuid.clone()));
+                obj.insert(
+                    "origin".into(),
+                    serde_json::Value::String(
+                        match app.origin {
+                            crate::library::Origin::ManagedFolder => "managed-folder",
+                            crate::library::Origin::ExternalDesktopEntry => "external-entry",
+                        }
+                        .to_string(),
+                    ),
+                );
+                obj.insert(
+                    "desktop_path".into(),
+                    serde_json::Value::String(app.desktop_path.clone()),
+                );
+                items.push(obj);
+            } else {
+                let _ = writeln!(
+                    stdout,
+                    "{}\t{}\t{}",
+                    if app.managed { "managed" } else { "external" },
+                    app.name,
+                    app.path
+                );
+            }
+        }
         return if json {
-            print_json("updates", items, stdout)
+            print_json("discovered", items, stdout)
         } else {
             ExitCode::Ok
+        };
+    }
+
+    if has_arg(args, "--adopt") {
+        let path = arg_value(args, "--adopt");
+        if path.is_empty() {
+            let _ = writeln!(stderr, "Usage: --adopt <path> [--yes]");
+            return ExitCode::Usage;
+        }
+        if !confirm(
+            &format!("Adopt {path}? (registers it; nothing on disk is changed)"),
+            yes,
+            interactive_tty,
+            stderr,
+            stdin,
+        ) {
+            return ExitCode::NeedsConfirmation;
+        }
+        // Validate it really is an AppImage before registering it. Adoption
+        // itself writes nothing but the registry row.
+        let inspected = controller.inspect_file(&path, &cancel, None);
+        if !inspected.magic_valid {
+            let _ = writeln!(
+                stderr,
+                "{}",
+                if inspected.error.is_empty() {
+                    "Not a valid AppImage".to_string()
+                } else {
+                    inspected.error.clone()
+                }
+            );
+            inspected.discard_staging();
+            return ExitCode::Validation;
+        }
+        inspected.discard_staging();
+        return match controller.adopt_external(&path) {
+            Ok(app) => {
+                let _ = writeln!(stderr, "Adopted {} as {}", app.managed_path, app.uuid);
+                ExitCode::Ok
+            }
+            Err(error) => {
+                let _ = writeln!(stderr, "{error}");
+                ExitCode::Failure
+            }
         };
     }
 
@@ -462,6 +565,10 @@ pub fn run_cli(
             return ExitCode::NeedsConfirmation;
         }
         let apps = controller.registry().apps();
+        // Per-item results: one stuck entry must not abandon the rest, and the
+        // user needs a summary of what actually happened.
+        let mut removed = 0usize;
+        let mut failed = 0usize;
         for app in &apps {
             if !app.owned {
                 continue;
@@ -476,12 +583,22 @@ pub fn run_cli(
                 assume_yes: true,
             };
             let outcome = controller.remove_app(&req);
-            if !outcome.ok {
-                let _ = writeln!(stderr, "{}", outcome.error);
-                return ExitCode::Failure;
+            if outcome.ok {
+                removed += 1;
+            } else {
+                failed += 1;
+                let _ = writeln!(stderr, "{}: {}", app.managed_path, outcome.error);
             }
         }
-        return ExitCode::Ok;
+        let _ = writeln!(
+            stderr,
+            "Removed {removed} of {owned_count}; {failed} failed"
+        );
+        return if failed > 0 {
+            ExitCode::Failure
+        } else {
+            ExitCode::Ok
+        };
     }
 
     if has_arg(args, "--remove") {
@@ -533,13 +650,21 @@ pub fn run_cli(
             return ExitCode::Ok;
         }
         let manager = arg_value(args, "--manager");
+        // Only the tokens after `--manager <name>` are configuration. Scanning
+        // all of argv meant a source path containing '=' was silently parsed
+        // into the update config.
         let mut config = BTreeMap::new();
-        for arg in args {
-            if arg.contains('=') && !arg.starts_with('-') {
-                let mut split = arg.splitn(2, '=');
-                let key = split.next().unwrap_or_default().to_string();
-                let value = split.next().unwrap_or_default().to_string();
-                config.insert(key, value);
+        let config_start = args
+            .iter()
+            .position(|a| a == "--manager")
+            .map(|i| i + 2)
+            .unwrap_or(args.len());
+        for arg in args.iter().skip(config_start) {
+            if arg.starts_with('-') {
+                continue;
+            }
+            if let Some((key, value)) = arg.split_once('=') {
+                config.insert(key.to_string(), value.to_string());
             }
         }
         let mut error = String::new();
@@ -552,17 +677,29 @@ pub fn run_cli(
     }
 
     if has_arg(args, "--fetch-updates") {
-        let offers = controller.check_updates(&cancel);
-        let _ = writeln!(stderr, "{} update(s) available", offers.len());
-        if !offers.is_empty() {
-            for offer in &offers {
-                let _ = writeln!(
-                    stderr,
-                    "{} {} -> {}",
-                    offer.name, offer.current_version, offer.available_version
-                );
-            }
-            controller.notifier().notify_offers(&offers);
+        let scan = controller.scan_updates(&cancel);
+        let _ = writeln!(stderr, "{} update(s) available", scan.offers.len());
+        for offer in &scan.offers {
+            let _ = writeln!(
+                stderr,
+                "{} {} -> {}",
+                offer.name, offer.current_version, offer.available_version
+            );
+        }
+        // Report what could not be checked rather than folding it into
+        // "0 updates available", which reads as "you are up to date".
+        for failure in &scan.failures {
+            let _ = writeln!(
+                stderr,
+                "{}: update check failed ({}): {}",
+                failure.name, failure.manager, failure.error
+            );
+        }
+        if !scan.offers.is_empty() {
+            controller.notifier().notify_offers(&scan.offers);
+        }
+        if !scan.failures.is_empty() {
+            return ExitCode::Network;
         }
         return ExitCode::Ok;
     }
@@ -579,6 +716,7 @@ pub fn run_self_test(
     stderr: &mut dyn Write,
 ) -> ExitCode {
     let mut failures: Vec<String> = Vec::new();
+    let mut reasons: Vec<String> = Vec::new();
     let mut check = |failures: &mut Vec<String>, name: &str, ok: bool| {
         let _ = writeln!(
             stderr,
@@ -590,7 +728,12 @@ pub fn run_self_test(
         }
     };
 
-    check(&mut failures, "models-ready", controller.models_ready());
+    // Readiness reports why it failed, not just that it did.
+    let readiness = controller.readiness();
+    if let Err(reason) = &readiness {
+        reasons.push(format!("readiness: {reason}"));
+    }
+    check(&mut failures, "readiness", readiness.is_ok());
 
     // Synthetic Type-2 fixture must validate without execution.
     let fixture = crate::inspector::make_test_elf(
@@ -646,6 +789,9 @@ pub fn run_self_test(
         let _ = writeln!(stdout, "SELF_TEST_OK");
         ExitCode::Ok
     } else {
+        for reason in &reasons {
+            let _ = writeln!(stderr, "[self-test] {reason}");
+        }
         let _ = writeln!(stderr, "SELF_TEST_FAIL: {}", failures.join(","));
         ExitCode::Failure
     }
@@ -655,7 +801,7 @@ pub fn run_self_test(
 pub fn run_host_probe(controller: &AppController, stdout: &mut dyn Write) -> ExitCode {
     let result = controller.runner().run(&ProcessRequest {
         program: "true".to_string(),
-        host: true,
+        host: crate::process::HostSpawn::Helper,
         timeout_ms: 5000,
         ..Default::default()
     });
@@ -757,19 +903,25 @@ pub fn run_inspect_probe(
     }
 }
 
-/// Write and verify the session autostart entry for background checks.
+/// Render and verify the session autostart entry without installing it.
+///
+/// This is a diagnostic. It used to enable background update checks in the
+/// user's settings and write a real autostart entry, so running a probe opted
+/// the user into a login-time network task and left residue behind that had to
+/// be cleaned up by hand. It now renders the entry to a private temporary
+/// directory and verifies that, touching neither settings nor the session.
 pub fn run_autostart_probe(controller: &mut AppController, stdout: &mut dyn Write) -> ExitCode {
-    controller.settings_mut().set_background_update_checks(true);
-    if let Err(e) = controller.sync_autostart(true) {
-        let _ = writeln!(stdout, "AUTOSTART_MISSING ({e})");
-        return ExitCode::Failure;
-    }
     let path = controller.autostart_desktop_path();
     let _ = writeln!(stdout, "autostart_path={}", path.display());
-    let body = match std::fs::read(&path) {
-        Ok(body) => body,
-        Err(_) => {
-            let _ = writeln!(stdout, "AUTOSTART_MISSING");
+    let _ = writeln!(
+        stdout,
+        "autostart_installed={}",
+        if path.exists() { "true" } else { "false" }
+    );
+    let body = match controller.render_autostart_entry() {
+        Ok(body) => body.into_bytes(),
+        Err(e) => {
+            let _ = writeln!(stdout, "AUTOSTART_MISSING ({e})");
             return ExitCode::Failure;
         }
     };

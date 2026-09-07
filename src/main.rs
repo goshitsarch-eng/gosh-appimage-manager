@@ -18,6 +18,8 @@ const CLI_COMMANDS: &[&str] = &[
     "--list-update-managers",
     "--set-update-source",
     "--fetch-updates",
+    "--list-discovered",
+    "--adopt",
     "--probe-host",
     "--probe-inspect",
     "--probe-autostart",
@@ -39,6 +41,7 @@ fn print_help(stdout: &mut dyn Write) {
          gosh-appimage-manager [--update <path>|--all [--yes] [--force]]\n  \
          gosh-appimage-manager [--remove <path> [--yes] [--delete]] [--remove-all [--yes]]\n  \
          gosh-appimage-manager [--list-installed [--json]] [--list-updates [--json]]\n  \
+         gosh-appimage-manager [--list-discovered [--json]] [--adopt <path> [--yes]]\n  \
          gosh-appimage-manager [--list-update-managers] [--set-update-source <path> --manager <name> key=value... | --unset]\n  \
          gosh-appimage-manager [--fetch-updates] [--self-test]\n  \
          gosh-appimage-manager [--probe-host] [--probe-inspect <path>] [--probe-autostart]\n  \
@@ -154,7 +157,6 @@ fn run_gui_or_hint(args: Vec<String>) {
 
 #[cfg(not(feature = "gui"))]
 fn run_gui_or_hint(args: Vec<String>) {
-    let _ = args;
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let _ = writeln!(
@@ -166,8 +168,19 @@ fn run_gui_or_hint(args: Vec<String>) {
         out,
         "This build has no GUI. Rebuild with --features gui, or pass --help for CLI usage."
     );
-    // Keep Write import used in all configurations.
-    use std::io::Read;
-    let _ = std::io::stdin().lock().bytes().next();
+    if !args.is_empty() {
+        let _ = writeln!(
+            out,
+            "\nIgnored argument(s): {}. This build cannot open files in a window.",
+            args.join(" ")
+        );
+    }
+    let _ = writeln!(out);
+    print_help(&mut out);
     let _ = out.flush();
+    // Exit rather than waiting on stdin. A read here used to hang the process
+    // forever on the exact flow the README documents (`cargo build` then
+    // `cargo run`), which looks like a freeze rather than a build without a
+    // GUI.
+    std::process::exit(ExitCode::Usage as i32);
 }

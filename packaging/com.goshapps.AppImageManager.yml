@@ -153,6 +153,8 @@ modules:
       - install -Dm644 data/com.goshapps.AppImageManager.metainfo.xml -t ${FLATPAK_DEST}/share/metainfo/
       - install -Dm644 data/icons/hicolor/scalable/apps/com.goshapps.AppImageManager.svg -t ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/
       - install -Dm644 data/icons/hicolor/symbolic/apps/com.goshapps.AppImageManager-symbolic.svg -t ${FLATPAK_DEST}/share/icons/hicolor/symbolic/apps/
+      - install -Dm644 i18n/*.json ${FLATPAK_DEST}/share/gosh-appimage-manager/i18n/
+      - install -Dm644 i18n/README.md ${FLATPAK_DEST}/share/gosh-appimage-manager/i18n/README.md
       - install -Dm644 COPYING ${FLATPAK_DEST}/share/gosh-appimage-manager/COPYING
       - install -Dm644 AUTHORS ${FLATPAK_DEST}/share/gosh-appimage-manager/AUTHORS
       - cp -r third_party/licenses ${FLATPAK_DEST}/share/gosh-appimage-manager/licenses

@@ -155,7 +155,11 @@ pub struct AppImageMetadata {
     pub version: String,
     pub comment: String,
     pub icon_name: String,
+    /// Filesystem path to a staged copy of the icon, in a private temp
+    /// directory the caller owns and removes. Empty when no icon was found.
     pub extracted_icon_path: String,
+    /// Extension for the staged icon ("png", "svg", "xpm").
+    pub icon_format: String,
     pub terminal: bool,
     pub categories: Vec<String>,
     pub mime_types: Vec<String>,
@@ -202,6 +206,24 @@ pub struct InspectionResult {
     pub can_replace: bool,
     pub chosen_policy: ConflictPolicy,
     pub chosen_replace_uuid: String,
+    /// Private directory holding the staged icon, when one was extracted.
+    /// The caller owns it; `discard_staging` removes it.
+    pub icon_staging_dir: String,
+}
+
+impl InspectionResult {
+    /// Remove the icon staging directory this inspection created.
+    ///
+    /// Callers that install the icon should do this once they have copied it.
+    /// Callers that merely inspected should do it when they discard the
+    /// result. Inspection also sweeps stale staging directories, so forgetting
+    /// leaks at most one directory until the next inspection.
+    pub fn discard_staging(&self) {
+        if self.icon_staging_dir.is_empty() {
+            return;
+        }
+        let _ = crate::safe_fs::remove_dir_no_follow(std::path::Path::new(&self.icon_staging_dir));
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -260,6 +282,12 @@ pub struct InstalledApp {
     pub website: String,
     pub terminal: bool,
     pub actions: Vec<DesktopAction>,
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub mime_types: Vec<String>,
+    #[serde(default)]
+    pub startup_wm_class: String,
 }
 
 impl InstalledApp {
@@ -336,7 +364,10 @@ pub struct UpdateOffer {
     pub url: String,
     pub download_size: i64,
     pub digest: String,
+    /// True when nothing beyond AppImage/architecture validation will check
+    /// the downloaded payload -- no usable digest was advertised.
     pub reduced_verification: bool,
+    pub digest_algo: String,
     pub embedded_source: String,
     pub running: bool,
 }

@@ -4,22 +4,70 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::limits;
 
 /// Create a directory (and parents) with mode 0700.
+///
+/// An existing path is accepted only if it is a real directory we own and no
+/// one else can write to. `dir.exists()` alone was not a check: it follows
+/// symlinks and says nothing about ownership or mode, so on a shared `/tmp` a
+/// local attacker could pre-create the predictable extraction parent
+/// (`$TMPDIR/gosh-appimage-manager`) as a symlink to a directory of their
+/// choosing, or as mode 0777, and decide where our output landed.
 pub fn mkdir_0700(dir: &Path) -> Result<(), String> {
-    if dir.exists() {
-        return Ok(());
+    match fs::symlink_metadata(dir) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "Refusing to use {}: it is a symlink",
+                    dir.display()
+                ));
+            }
+            if !meta.is_dir() {
+                return Err(format!(
+                    "Refusing to use {}: it is not a directory",
+                    dir.display()
+                ));
+            }
+            #[cfg(unix)]
+            {
+                let uid = unsafe { libc_geteuid() };
+                if meta.uid() != uid {
+                    return Err(format!(
+                        "Refusing to use {}: it is owned by another user",
+                        dir.display()
+                    ));
+                }
+                // Group- or world-writable means someone else can swap what is
+                // inside it after we have checked.
+                if meta.permissions().mode() & 0o022 != 0 {
+                    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+                        .map_err(|e| format!("Cannot secure directory {}: {e}", dir.display()))?;
+                }
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .map_err(|e| format!("Cannot create directory {}: {e}", dir.display()))?;
+            Ok(())
+        }
+        Err(e) => Err(format!("Cannot create directory {}: {e}", dir.display())),
     }
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .map_err(|e| format!("Cannot create directory {}: {e}", dir.display()))?;
-    Ok(())
+}
+
+#[cfg(unix)]
+unsafe fn libc_geteuid() -> u32 {
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    geteuid()
 }
 
 /// Create a private temp directory (mode 0700) under `parent`.
@@ -168,6 +216,25 @@ pub fn rename_no_replace(src: &Path, dst: &Path) -> Result<(), String> {
     }
 }
 
+/// Make `backup` a rollback copy of `live`, cheaply where possible.
+///
+/// A hard link is the same bytes under a second name: the original stays
+/// reachable through `backup` even after `live` is renamed over, which is
+/// exactly what rollback needs, and it costs no space and no I/O regardless
+/// of how large the AppImage is. Copying a multi-gigabyte file to make a
+/// backup that is usually discarded seconds later is pure waste.
+///
+/// Falls back to a real copy when linking is refused -- a filesystem without
+/// hard links, or a destination on a different device.
+pub fn backup_copy(live: &Path, backup: &Path) -> Result<(), String> {
+    if fs::hard_link(live, backup).is_ok() {
+        return Ok(());
+    }
+    fs::copy(live, backup)
+        .map(|_| ())
+        .map_err(|e| format!("Cannot create backup of {}: {e}", live.display()))
+}
+
 /// Remove all `.{prefix}*` leftovers in `dir` (rollback), deepest first.
 pub fn rollback_temps(dir: &Path, prefix: &str) -> Vec<String> {
     let mut removed = Vec::new();
@@ -248,6 +315,21 @@ pub fn sha256_file(path: &Path, cancel: &std::sync::atomic::AtomicBool) -> Resul
     Ok(hasher.finalize().to_vec())
 }
 
+/// Render `path` safe to pass as a positional argument to an external tool.
+///
+/// A relative path beginning with `-` (`./-x.AppImage` opened as `-x.AppImage`)
+/// would be read as a switch by every extractor we shell out to. Prefixing
+/// `./` keeps the path meaning exactly the same file while making it
+/// unambiguously positional. Absolute paths already cannot be confused.
+pub fn argv_safe_path(path: &Path) -> String {
+    let text = path.to_string_lossy().into_owned();
+    if text.starts_with('-') {
+        format!("./{text}")
+    } else {
+        text
+    }
+}
+
 /// Resolve symlinks up to a hop limit; fails closed on loops/escape.
 pub fn canonical_bounded(path: &Path) -> Result<PathBuf, String> {
     let mut current = path.to_path_buf();
@@ -271,7 +353,8 @@ pub fn canonical_bounded(path: &Path) -> Result<PathBuf, String> {
     Err(format!("Too many symlink levels: {}", path.display()))
 }
 
-/// Reject archive member paths: absolute, `..`, overlong, device-ish.
+/// Reject archive member paths: absolute, `..`, overlong, device-ish, or
+/// anything that an extractor would read as a command-line switch.
 pub fn valid_archive_member(path: &str) -> Result<(), String> {
     if path.is_empty() {
         return Err("Empty archive path".to_string());
@@ -281,6 +364,15 @@ pub fn valid_archive_member(path: &str) -> Result<(), String> {
     }
     if path.starts_with('/') || path.starts_with('\\') {
         return Err(format!("Archive path is absolute: {path}"));
+    }
+    // Member names are appended to the extractor's argv as positional
+    // arguments. `unsquashfs` has no `--` end-of-options terminator, so a
+    // member called `-o/somewhere` or `-x` would be parsed as a switch —
+    // with 7-Zip, `-o` redirects extraction out of the private temp dir
+    // entirely. Names are attacker-controlled (they come from the archive's
+    // own listing), so refuse the shape rather than trust the tool.
+    if path.starts_with('-') {
+        return Err(format!("Archive path looks like an option: {path}"));
     }
     let mut depth: i32 = 0;
     for part in path.split('/').flat_map(|s| s.split('\\')) {

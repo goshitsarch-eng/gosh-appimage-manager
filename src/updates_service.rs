@@ -11,7 +11,7 @@ use crate::desktop;
 use crate::elf;
 use crate::inspector::parse_upd_info;
 use crate::limits;
-use crate::network::NetworkClient;
+use crate::network::{Local, NetworkClient};
 use crate::proctable::ProcessTable;
 use crate::registry::ManagedRegistry;
 use crate::removal::canonical_existing;
@@ -20,8 +20,62 @@ use crate::settings::SettingsStore;
 use crate::types::{InstalledApp, IntegrateResult, UpdateFailPoint, UpdateOffer};
 use crate::updates_sources::{Config, UpdateCheckResult, UpdateSourceFactory};
 
+/// One app whose update check could not complete.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateCheckFailure {
+    pub uuid: String,
+    pub name: String,
+    pub manager: String,
+    pub error: String,
+}
+
+/// The outcome of checking every app: what is offered, and what could not be
+/// checked at all. The distinction is the difference between telling a user
+/// they are up to date and telling them the truth.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateScan {
+    pub offers: Vec<UpdateOffer>,
+    pub failures: Vec<UpdateCheckFailure>,
+    /// Apps with no update source configured; not an error.
+    pub skipped: usize,
+    /// Apps an update check was actually attempted for.
+    pub checked: usize,
+    pub cancelled: bool,
+}
+
 /// Resolved (manager, config) pair for one app.
 type ResolvedSource = (Box<dyn crate::updates_sources::UpdateSource>, Config);
+
+/// Extract a bare lowercase SHA-256 hex string from an advertised digest.
+///
+/// Forges do not agree on the encoding. GitHub's release API returns
+/// `"sha256:<hex>"`; GitLab's package files carry a bare hex `file_sha256`.
+/// The comparison used to be against the raw field, so every correctly
+/// digested GitHub asset failed verification -- and a GitLab `file_md5`
+/// fallback was compared as though it were SHA-256, which can never match
+/// either. Returns None when the value is absent or is not a SHA-256 we can
+/// check, so the caller can fail closed rather than skip verification.
+pub fn parse_expected_sha256(digest: &str) -> Option<String> {
+    let value = digest.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let hex_part = match value.split_once(':') {
+        Some((algo, rest)) => {
+            if !algo.eq_ignore_ascii_case("sha256") {
+                return None;
+            }
+            rest.trim()
+        }
+        None => value,
+    };
+    // A SHA-256 is 64 hex characters; anything else (an MD5, a truncated
+    // value, a base64 encoding) is not something we can verify.
+    if hex_part.len() != 64 || !hex_part.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(hex_part.to_ascii_lowercase())
+}
 
 pub struct UpdateService<'a> {
     settings: &'a SettingsStore,
@@ -88,25 +142,69 @@ impl<'a> UpdateService<'a> {
         if result.manager.is_empty() {
             result.manager = source.name().to_string();
         }
+        // Say plainly when nothing will verify the payload beyond its being a
+        // well-formed AppImage of the right architecture. This flag existed on
+        // both UpdateCheckResult and UpdateOffer and was never set by anything,
+        // so the "reduced verification" state the brief requires was never
+        // reachable, let alone shown.
+        result.reduced_verification = result.ok && parse_expected_sha256(&result.digest).is_none();
         result
     }
 
     /// List offers for apps whose remote version differs. Check-only.
+    ///
+    /// Failures are discarded here; callers that need to tell "nothing to
+    /// update" apart from "nothing could be checked" should use
+    /// `list_updates_detailed`.
     pub fn list_updates(
         &self,
         registry: &ManagedRegistry,
         cancel: &AtomicBool,
     ) -> Vec<UpdateOffer> {
-        let mut offers = Vec::new();
+        self.list_updates_detailed(registry, cancel).offers
+    }
+
+    /// Check every app and report both the offers and the failures.
+    ///
+    /// The offers-only view silently drops every per-app error, so a total
+    /// network outage, an expired certificate or a misconfigured source was
+    /// indistinguishable from "everything is up to date" -- the UI cheerfully
+    /// said so having checked nothing.
+    pub fn list_updates_detailed(
+        &self,
+        registry: &ManagedRegistry,
+        cancel: &AtomicBool,
+    ) -> UpdateScan {
+        let mut scan = UpdateScan::default();
         for app in registry.apps() {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                scan.cancelled = true;
                 break;
             }
             if app.update_manager.is_empty() && app.embedded_update.is_empty() {
+                scan.skipped += 1;
                 continue;
             }
+            scan.checked += 1;
             let checked = self.check(&app, cancel);
-            if !checked.ok || !checked.available || checked.url.is_empty() {
+            if !checked.ok {
+                scan.failures.push(UpdateCheckFailure {
+                    uuid: app.uuid.clone(),
+                    name: app.name.clone(),
+                    manager: if checked.manager.is_empty() {
+                        app.update_manager.clone()
+                    } else {
+                        checked.manager.clone()
+                    },
+                    error: if checked.error.is_empty() {
+                        "Update check failed".to_string()
+                    } else {
+                        checked.error.clone()
+                    },
+                });
+                continue;
+            }
+            if !checked.available || checked.url.is_empty() {
                 continue;
             }
             if checked.version.is_empty() || checked.version == app.version {
@@ -117,7 +215,7 @@ impl<'a> UpdateService<'a> {
                     .unwrap_or_else(|| PathBuf::from(&app.managed_path));
                 self.processes.is_running(&canon.to_string_lossy())
             };
-            offers.push(UpdateOffer {
+            scan.offers.push(UpdateOffer {
                 uuid: app.uuid.clone(),
                 name: app.name.clone(),
                 current_version: app.version.clone(),
@@ -127,11 +225,12 @@ impl<'a> UpdateService<'a> {
                 download_size: checked.size,
                 digest: checked.digest.clone(),
                 reduced_verification: checked.reduced_verification,
+                digest_algo: checked.digest_algo.clone(),
                 embedded_source: app.embedded_update.clone(),
                 running,
             });
         }
-        offers
+        scan
     }
 
     /// Download, validate, atomically replace, and re-register.
@@ -156,6 +255,18 @@ impl<'a> UpdateService<'a> {
             result.error = "No update available".to_string();
             return result;
         }
+        // The forge sources report `available: true` whenever they find a
+        // matching asset; only list_updates compared versions. So applying
+        // directly -- which is what `--update <path>` does -- would re-download
+        // and replace a working installation with the identical version.
+        if checked.version.is_empty() {
+            result.error = "No version information in update metadata".to_string();
+            return result;
+        }
+        if checked.version == app.version {
+            result.error = format!("Already at the latest version ({})", app.version);
+            return result;
+        }
         let canon = canonical_existing(&app.managed_path)
             .unwrap_or_else(|| PathBuf::from(&app.managed_path));
         let running = self.processes.is_running(&canon.to_string_lossy());
@@ -171,18 +282,28 @@ impl<'a> UpdateService<'a> {
         let live = PathBuf::from(&app.managed_path);
         let staging = safe_fs::sibling_temp(&live, ".gosh-upd-");
         let max_bytes = self.settings.max_appimage_bytes() as u64;
-        let body = match self.network.download_bounded(&checked.url, max_bytes) {
-            Ok(body) => body,
-            Err(error) => {
-                let _ = fs::remove_file(&staging);
-                result.error = error;
-                return result;
-            }
-        };
-        if let Err(error) = safe_fs::atomic_write(&staging, &body, 0o755) {
+        // Stream to the staging file rather than buffering the whole AppImage:
+        // these are routinely hundreds of megabytes and the bound defaults to
+        // 8 GiB. This is also the first point cancellation can take effect.
+        if let Err(error) = self.network.download_to_file(
+            &checked.url,
+            &staging,
+            max_bytes,
+            cancel,
+            Local::from_config(&app.update_config),
+        ) {
             let _ = fs::remove_file(&staging);
             result.error = error;
             return result;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = fs::set_permissions(&staging, fs::Permissions::from_mode(0o755)) {
+                let _ = fs::remove_file(&staging);
+                result.error = format!("Cannot prepare staged update: {e}");
+                return result;
+            }
         }
         if self.fail_point == UpdateFailPoint::AfterDownload {
             let _ = fs::remove_file(&staging);
@@ -205,17 +326,57 @@ impl<'a> UpdateService<'a> {
             result.error = "Downloaded file is not a valid AppImage".to_string();
             return result;
         }
-        if !checked.digest.is_empty() {
-            let sum = safe_fs::sha256_file(&staging, cancel).unwrap_or_default();
-            if hex::encode(&sum) != checked.digest.to_lowercase() {
+        // Architecture compatibility. Without this an x86_64 install could be
+        // replaced by an aarch64 payload and simply stop running; parsing an
+        // architecture is not the same as being able to execute it.
+        if !elf::architecture_supported(staged_info.architecture) {
+            let _ = fs::remove_file(&staging);
+            result.error = format!(
+                "Downloaded update is for an unsupported architecture: {}",
+                crate::types::architecture_name(staged_info.architecture)
+            );
+            return result;
+        }
+        if !matches!(app.architecture, crate::types::Architecture::Unknown)
+            && staged_info.architecture != app.architecture
+        {
+            let _ = fs::remove_file(&staging);
+            result.error = format!(
+                "Downloaded update is {} but the installed AppImage is {}",
+                crate::types::architecture_name(staged_info.architecture),
+                crate::types::architecture_name(app.architecture)
+            );
+            return result;
+        }
+        // Hash the staged file once. It was hashed here for the digest check
+        // and then again after the replacement to record it, which is two full
+        // reads of a file that can be gigabytes.
+        let staged_hash = match safe_fs::sha256_file(&staging, cancel) {
+            Ok(sum) => sum,
+            Err(error) => {
+                let _ = fs::remove_file(&staging);
+                result.error = error;
+                return result;
+            }
+        };
+        if let Some(expected) = parse_expected_sha256(&checked.digest) {
+            if hex::encode(&staged_hash) != expected {
                 let _ = fs::remove_file(&staging);
                 result.error = "Staged update failed digest verification".to_string();
                 return result;
             }
+        } else if !checked.digest.is_empty() {
+            // A digest we cannot interpret must not silently count as verified.
+            let _ = fs::remove_file(&staging);
+            result.error = format!(
+                "Update advertised a digest this build cannot verify ({})",
+                checked.digest
+            );
+            return result;
         }
         // Rollback copy of the live file.
         let backup = safe_fs::sibling_temp(&live, ".gosh-upd-bak-");
-        if live.exists() && fs::copy(&live, &backup).is_err() {
+        if live.exists() && safe_fs::backup_copy(&live, &backup).is_err() {
             let _ = fs::remove_file(&staging);
             result.error = "Cannot create replacement backup".to_string();
             return result;
@@ -246,10 +407,11 @@ impl<'a> UpdateService<'a> {
         updated.available_size = 0;
         updated.update_available = false;
         updated.digest = checked.digest.clone();
+        updated.reduced_verification = checked.reduced_verification;
         updated.size = fs::metadata(&live)
             .map(|m| m.len() as i64)
             .unwrap_or(app.size);
-        updated.sha256 = safe_fs::sha256_file(&live, cancel).unwrap_or_default();
+        updated.sha256 = staged_hash;
         if self.fail_point == UpdateFailPoint::DesktopInstall {
             let _ = fs::rename(&backup, &live);
             let _ = registry.restore(snapshot);

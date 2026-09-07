@@ -41,7 +41,7 @@ impl<'a> LaunchService<'a> {
             let probe = self.runner.run(&ProcessRequest {
                 program: "appimage-run".to_string(),
                 args: vec!["--version".to_string()],
-                host: true,
+                host: crate::process::HostSpawn::Helper,
                 timeout_ms: 3000,
                 ..Default::default()
             });
@@ -72,7 +72,13 @@ impl<'a> LaunchService<'a> {
                 program,
                 args,
                 env,
-                host: true,
+                // Resolved from the registry above, so it is a managed
+                // application rather than an arbitrary host command.
+                host: if Self::nix_needs_appimage_run() {
+                    crate::process::HostSpawn::Helper
+                } else {
+                    crate::process::HostSpawn::ManagedAppImage
+                },
                 timeout_ms: 10_000,
                 ..Default::default()
             })

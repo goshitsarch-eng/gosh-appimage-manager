@@ -9,15 +9,91 @@ use std::time::Duration;
 
 use crate::limits;
 
+/// Whether a request may leave the sandbox, and as what.
+///
+/// The Flatpak manifest grants `--talk-name=org.freedesktop.Flatpak` so the
+/// manager can run an AppImage on the host. That grant is arbitrary host
+/// command execution, and it cannot be given up without giving up launching.
+/// What it *can* be given is a narrow definition of what is allowed through
+/// it, enforced at the one place every spawn passes: a fixed set of helper
+/// programs, plus AppImages the caller resolved from the registry. Anything
+/// else is refused before a process is created, so influencing a
+/// ProcessRequest is not enough to run something arbitrary on the host.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HostSpawn {
+    /// Stay inside the sandbox.
+    #[default]
+    No,
+    /// One of the fixed helper programs in `HOST_HELPERS`.
+    Helper,
+    /// An AppImage this application manages, named by absolute path.
+    ManagedAppImage,
+}
+
+/// Helper programs the manager is allowed to run on the host.
+///
+/// Each is here because a specific feature needs it: trashing a file the
+/// sandbox cannot reach, finding running applications in the host's PID
+/// namespace, opening a file manager, refreshing the desktop database, the
+/// NixOS AppImage shim, and the no-op used by `--probe-host`.
+pub const HOST_HELPERS: &[&str] = &[
+    "gio",
+    "pgrep",
+    "xdg-open",
+    "update-desktop-database",
+    "appimage-run",
+    "true",
+];
+
 #[derive(Debug, Clone, Default)]
 pub struct ProcessRequest {
     pub program: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
-    /// Run on the host via flatpak-spawn when sandboxed.
-    pub host: bool,
+    /// Whether this may run on the host via flatpak-spawn, and as what.
+    pub host: HostSpawn,
     pub timeout_ms: u64,
     pub work_dir: String,
+}
+
+/// Is this request allowed to run on the host at all?
+///
+/// Applied whether or not we are sandboxed, so the same rule is exercised in
+/// development and in the Flatpak rather than only in the configuration that
+/// is hardest to test.
+pub fn host_spawn_permitted(req: &ProcessRequest) -> Result<(), String> {
+    match req.host {
+        HostSpawn::No => Ok(()),
+        HostSpawn::Helper => {
+            if HOST_HELPERS.contains(&req.program.as_str()) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Refusing to run {} on the host: not a known helper",
+                    req.program
+                ))
+            }
+        }
+        HostSpawn::ManagedAppImage => {
+            let path = Path::new(&req.program);
+            if !path.is_absolute() {
+                return Err(format!(
+                    "Refusing to run {} on the host: managed applications are named by \
+                     absolute path",
+                    req.program
+                ));
+            }
+            // The caller resolved this from the registry; confirm it is still
+            // a real file rather than trusting the string it handed us.
+            match std::fs::metadata(path) {
+                Ok(meta) if meta.is_file() => Ok(()),
+                _ => Err(format!(
+                    "Refusing to run {} on the host: not a regular file",
+                    req.program
+                )),
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -44,9 +120,23 @@ pub fn in_flatpak() -> bool {
 
 /// Resolve the argv actually spawned: host requests inside a sandbox go
 /// through arg-safe `flatpak-spawn --host` (no shell involved).
+///
+/// Environment pairs have to be forwarded explicitly with `--env=K=V`.
+/// Setting them on the child process sets them on `flatpak-spawn`, not on the
+/// program it starts on the host, so a user's custom variables were silently
+/// dropped in the Flatpak -- the only configuration we ship. Each pair is one
+/// argv element, so a value containing spaces or quotes needs no escaping and
+/// cannot be re-split.
 pub fn resolve_argv(req: &ProcessRequest) -> (String, Vec<String>) {
-    if req.host && in_flatpak() {
-        let mut args = vec!["--host".to_string(), req.program.clone()];
+    if req.host != HostSpawn::No && in_flatpak() {
+        let mut args = vec!["--host".to_string()];
+        for (key, value) in &req.env {
+            if key.is_empty() || key.contains('\0') || key.contains('=') || value.contains('\0') {
+                continue;
+            }
+            args.push(format!("--env={key}={value}"));
+        }
+        args.push(req.program.clone());
         args.extend(req.args.iter().cloned());
         ("flatpak-spawn".to_string(), args)
     } else {
@@ -72,6 +162,8 @@ impl SystemRunner {
         req: &ProcessRequest,
         detached: bool,
     ) -> Result<std::process::Child, String> {
+        // Enforce the host policy before anything is spawned.
+        host_spawn_permitted(req)?;
         let (program, args) = resolve_argv(req);
         if program.is_empty() || program.contains('\0') {
             return Err("Refused to run empty program".to_string());
@@ -111,6 +203,23 @@ impl SystemRunner {
             .map_err(|e| format!("Cannot start {}: {e}", req.program))
     }
 }
+
+/// Join an output-reader thread, giving up if it is stuck on a pipe held open
+/// by a grandchild rather than blocking the caller forever.
+fn join_bounded(handle: std::thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(READER_JOIN_GRACE_MS);
+    while !handle.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            // Leave it parked on the pipe; it holds nothing the caller needs
+            // and exits when the last writer closes.
+            return Vec::new();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    handle.join().unwrap_or_default()
+}
+
+const READER_JOIN_GRACE_MS: u64 = 2_000;
 
 #[cfg(unix)]
 fn libc_setsdt() {
@@ -197,13 +306,22 @@ impl ProcessRunner for SystemRunner {
                 }
                 Err(_) => {
                     let _ = child.kill();
+                    // Reap here too; the previous code killed without waiting
+                    // and left a zombie behind on this path.
+                    let _ = child.wait();
                     result.timed_out = true;
                     None
                 }
             }
         };
-        result.stdout = stdout_handle.join().unwrap_or_default();
-        result.stderr = stderr_handle.join().unwrap_or_default();
+        // Killing the child closes our copies of the pipe ends, but a
+        // grandchild that inherited them keeps the reader threads blocked. An
+        // unconditional join would then hang the caller indefinitely and
+        // defeat the timeout entirely -- and on the GUI that caller is the
+        // thread drawing the window. Take whatever the readers have collected
+        // by the deadline and let any stragglers finish detached.
+        result.stdout = join_bounded(stdout_handle);
+        result.stderr = join_bounded(stderr_handle);
         if result.stdout.len() > limits::MAX_PROCESS_OUTPUT_BYTES
             || result.stderr.len() > limits::MAX_PROCESS_OUTPUT_BYTES
         {
@@ -225,9 +343,27 @@ impl ProcessRunner for SystemRunner {
     }
 
     fn start_detached(&self, req: &ProcessRequest) -> Result<(), String> {
-        let child = self.spawn_command(req, true)?;
-        // Forget the child: start-only semantics, never wait, never kill.
-        std::mem::forget(child);
+        let mut child = self.spawn_command(req, true)?;
+        // Start-only semantics: report success once the process has started,
+        // never wait for it and never kill it.
+        //
+        // The child still has to be reaped, though. setsid() makes it a
+        // session leader but does not reparent it, so it stays our direct
+        // child and becomes a zombie the moment it exits. `mem::forget` used
+        // to be used here to express "don't touch it", which is exactly what
+        // left the zombie: a long-lived GUI session accumulated one per launch
+        // until it hit the per-user process limit.
+        //
+        // Hand the reap to a detached thread instead. It blocks in wait()
+        // for as long as the app runs -- which costs one parked thread and
+        // nothing else -- and neither the caller nor the launched app waits
+        // on anything.
+        std::thread::Builder::new()
+            .name("goshaim-reap".to_string())
+            .spawn(move || {
+                let _ = child.wait();
+            })
+            .map_err(|e| format!("Cannot start {}: {e}", req.program))?;
         Ok(())
     }
 }
@@ -258,6 +394,11 @@ impl ProcessRunner for FakeRunner {
             program: req.program.clone(),
             ..Default::default()
         };
+        if let Err(error) = host_spawn_permitted(req) {
+            result.refused = true;
+            result.stderr = error.into_bytes();
+            return result;
+        }
         for (key, (exit, out)) in &self.outputs {
             if req.program.contains(key) {
                 result.exit_code = *exit;
@@ -273,6 +414,7 @@ impl ProcessRunner for FakeRunner {
     }
 
     fn start_detached(&self, req: &ProcessRequest) -> Result<(), String> {
+        host_spawn_permitted(req)?;
         if self.fail_start {
             return Err("Cannot start: fake spawn failure".to_string());
         }

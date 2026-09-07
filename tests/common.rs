@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use goshaim_core::controller::AppController;
-use goshaim_core::network::{FetchResult, NetworkClient};
+use goshaim_core::network::{FetchResult, Local, NetworkClient};
 use goshaim_core::process::{ProcessRequest, ProcessResult, ProcessRunner};
 use goshaim_core::proctable::ProcessTable;
 use goshaim_core::settings::Dirs;
@@ -19,6 +19,14 @@ use goshaim_core::types::{AppImageType, Architecture};
 type CannedOutputs = Arc<Mutex<HashMap<String, (i32, Vec<u8>)>>>;
 type SpawnLog = Arc<Mutex<Vec<(String, Vec<String>)>>>;
 
+/// A hook that can observe a request and optionally answer it outright.
+///
+/// Extraction tools do not just print: they write files into `-d <dest>`.
+/// Canned stdout alone cannot model that, so a hook may plant the files the
+/// real tool would have produced. Returning None falls through to the canned
+/// table.
+type RunHook = Box<dyn Fn(&ProcessRequest) -> Option<ProcessResult> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct SharedRunner {
     pub outputs: CannedOutputs,
@@ -26,6 +34,7 @@ pub struct SharedRunner {
     pub fail_start: Arc<Mutex<bool>>,
     /// Exit code when no canned output matches (models a missing tool).
     pub default_exit: Arc<Mutex<i32>>,
+    hooks: Arc<Mutex<Vec<RunHook>>>,
 }
 
 impl Default for SharedRunner {
@@ -35,6 +44,7 @@ impl Default for SharedRunner {
             spawned: Arc::new(Mutex::new(Vec::new())),
             fail_start: Arc::new(Mutex::new(false)),
             default_exit: Arc::new(Mutex::new(1)),
+            hooks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -46,10 +56,30 @@ impl SharedRunner {
             .unwrap()
             .insert(program_sub.to_string(), (exit, stdout.to_vec()));
     }
+
+    /// Register a hook run before the canned table is consulted.
+    pub fn on_run(&self, hook: RunHook) {
+        self.hooks.lock().unwrap().push(hook);
+    }
 }
 
 impl ProcessRunner for SharedRunner {
     fn run(&self, req: &ProcessRequest) -> ProcessResult {
+        // Exercise the same host policy the real runner enforces, so tests
+        // cannot pass on a request production would refuse.
+        if let Err(error) = goshaim_core::process::host_spawn_permitted(req) {
+            return ProcessResult {
+                program: req.program.clone(),
+                refused: true,
+                stderr: error.into_bytes(),
+                ..Default::default()
+            };
+        }
+        for hook in self.hooks.lock().unwrap().iter() {
+            if let Some(result) = hook(req) {
+                return result;
+            }
+        }
         let mut result = ProcessResult {
             program: req.program.clone(),
             exit_code: *self.default_exit.lock().unwrap(),
@@ -70,6 +100,7 @@ impl ProcessRunner for SharedRunner {
     }
 
     fn start_detached(&self, req: &ProcessRequest) -> Result<(), String> {
+        goshaim_core::process::host_spawn_permitted(req)?;
         if *self.fail_start.lock().unwrap() {
             return Err("Cannot start: fake spawn failure".to_string());
         }
@@ -105,9 +136,14 @@ impl SharedNetwork {
 }
 
 impl NetworkClient for SharedNetwork {
-    fn get(&self, url: &str, _headers: &[(String, String)]) -> Result<FetchResult, String> {
+    fn get(
+        &self,
+        url: &str,
+        _headers: &[(String, String)],
+        local: Local,
+    ) -> Result<FetchResult, String> {
         self.calls.lock().unwrap().push(url.to_string());
-        goshaim_core::url_guard::validate(url, false, false)?;
+        goshaim_core::url_guard::validate(url, false, local.allowed())?;
         for (key, body) in self.bodies.lock().unwrap().iter() {
             if url.contains(key) {
                 if body.len() > goshaim_core::limits::MAX_JSON_BODY_BYTES {
@@ -125,9 +161,9 @@ impl NetworkClient for SharedNetwork {
         Err(format!("Fake network has no canned body for {url}"))
     }
 
-    fn head_len(&self, url: &str) -> Result<Option<u64>, String> {
+    fn head_len(&self, url: &str, local: Local) -> Result<Option<u64>, String> {
         self.calls.lock().unwrap().push(format!("HEAD {url}"));
-        goshaim_core::url_guard::validate(url, false, false)?;
+        goshaim_core::url_guard::validate(url, false, local.allowed())?;
         for (key, size) in self.head_sizes.lock().unwrap().iter() {
             if url.contains(key) {
                 return Ok(Some(*size));
@@ -136,12 +172,26 @@ impl NetworkClient for SharedNetwork {
         Ok(None)
     }
 
-    fn download_bounded(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
-        let result = self.get(url, &[])?;
+    fn download_bounded(&self, url: &str, max_bytes: u64, local: Local) -> Result<Vec<u8>, String> {
+        let result = self.get(url, &[], local)?;
         if result.body.len() as u64 > max_bytes {
             return Err(format!("Download exceeds size bound ({max_bytes} bytes)"));
         }
         Ok(result.body)
+    }
+
+    fn download_to_file(
+        &self,
+        url: &str,
+        dest: &Path,
+        max_bytes: u64,
+        cancel: &AtomicBool,
+        local: Local,
+    ) -> Result<u64, String> {
+        // Exercise the real streaming writer so the tests cover the same code
+        // path the production client uses to land bytes on disk.
+        let body = self.download_bounded(url, max_bytes, local)?;
+        goshaim_core::network::stream_to_file(body.as_slice(), dest, max_bytes, cancel)
     }
 }
 

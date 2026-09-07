@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
 use crate::limits;
-use crate::network::NetworkClient;
+use crate::network::{Local, NetworkClient};
 use crate::types::InstalledApp;
 use crate::url_guard;
 
@@ -45,9 +45,9 @@ fn pct(text: &str) -> String {
 }
 
 /// HEAD probe size as i64 (-1 when unknown or failed). Check-only.
-fn head_size(network: &dyn NetworkClient, url: &str) -> i64 {
+fn head_size(network: &dyn NetworkClient, url: &str, local: Local) -> i64 {
     network
-        .head_len(url)
+        .head_len(url, local)
         .ok()
         .flatten()
         .map(|s| s.min(i64::MAX as u64) as i64)
@@ -143,8 +143,11 @@ impl UpdateSource for StaticSource {
         if url.is_empty() {
             return UpdateCheckResult::fail(self.name(), "Static source needs a url".to_string());
         }
+        // Reaching a private-network endpoint is allowed only when the user
+        // set it on this source; embedded metadata can never set the key.
+        let local = Local::from_config(config);
         if url.ends_with(".zsync") {
-            let body = match network.get(&url, &[]) {
+            let body = match network.get(&url, &[], local) {
                 Ok(result) => {
                     if result.body.len() > limits::MAX_ZSYNC_BYTES {
                         return UpdateCheckResult::fail(
@@ -164,7 +167,7 @@ impl UpdateSource for StaticSource {
                 .get("download_url")
                 .cloned()
                 .unwrap_or_else(|| url.trim_end_matches(".zsync").to_string());
-            if let Err(e) = url_guard::validate(&download, false, false) {
+            if let Err(e) = url_guard::validate(&download, false, local.allowed()) {
                 return UpdateCheckResult::fail(self.name(), e);
             }
             let version = control
@@ -181,7 +184,7 @@ impl UpdateSource for StaticSource {
                     ..Default::default()
                 };
             }
-            let size = head_size(network, &download);
+            let size = head_size(network, &download, local);
             return UpdateCheckResult {
                 ok: true,
                 available: version != app.version,
@@ -193,7 +196,7 @@ impl UpdateSource for StaticSource {
             };
         }
         // Direct file URL: only a HEAD probe (check-only, never downloads).
-        match network.head_len(&url) {
+        match network.head_len(&url, local) {
             Ok(size) => {
                 let version = get_str(config, "version");
                 if version.is_empty() {
@@ -297,7 +300,7 @@ impl UpdateSource for GithubSource {
             "Accept".to_string(),
             "application/vnd.github+json".to_string(),
         )];
-        let body = match network.get(&api, &headers) {
+        let body = match network.get(&api, &headers, Local::from_config(config)) {
             Ok(result) => result.body,
             Err(e) => return UpdateCheckResult::fail(self.name(), e),
         };
@@ -366,30 +369,61 @@ impl UpdateSource for GithubSource {
 
 fn asset_matches(asset_name: &str, wanted: &str) -> bool {
     if wanted.contains('*') || wanted.contains('?') {
+        // Both operands come from untrusted sources; cap them so even the
+        // linear matcher cannot be handed a pathological amount of work.
+        if wanted.len() > limits::MAX_GLOB_PATTERN_LENGTH
+            || asset_name.len() > limits::MAX_GLOB_TEXT_LENGTH
+        {
+            return false;
+        }
         return glob_match(wanted, asset_name);
     }
     asset_name == wanted
 }
 
+/// Linear-time `*`/`?` matcher.
+///
+/// The previous recursive form branched on every `*` (`for i in 0..=t.len()`
+/// then recursing), which is exponential: a pattern of `*a` repeated blows up
+/// ~8x per two characters. Both inputs are hostile — the pattern is the
+/// `filename` config, which `config_from_embedded` lifts straight out of an
+/// AppImage's `.upd_info` section, and the text is an asset name from a remote
+/// release document — so the cost has to be bounded by construction.
+///
+/// This is the standard backtrack-once greedy walk: remember the most recent
+/// `*` and the text position it matched to, and on a mismatch resume from
+/// there having consumed one more character. Worst case O(pattern x text),
+/// with no recursion and so no stack growth either.
 fn glob_match(pattern: &str, text: &str) -> bool {
-    fn go(p: &[u8], t: &[u8]) -> bool {
-        if p.is_empty() {
-            return t.is_empty();
-        }
-        match p[0] {
-            b'*' => {
-                for i in 0..=t.len() {
-                    if go(&p[1..], &t[i..]) {
-                        return true;
-                    }
-                }
-                false
-            }
-            b'?' => !t.is_empty() && go(&p[1..], &t[1..]),
-            c => !t.is_empty() && t[0] == c && go(&p[1..], &t[1..]),
+    let p = pattern.as_bytes();
+    let t = text.as_bytes();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    // Position of the last `*` in the pattern, and where in the text it
+    // currently starts matching.
+    let mut star: Option<usize> = None;
+    let mut star_text = 0usize;
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == b'?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == b'*' {
+            star = Some(pi);
+            star_text = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            // Give the last `*` one more character and retry from just after it.
+            pi = s + 1;
+            star_text += 1;
+            ti = star_text;
+        } else {
+            return false;
         }
     }
-    go(pattern.as_bytes(), text.as_bytes())
+    // Trailing `*`s may match the empty remainder.
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+    pi == p.len()
 }
 
 fn github_asset_host_allowed(url: &str) -> bool {
@@ -398,6 +432,32 @@ fn github_asset_host_allowed(url: &str) -> bool {
     };
     let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
     host == "github.com" || host.ends_with(".githubusercontent.com")
+}
+
+/// Is this asset URL served by the forge we asked, or a subdomain of it?
+///
+/// A release document is attacker-influenced -- anyone who can publish a
+/// release, or a compromised instance, chooses the download URL. GitHub assets
+/// were already pinned to github.com and its CDN, but GitLab, Codeberg and
+/// Forgejo accepted any HTTPS host their JSON named, so a release could point
+/// the download anywhere.
+///
+/// Self-hosted instances do legitimately serve assets from a separate domain,
+/// so this is not absolute: `allow_any_asset_host=true` on a source the user
+/// created opts out. Embedded metadata cannot set it.
+fn forge_asset_host_allowed(url: &str, forge_host: &str, config: &Config) -> bool {
+    if get_str(config, "allow_any_asset_host") == "true" {
+        return true;
+    }
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+    let forge = forge_host.trim().to_ascii_lowercase();
+    if forge.is_empty() {
+        return false;
+    }
+    host == forge || host.ends_with(&format!(".{forge}"))
 }
 
 // ---- gitlab ------------------------------------------------------------------
@@ -464,7 +524,8 @@ impl UpdateSource for GitlabSource {
             host,
             pct(&project)
         );
-        let body = match network.get(&api, &[]) {
+        let local = Local::from_config(config);
+        let body = match network.get(&api, &[], local) {
             Ok(result) => result.body,
             Err(e) => return UpdateCheckResult::fail(self.name(), e),
         };
@@ -489,7 +550,12 @@ impl UpdateSource for GitlabSource {
                 continue;
             }
             let download = json_string(link, "url");
-            if download.is_empty() || url_guard::validate(&download, false, false).is_err() {
+            if download.is_empty()
+                || url_guard::validate(&download, false, local.allowed()).is_err()
+            {
+                continue;
+            }
+            if !forge_asset_host_allowed(&download, &host, config) {
                 continue;
             }
             return UpdateCheckResult {
@@ -507,7 +573,8 @@ impl UpdateSource for GitlabSource {
         for link in &links {
             let download = json_string(link, "direct_asset_url");
             if download.ends_with(".AppImage")
-                && url_guard::validate(&download, false, false).is_ok()
+                && url_guard::validate(&download, false, local.allowed()).is_ok()
+                && forge_asset_host_allowed(&download, &host, config)
             {
                 return UpdateCheckResult {
                     ok: true,
@@ -551,7 +618,8 @@ impl GitlabSource {
             pct(project),
             pct(&package)
         );
-        let body = network.get(&list_url, &[]).ok()?.body;
+        let local = Local::from_config(config);
+        let body = network.get(&list_url, &[], local).ok()?.body;
         let packages = parse_json_body(&body).ok()?;
         let id = packages.as_array()?.first()?.get("id")?.as_i64()?;
         let files_url = format!(
@@ -560,7 +628,7 @@ impl GitlabSource {
             pct(project),
             id
         );
-        let files_body = network.get(&files_url, &[]).ok()?.body;
+        let files_body = network.get(&files_url, &[], local).ok()?.body;
         let files = parse_json_body(&files_body).ok()?;
         let wanted = get_str(config, "filename");
         for file in files.as_array()? {
@@ -575,12 +643,11 @@ impl GitlabSource {
                 pct(project),
                 fid
             );
+            // Only SHA-256 counts as a digest. `file_md5` used to be passed
+            // through here and then compared as if it were a SHA-256, which
+            // could never match; an unusable digest is worse than none,
+            // because it turns every update into a verification failure.
             let digest = json_string(file, "file_sha256");
-            let digest = if digest.is_empty() {
-                json_string(file, "file_md5")
-            } else {
-                digest
-            };
             return Some(UpdateCheckResult {
                 ok: true,
                 available: true,
@@ -596,24 +663,28 @@ impl GitlabSource {
     }
 }
 
+/// Is this host one we refuse to treat as a public forge?
+///
+/// Delegates the address classification to url_guard so there is one
+/// definition. This used to carry its own copy, which missed IPv6
+/// unique-local and link-local entirely and had a hand-rolled dotted-name
+/// heuristic that clippy could simplify because it said nothing useful.
 fn is_private_hostname(host: &str) -> bool {
-    if host == "localhost" || host.ends_with(".local") {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return url_guard::is_local_ip(&ip);
+    }
+    let name = bare.strip_suffix('.').unwrap_or(bare);
+    if name == "localhost"
+        || name.ends_with(".localhost")
+        || name.ends_with(".local")
+        || name.ends_with(".internal")
+    {
         return true;
     }
-    if let Ok(ip) = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .parse::<std::net::IpAddr>()
-    {
-        return match ip {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_loopback() || v4.is_link_local() || v4.is_private() || v4.is_unspecified()
-            }
-            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
-        };
-    }
-    // Unknown non-public DNS names count as private until opted in.
-    !(host.contains('.') && !host.starts_with('.'))
+    // A single-label name is not a public DNS name; treat it as internal
+    // until the user opts in.
+    !name.contains('.')
 }
 
 // ---- codeberg + forgejo (Forgejo API shape) ------------------------------------
@@ -650,7 +721,8 @@ fn forgejo_check(
         pct(&owner),
         pct(&repo)
     );
-    let body = match network.get(&api, &[]) {
+    let local = Local::from_config(config);
+    let body = match network.get(&api, &[], local) {
         Ok(result) => result.body,
         Err(e) => return UpdateCheckResult::fail(manager, e),
     };
@@ -674,7 +746,10 @@ fn forgejo_check(
             continue;
         }
         let download = json_string(asset, "browser_download_url");
-        if download.is_empty() || url_guard::validate(&download, false, false).is_err() {
+        if download.is_empty() || url_guard::validate(&download, false, local.allowed()).is_err() {
+            continue;
+        }
+        if !forge_asset_host_allowed(&download, &host, config) {
             continue;
         }
         return UpdateCheckResult {
@@ -802,7 +877,7 @@ impl UpdateSource for FtpSource {
             return Err("FTP source needs an ftp:// URL".to_string());
         }
         // Credentials fail closed, no network.
-        url_guard::validate(&url, true, false).map(|_| ())
+        url_guard::validate(&url, true, Local::from_config(config).allowed()).map(|_| ())
     }
     fn check(
         &self,
@@ -824,7 +899,7 @@ impl UpdateSource for FtpSource {
                 ..Default::default()
             };
         }
-        match network.head_len(&url) {
+        match network.head_len(&url, Local::from_config(config)) {
             Ok(size) => UpdateCheckResult {
                 ok: true,
                 available: version != app.version,

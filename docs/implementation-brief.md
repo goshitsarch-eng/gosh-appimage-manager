@@ -1,5 +1,22 @@
 # Gosh AppImage Manager implementation brief
 
+> **Status: superseded on stack, current on behaviour.**
+>
+> This is the original mission statement, written for the 2.x
+> C++20/Qt 6/KF6/Kirigami implementation. That stack was retired: 3.0.0 is
+> Rust + libcosmic, and there is no Qt, KDE Frameworks, CMake, QML or ECM
+> anywhere in the tree. Section 1's stack and runtime lines, section 3's Qt
+> type names, section 9's KConfig, section 10's KDE Platform runtime, and
+> section 13's Qt Test are all obsolete — see `docs/rewrite-3.0.0.md` for the
+> module-by-module map, and `docs/verification.md` for what has actually been
+> verified.
+>
+> The version line below reads `0.1.0`; the shipping version is `3.0.0`.
+>
+> Everything else — the required user experience, the safety contract, the
+> validation rules, the update semantics, the CLI surface, and the acceptance
+> criteria — still governs, and `AUDIT.md` tracks the project against it.
+
 ## 1. Mission and identity
 
 Build a production-quality standalone application named **Gosh AppImage Manager**: a native KDE application for safely inspecting, integrating, launching, organizing, updating and removing AppImages.

@@ -56,28 +56,45 @@ pub fn validate(raw: &str, allow_http: bool, allow_private: bool) -> Result<Vali
         return reject("URL has no host");
     }
     let host_no_brackets = host.trim_start_matches('[').trim_end_matches(']');
-    let is_ip = host_no_brackets.parse::<std::net::IpAddr>().is_ok();
-    let is_local_network = is_ip
-        && is_local_ip(&host_no_brackets.parse::<std::net::IpAddr>().unwrap())
-        || !is_ip && is_local_hostname(host_no_brackets);
+    let is_local_network = match host_no_brackets.parse::<std::net::IpAddr>() {
+        Ok(ip) => is_local_ip(&ip),
+        Err(_) => is_local_hostname(host_no_brackets),
+    };
     if is_local_network && !allow_private {
         return reject("local-network destinations need an explicit opt-in");
     }
-    expect_https_marker();
     Ok(ValidatedUrl {
         url,
         is_local_network,
     })
 }
 
-fn expect_https_marker() {}
-
-fn is_local_ip(ip: &std::net::IpAddr) -> bool {
+/// Is `ip` a destination we refuse to reach without an explicit opt-in?
+///
+/// This is checked twice: once on the literal host in the URL, and again on
+/// whatever the resolver actually returns (see `network::guard_resolved`).
+/// The literal check alone is not a guard — any hostname can resolve anywhere.
+pub fn is_local_ip(ip: &std::net::IpAddr) -> bool {
     match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_link_local() || v4.is_private() || v4.is_unspecified()
-        }
+        std::net::IpAddr::V4(v4) => is_local_v4(v4),
         std::net::IpAddr::V6(v6) => {
+            // An IPv4 address wearing an IPv6 costume reaches exactly the same
+            // host, so unwrap both transitional encodings before judging it.
+            // `::ffff:127.0.0.1` and the NAT64 well-known prefix 64:ff9b::/96
+            // both used to sail past a plain `is_loopback()` check.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_local_v4(&v4);
+            }
+            if v6.segments()[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
+                let s = v6.segments();
+                let v4 = std::net::Ipv4Addr::new(
+                    (s[6] >> 8) as u8,
+                    (s[6] & 0xff) as u8,
+                    (s[7] >> 8) as u8,
+                    (s[7] & 0xff) as u8,
+                );
+                return is_local_v4(&v4);
+            }
             v6.is_loopback()
                 || v6.is_unspecified()
                 || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique-local
@@ -86,17 +103,59 @@ fn is_local_ip(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-fn is_local_hostname(host: &str) -> bool {
-    host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local")
+fn is_local_v4(v4: &std::net::Ipv4Addr) -> bool {
+    v4.is_loopback()
+        || v4.is_link_local()
+        || v4.is_private()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_documentation()
+        // 100.64.0.0/10 carrier-grade NAT: not public, and routable to
+        // infrastructure on many networks.
+        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40)
+        // 192.0.0.0/24 IETF protocol assignments.
+        || (v4.octets()[0] == 192 && v4.octets()[1] == 0 && v4.octets()[2] == 0)
+        // 198.18.0.0/15 benchmarking.
+        || (v4.octets()[0] == 198 && (v4.octets()[1] & 0xfe) == 18)
 }
 
-/// HTTPS-to-HTTP downgrade guard for redirect chains.
+fn is_local_hostname(host: &str) -> bool {
+    // A fully-qualified name may carry a trailing dot; `localhost.` resolves
+    // to loopback exactly as `localhost` does.
+    let host = host.strip_suffix('.').unwrap_or(host);
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+}
+
+/// Guard one hop of a redirect chain.
+///
+/// Applied to every hop before it is followed, not just to the final URL: by
+/// the time the final URL is known the intermediate requests have already been
+/// issued, which is the whole of an SSRF.
 pub fn check_redirect(previous: &Url, next: &Url) -> Result<(), String> {
     if previous.scheme() == "https" && next.scheme() == "http" {
         return Err("URL rejected: refusing https-to-http downgrade".to_string());
     }
     if next.username() != "" || next.password().is_some() {
         return Err("URL rejected: credentials in URLs are not allowed".to_string());
+    }
+    match next.scheme() {
+        "https" | "http" => {}
+        _ => return Err("URL rejected: URL scheme is not allowed".to_string()),
+    }
+    let host = next.host_str().unwrap_or_default().to_ascii_lowercase();
+    if host.is_empty() {
+        return Err("URL rejected: URL has no host".to_string());
+    }
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    let local = match bare.parse::<std::net::IpAddr>() {
+        Ok(ip) => is_local_ip(&ip),
+        Err(_) => is_local_hostname(bare),
+    };
+    if local {
+        return Err("URL rejected: refusing redirect to a local-network destination".to_string());
     }
     Ok(())
 }

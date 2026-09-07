@@ -321,3 +321,345 @@ fn list_updates_json_schema() {
         assert!(updates[0].get(key).is_some(), "missing {key}");
     }
 }
+
+/// Audit finding S-7. GitHub returns `digest: "sha256:<hex>"`; the comparison
+/// was against the raw field, so a correctly digested asset failed every time.
+#[test]
+fn digest_formats_are_parsed_before_comparison() {
+    use goshaim_core::updates_service::parse_expected_sha256;
+    let hex = "a".repeat(64);
+    // GitHub's algorithm-prefixed form and GitLab's bare hex both verify.
+    assert_eq!(
+        parse_expected_sha256(&format!("sha256:{hex}")),
+        Some(hex.clone())
+    );
+    assert_eq!(
+        parse_expected_sha256(&format!("SHA256:{}", hex.to_uppercase())),
+        Some(hex.clone())
+    );
+    assert_eq!(parse_expected_sha256(&hex), Some(hex.clone()));
+    assert_eq!(
+        parse_expected_sha256(&format!("  sha256:{hex}  ")),
+        Some(hex.clone())
+    );
+    // Anything we cannot check must report that, not quietly pass.
+    assert_eq!(parse_expected_sha256(""), None);
+    assert_eq!(
+        parse_expected_sha256(&"a".repeat(32)),
+        None,
+        "an MD5 is not a SHA-256"
+    );
+    assert_eq!(
+        parse_expected_sha256(&format!("md5:{}", "a".repeat(32))),
+        None
+    );
+    assert_eq!(
+        parse_expected_sha256(&format!("sha512:{}", "a".repeat(128))),
+        None
+    );
+    assert_eq!(
+        parse_expected_sha256(&format!("sha256:{}", "z".repeat(64))),
+        None,
+        "non-hex"
+    );
+}
+
+/// The same finding, end to end: a real GitHub-shaped digest must now verify
+/// and let the update through.
+#[test]
+fn github_prefixed_digest_verifies_and_applies() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let live = common::write_fixture(h.tmp.path(), "V.AppImage");
+    let payload = goshaim_core::inspector::make_test_elf(
+        goshaim_core::types::Architecture::X86_64,
+        goshaim_core::types::AppImageType::Type2,
+    );
+    let real = {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(&payload))
+    };
+    let body = format!(
+        r#"{{"tag_name":"v2","assets":[{{"name":"app.AppImage","browser_download_url":"https://github.com/x/y/releases/download/v2/app.AppImage","size":128,"digest":"sha256:{real}"}}]}}"#
+    );
+    h.network.canned_body("api.github.com", body.as_bytes());
+    h.network
+        .canned_body("github.com/x/y/releases/download", &payload);
+
+    let app = seed_arch_app(&mut c, &live);
+    let result = c.apply_update(&app, false, &std::sync::atomic::AtomicBool::new(false));
+    assert!(
+        result.ok,
+        "correct digest must verify, got: {}",
+        result.error
+    );
+}
+
+/// Audit finding S-8. Parsing an architecture is not the same as being able to
+/// run it: an x86_64 install used to accept an aarch64 payload and break.
+#[test]
+fn foreign_architecture_update_is_refused() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let live = common::write_fixture(h.tmp.path(), "V.AppImage");
+    let before = std::fs::read(&live).unwrap();
+    let foreign = goshaim_core::inspector::make_test_elf(
+        goshaim_core::types::Architecture::AArch64,
+        goshaim_core::types::AppImageType::Type2,
+    );
+    let body = r#"{"tag_name":"v2","assets":[{"name":"app.AppImage","browser_download_url":"https://github.com/x/y/releases/download/v2/app.AppImage","size":128}]}"#;
+    h.network.canned_body("api.github.com", body.as_bytes());
+    h.network
+        .canned_body("github.com/x/y/releases/download", &foreign);
+
+    let app = seed_arch_app(&mut c, &live);
+    let result = c.apply_update(&app, false, &std::sync::atomic::AtomicBool::new(false));
+    assert!(
+        !result.ok,
+        "an aarch64 payload must not replace an x86_64 install"
+    );
+    assert!(
+        result.error.contains("aarch64") && result.error.contains("x86_64"),
+        "the error should name both architectures, got: {}",
+        result.error
+    );
+    assert_eq!(
+        std::fs::read(&live).unwrap(),
+        before,
+        "the working installation must be left untouched"
+    );
+}
+
+fn seed_arch_app(
+    c: &mut goshaim_core::controller::AppController,
+    live: &std::path::Path,
+) -> goshaim_core::types::InstalledApp {
+    let mut app = goshaim_core::types::InstalledApp::new_owned();
+    app.uuid = "arch-app".into();
+    app.name = "Victim".into();
+    app.version = "v1".into();
+    app.architecture = goshaim_core::types::Architecture::X86_64;
+    app.managed_path = live.to_string_lossy().into_owned();
+    app.update_manager = "github".into();
+    app.update_config.insert("username".into(), "x".into());
+    app.update_config.insert("repo".into(), "y".into());
+    app.update_config
+        .insert("filename".into(), "app.AppImage".into());
+    c.registry_mut().upsert(app.clone()).unwrap();
+    app
+}
+
+/// Audit finding S-12. The payload path must not buffer the whole AppImage:
+/// the size bound defaults to 8 GiB, so an oversized body has to be refused
+/// while streaming, not after allocating it.
+#[test]
+fn oversized_download_is_refused_without_buffering_it() {
+    use goshaim_core::network::stream_to_file;
+    let tmp = tempfile::tempdir().unwrap();
+    let dest = tmp.path().join("staged.AppImage");
+    let payload = vec![0u8; 512 * 1024];
+
+    let err = stream_to_file(
+        payload.as_slice(),
+        &dest,
+        64 * 1024,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap_err();
+    assert!(err.contains("exceeds size bound"), "got: {err}");
+    assert!(
+        !dest.exists(),
+        "a refused download must not leave a partial file"
+    );
+
+    // Within the bound it lands on disk with private permissions.
+    let n = stream_to_file(
+        payload.as_slice(),
+        &dest,
+        1024 * 1024,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(n, payload.len() as u64);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "staging must not be readable by other users");
+    }
+}
+
+/// Cancellation now reaches the download, which it could not when the body was
+/// fetched in one call before anything was written.
+#[test]
+fn cancelled_download_removes_the_partial_file() {
+    use goshaim_core::network::stream_to_file;
+    let tmp = tempfile::tempdir().unwrap();
+    let dest = tmp.path().join("staged.AppImage");
+    let cancel = std::sync::atomic::AtomicBool::new(true);
+    let err = stream_to_file(vec![0u8; 4096].as_slice(), &dest, 1 << 20, &cancel).unwrap_err();
+    assert_eq!(err, "Cancelled");
+    assert!(
+        !dest.exists(),
+        "a cancelled download must not leave a partial file"
+    );
+}
+
+/// Audit finding C-4. The forge sources report `available: true` for any
+/// matching asset; only list_updates compared versions. Applying directly --
+/// which is what `--update <path>` does -- therefore replaced a working
+/// installation with the identical version.
+#[test]
+fn applying_when_already_current_is_refused() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let live = common::write_fixture(h.tmp.path(), "V.AppImage");
+    let before = std::fs::read(&live).unwrap();
+    let payload = goshaim_core::inspector::make_test_elf(
+        goshaim_core::types::Architecture::X86_64,
+        goshaim_core::types::AppImageType::Type2,
+    );
+    // The remote advertises exactly the version already installed.
+    let body = r#"{"tag_name":"v1","assets":[{"name":"app.AppImage","browser_download_url":"https://github.com/x/y/releases/download/v1/app.AppImage","size":128}]}"#;
+    h.network.canned_body("api.github.com", body.as_bytes());
+    h.network
+        .canned_body("github.com/x/y/releases/download", &payload);
+
+    let app = seed_arch_app(&mut c, &live);
+    let result = c.apply_update(&app, false, &std::sync::atomic::AtomicBool::new(false));
+    assert!(
+        !result.ok,
+        "must not replace an install with its own version"
+    );
+    assert!(
+        result.error.contains("Already at the latest version"),
+        "got: {}",
+        result.error
+    );
+    assert_eq!(
+        std::fs::read(&live).unwrap(),
+        before,
+        "file must be untouched"
+    );
+}
+
+/// Audit finding C-6. A failed check must be reported as a failure, not folded
+/// into "no updates available" -- which reads to a user as "you are current".
+#[test]
+fn failed_checks_are_reported_not_silently_dropped() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let live = common::write_fixture(h.tmp.path(), "V.AppImage");
+    // No canned body for api.github.com: the check fails, as it would with the
+    // network down or a certificate expired.
+    let app = seed_arch_app(&mut c, &live);
+
+    let scan = c.scan_updates(&std::sync::atomic::AtomicBool::new(false));
+    assert!(scan.offers.is_empty(), "no offer can be produced");
+    assert_eq!(scan.checked, 1, "the app should have been checked");
+    assert_eq!(scan.failures.len(), 1, "the failure must be reported");
+    assert_eq!(scan.failures[0].uuid, app.uuid);
+    assert!(
+        !scan.failures[0].error.is_empty(),
+        "the failure must carry a reason"
+    );
+
+    // An app with no update source is skipped, not counted as a failure.
+    let mut plain = goshaim_core::types::InstalledApp::new_owned();
+    plain.uuid = "plain".into();
+    plain.managed_path = live.to_string_lossy().into_owned();
+    c.registry_mut().upsert(plain).unwrap();
+    let scan = c.scan_updates(&std::sync::atomic::AtomicBool::new(false));
+    assert_eq!(scan.skipped, 1);
+    assert_eq!(scan.failures.len(), 1);
+}
+
+/// Audit item: forge asset hosts were unrestricted. A release document is
+/// attacker-influenced -- anyone who can publish a release, or a compromised
+/// instance, chooses the download URL. GitHub assets were pinned to
+/// github.com and its CDN, but GitLab, Codeberg and Forgejo accepted any
+/// HTTPS host their JSON named.
+#[test]
+fn forge_assets_must_come_from_the_forge_that_served_the_release() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let live = common::write_fixture(h.tmp.path(), "V.AppImage");
+
+    // Codeberg release naming an asset on an unrelated host.
+    let body = r#"[{"tag_name":"v2","assets":[{"name":"app.AppImage","browser_download_url":"https://attacker.example.com/evil.AppImage","size":1}]}]"#;
+    h.network.canned_body("codeberg.org", body.as_bytes());
+
+    let mut app = goshaim_core::types::InstalledApp::new_owned();
+    app.uuid = "cb".into();
+    app.name = "Victim".into();
+    app.version = "v1".into();
+    app.managed_path = live.to_string_lossy().into_owned();
+    app.update_manager = "codeberg".into();
+    app.update_config.insert("owner".into(), "someone".into());
+    app.update_config.insert("repo".into(), "thing".into());
+    app.update_config
+        .insert("filename".into(), "app.AppImage".into());
+    c.registry_mut().upsert(app.clone()).unwrap();
+
+    let result = c
+        .update_service()
+        .check(&app, &std::sync::atomic::AtomicBool::new(false));
+    assert!(
+        !result.available,
+        "an asset on an unrelated host must not be offered, got {:?}",
+        result.url
+    );
+
+    // The same release served from the forge itself is accepted.
+    let ok_body = r#"[{"tag_name":"v2","assets":[{"name":"app.AppImage","browser_download_url":"https://codeberg.org/someone/thing/releases/download/v2/app.AppImage","size":1}]}]"#;
+    h.network.canned_body("codeberg.org", ok_body.as_bytes());
+    let result = c
+        .update_service()
+        .check(&app, &std::sync::atomic::AtomicBool::new(false));
+    assert!(result.available, "a same-host asset should be offered");
+
+    // A subdomain of the forge is accepted too (release CDNs).
+    let cdn_body = r#"[{"tag_name":"v2","assets":[{"name":"app.AppImage","browser_download_url":"https://cdn.codeberg.org/x/app.AppImage","size":1}]}]"#;
+    h.network.canned_body("codeberg.org", cdn_body.as_bytes());
+    assert!(
+        c.update_service()
+            .check(&app, &std::sync::atomic::AtomicBool::new(false))
+            .available,
+        "a forge subdomain should be accepted"
+    );
+
+    // Self-hosted instances legitimately use a separate asset domain, so an
+    // explicit user opt-in exists.
+    h.network.canned_body("codeberg.org", body.as_bytes());
+    let mut opted = app.clone();
+    opted
+        .update_config
+        .insert("allow_any_asset_host".into(), "true".into());
+    assert!(
+        c.update_service()
+            .check(&opted, &std::sync::atomic::AtomicBool::new(false))
+            .available,
+        "the explicit opt-in should allow a foreign asset host"
+    );
+}
+
+/// The self-test's readiness line asserted nothing; it returned a constant.
+#[test]
+fn readiness_checks_something_real() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    assert!(c.readiness().is_ok(), "a fresh controller should be ready");
+
+    // A managed folder that is not an absolute path cannot work.
+    c.settings_mut()
+        .set_managed_folder(std::path::PathBuf::from("relative/path"))
+        .unwrap();
+    let error = c.readiness().unwrap_err();
+    assert!(error.contains("absolute"), "got: {error}");
+
+    // A file where the managed folder should be is also not workable.
+    let blocker = h.tmp.path().join("blocker");
+    std::fs::write(&blocker, b"x").unwrap();
+    c.settings_mut().set_managed_folder(blocker).unwrap();
+    assert!(c.readiness().unwrap_err().contains("not a directory"));
+}

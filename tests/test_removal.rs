@@ -152,3 +152,37 @@ fn remove_all_only_touches_owned() {
     assert_eq!(code as i32, goshaim_core::types::ExitCode::Ok as i32);
     assert!(c.registry().apps().is_empty());
 }
+
+/// Audit finding C-8. The protected-path guard must refuse filesystem roots,
+/// home directories, and anything sitting directly inside them.
+#[test]
+fn protected_target_rules_cover_roots_and_home_top_level() {
+    use goshaim_core::removal::is_forbidden_permanent_target;
+    use std::path::Path;
+    let home = Path::new("/home/alice");
+
+    for forbidden in [
+        "/",
+        "/home",
+        "/root",
+        "/home/alice",
+        "/home/bob",     // directly inside /home
+        "/root/thing",   // directly inside /root
+        "/home/alice/x", // top level of this user's home
+        "/etc",          // directly inside /
+    ] {
+        assert!(
+            is_forbidden_permanent_target(Path::new(forbidden), home),
+            "{forbidden} must be refused"
+        );
+    }
+    // A managed AppImage well inside the home is deletable.
+    assert!(!is_forbidden_permanent_target(
+        Path::new("/home/alice/AppImages/App.AppImage"),
+        home
+    ));
+    assert!(!is_forbidden_permanent_target(
+        Path::new("/opt/apps/App.AppImage"),
+        home
+    ));
+}

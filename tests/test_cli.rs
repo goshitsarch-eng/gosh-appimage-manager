@@ -61,7 +61,7 @@ fn list_installed_json_schema() {
         .get("installed")
         .and_then(|v| v.as_array())
         .expect("installed array");
-    assert!(!doc.get("items").is_some(), "must use installed, not items");
+    assert!(doc.get("items").is_none(), "must use installed, not items");
     assert_eq!(installed.len(), 1);
     let row = &installed[0];
     for key in [
