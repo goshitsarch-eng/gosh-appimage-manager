@@ -179,8 +179,10 @@ pub fn run_cli(
 
     if has_arg(args, "--list-installed") {
         let mut items = Vec::new();
-        for mut app in controller.registry().apps() {
-            app.running = controller.is_running(&app);
+        let apps = controller.registry().apps();
+        let running = controller.running_uuids(&apps);
+        for mut app in apps {
+            app.running = running.contains(&app.uuid);
             if json {
                 items.push(app_json(&app));
             } else {

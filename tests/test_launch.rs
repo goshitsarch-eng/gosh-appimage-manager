@@ -193,3 +193,43 @@ fn host_process_lookup_parses_pids_and_fails_safe() {
     let table = SysTable::with_host_runner(Box::new(runner));
     assert_eq!(table.host_pids_for_test("/apps/X.AppImage"), Some(vec![7]));
 }
+
+/// Audit finding P-8. Asking one app at a time re-walked the whole process
+/// table per app, so listing N apps cost N walks of /proc and N readlinks per
+/// process. The batch form answers for all of them in one pass, and must
+/// agree with the per-app answer exactly.
+#[test]
+fn batch_running_check_agrees_with_the_per_app_check() {
+    let h = Harness::new();
+    let mut c = h.controller();
+
+    let mut apps = Vec::new();
+    for i in 0..5 {
+        let path = h.tmp.path().join(format!("App{i}.AppImage"));
+        std::fs::write(&path, b"x").unwrap();
+        let mut app = goshaim_core::types::InstalledApp::new_owned();
+        app.uuid = format!("uuid-{i}");
+        app.managed_path = path.to_string_lossy().into_owned();
+        c.registry_mut().upsert(app.clone()).unwrap();
+        apps.push(app);
+    }
+    // Two of them are running.
+    h.table.mark_running(&apps[1].managed_path);
+    h.table.mark_running(&apps[3].managed_path);
+
+    let mut batch = c.running_uuids(&apps);
+    batch.sort();
+    assert_eq!(batch, vec!["uuid-1".to_string(), "uuid-3".to_string()]);
+
+    // The per-app path must give the same answer.
+    let mut individual: Vec<String> = apps
+        .iter()
+        .filter(|app| c.is_running(app))
+        .map(|app| app.uuid.clone())
+        .collect();
+    individual.sort();
+    assert_eq!(batch, individual, "batch and per-app answers must agree");
+
+    // And the empty case does not walk anything.
+    assert!(c.running_uuids(&[]).is_empty());
+}

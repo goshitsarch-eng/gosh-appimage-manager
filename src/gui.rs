@@ -338,11 +338,7 @@ impl App {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let apps = guard.registry().apps();
-                let running = apps
-                    .iter()
-                    .filter(|app| guard.is_running(app))
-                    .map(|app| app.uuid.clone())
-                    .collect();
+                let running = guard.running_uuids(&apps);
                 let discovered = guard.discover();
                 Outcome::LibraryLoaded {
                     apps,

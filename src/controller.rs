@@ -328,6 +328,20 @@ impl AppController {
         self.registry.upsert(app)
     }
 
+    /// Which of these apps are running, in one pass over the process table.
+    ///
+    /// Calling is_running per app re-walked /proc once per app; a library of
+    /// N apps cost N walks and N readlinks per process.
+    pub fn running_uuids(&self, apps: &[crate::types::InstalledApp]) -> Vec<String> {
+        let executables = crate::proctable::executables_for(apps);
+        let running = self.processes.running_among(&executables);
+        apps.iter()
+            .zip(executables.iter())
+            .filter(|(_, exe)| running.contains(*exe))
+            .map(|(app, _)| app.uuid.clone())
+            .collect()
+    }
+
     pub fn is_running(&self, app: &crate::types::InstalledApp) -> bool {
         LaunchService::new(&*self.runner, &*self.processes).is_running(app)
     }
