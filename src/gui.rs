@@ -23,6 +23,7 @@ use cosmic::{executor, Application, ApplicationExt, Element};
 use crate::controller::AppController;
 use crate::library::{DiscoveredApp, Origin};
 use crate::limits;
+use crate::t;
 use crate::types::{
     app_image_type_name, appearance_name, architecture_name, Appearance, ConflictPolicy, CopyMode,
     EnvPair, InspectionResult, InstalledApp, IntegrateRequest, RemovalMode, RemovalRequest,
@@ -67,6 +68,19 @@ enum Page {
 }
 
 impl Page {
+    /// The nav-bar label, translated.
+    fn localized_title(self) -> String {
+        match self {
+            Page::Library => t!("nav.library", "Library"),
+            Page::Inspect => t!("nav.inspect", "Inspect"),
+            Page::Updates => t!("nav.updates", "Updates"),
+            Page::Tasks => t!("nav.tasks", "Tasks"),
+            Page::Settings => t!("nav.settings", "Settings"),
+            Page::About => t!("nav.about", "About"),
+        }
+    }
+
+    #[allow(dead_code)]
     const fn title(self) -> &'static str {
         match self {
             Page::Library => "Library",
@@ -218,11 +232,16 @@ pub enum SortOrder {
 }
 
 impl SortOrder {
-    const fn label(self) -> &'static str {
+    /// The button label, translated.
+    ///
+    /// This returned a `&'static str` and so could never be translated; the
+    /// pseudolocale run showed the three sort buttons still in plain ASCII
+    /// while everything around them was accented.
+    fn label(self) -> String {
         match self {
-            SortOrder::Name => "Name",
-            SortOrder::Version => "Version",
-            SortOrder::UpdatesFirst => "Updates first",
+            SortOrder::Name => t!("sort.name", "Name"),
+            SortOrder::Version => t!("sort.version", "Version"),
+            SortOrder::UpdatesFirst => t!("sort.updates", "Updates first"),
         }
     }
 }
@@ -640,7 +659,7 @@ impl Application for App {
         ] {
             nav_model
                 .insert()
-                .text(page.title())
+                .text(page.localized_title())
                 .data::<Page>(page)
                 .activate();
         }
@@ -1573,7 +1592,7 @@ impl App {
                 widget::row::with_children(vec![
                     widget::text::body(format!("Working: {label}…")).into(),
                     widget::horizontal_space(Length::Fill).into(),
-                    widget::button::standard("Cancel")
+                    widget::button::standard(t!("action.cancel", "Cancel"))
                         .on_press(Message::Cancel)
                         .into(),
                 ])
@@ -1592,7 +1611,7 @@ impl App {
             widget::row::with_children(vec![
                 widget::text::body(format!("{prefix}: {text}")).into(),
                 widget::horizontal_space(Length::Fill).into(),
-                widget::button::text("Dismiss")
+                widget::button::text(t!("action.dismiss", "Dismiss"))
                     .on_press(Message::DismissStatus)
                     .into(),
             ])
@@ -1609,9 +1628,9 @@ impl App {
         let mut rows: Vec<Element<Message>> = Vec::new();
         rows.push(
             widget::row::with_children(vec![
-                widget::text::title3("Library").into(),
+                widget::text::title3(t!("nav.library", "Library")).into(),
                 widget::horizontal_space(Length::Fill).into(),
-                widget::button::standard("Refresh")
+                widget::button::standard(t!("action.refresh", "Refresh"))
                     .on_press(Message::LibraryRefresh)
                     .into(),
             ])
@@ -1622,11 +1641,13 @@ impl App {
         // layout the sort buttons win the fixed space and squeeze the search
         // field down to a stub barely wider than its clear button, so they
         // move to their own line instead.
-        let search: Element<Message> =
-            widget::search_input("Search by name, version or path", &self.search)
-                .on_input(Message::SearchChanged)
-                .on_clear(Message::SearchChanged(String::new()))
-                .into();
+        let search: Element<Message> = widget::search_input(
+            t!("library.search", "Search by name, version or path"),
+            &self.search,
+        )
+        .on_input(Message::SearchChanged)
+        .on_clear(Message::SearchChanged(String::new()))
+        .into();
         let sorts = vec![
             sort_button(SortOrder::Name, self.sort),
             sort_button(SortOrder::Version, self.sort),
@@ -1648,10 +1669,10 @@ impl App {
         if self.library.is_empty() {
             // Empty state, distinguished from "still loading".
             rows.push(if self.busy.is_some() {
-                widget::text::body("Loading your library…").into()
+                widget::text::body(t!("library.loading", "Loading your library…")).into()
             } else {
                 widget::column::with_children(vec![
-                    widget::text::heading("No AppImages yet").into(),
+                    widget::text::heading(t!("library.empty.title", "No AppImages yet")).into(),
                     widget::text::body(
                         "Open one from the Inspect page. Opening a file never integrates or \
                          executes it.",
@@ -1681,12 +1702,15 @@ impl App {
         let adoptable: Vec<&DiscoveredApp> =
             self.discovered.iter().filter(|d| !d.managed).collect();
         if !adoptable.is_empty() {
-            rows.push(widget::text::title4("Not managed yet").into());
             rows.push(
-                widget::text::caption(
+                widget::text::title4(t!("library.adoptable.title", "Not managed yet")).into(),
+            );
+            rows.push(
+                widget::text::caption(t!(
+                    "library.adoptable.caption",
                     "Adopting registers an AppImage so it can be updated and removed here. \
-                     Nothing on disk is changed.",
-                )
+                     Nothing on disk is changed."
+                ))
                 .into(),
             );
             for found in adoptable {
@@ -1707,7 +1731,7 @@ impl App {
                             .spacing(2)
                             .into(),
                             widget::horizontal_space(Length::Fill).into(),
-                            widget::button::suggested("Adopt")
+                            widget::button::suggested(t!("action.adopt", "Adopt"))
                                 .on_press(Message::AdoptAsk(found.path.clone()))
                                 .into(),
                         ])
@@ -1744,13 +1768,13 @@ impl App {
             .into(),
         );
         let actions: Vec<Element<Message>> = vec![
-            widget::button::suggested("Launch")
+            widget::button::suggested(t!("action.launch", "Launch"))
                 .on_press(Message::Launch(app.uuid.clone()))
                 .into(),
-            widget::button::standard("Details")
+            widget::button::standard(t!("action.details", "Details"))
                 .on_press(Message::SelectApp(app.uuid.clone()))
                 .into(),
-            widget::button::standard("Trash")
+            widget::button::standard(t!("action.trash", "Trash"))
                 .on_press(Message::RemoveAsk(app.uuid.clone(), false))
                 .into(),
         ];
@@ -1770,7 +1794,7 @@ impl App {
         let detail = self.detail.as_ref()?;
         let app = self.selected()?;
         let mut rows: Vec<Element<Message>> = vec![widget::row::with_children(vec![
-            widget::button::standard("← Library")
+            widget::button::standard(t!("detail.back", "← Library"))
                 .on_press(Message::CloseDetail)
                 .into(),
             widget::text::title3(&app.name).into(),
@@ -1821,32 +1845,32 @@ impl App {
         }
         rows.push(
             widget::settings::section()
-                .title("Details")
+                .title(t!("action.details", "Details"))
                 .add(widget::column::with_children(fact_rows).spacing(2))
                 .into(),
         );
 
         rows.push(
             widget::settings::section()
-                .title("Actions")
+                .title(t!("detail.section.actions", "Actions"))
                 .add(
                     widget::column::with_children(vec![
-                        widget::button::suggested("Launch")
+                        widget::button::suggested(t!("action.launch", "Launch"))
                             .on_press(Message::Launch(app.uuid.clone()))
                             .into(),
-                        widget::button::standard("Reveal in file manager")
+                        widget::button::standard(t!("action.reveal", "Reveal in file manager"))
                             .on_press(Message::Reveal(app.managed_path.clone()))
                             .into(),
-                        widget::button::standard("Check and update now")
+                        widget::button::standard(t!("action.checkupdate", "Check and update now"))
                             .on_press(Message::UpdateOne(app.uuid.clone()))
                             .into(),
-                        widget::button::standard("Refresh metadata")
+                        widget::button::standard(t!("action.refreshmeta", "Refresh metadata"))
                             .on_press(Message::RefreshMetadata(app.uuid.clone()))
                             .into(),
-                        widget::button::standard("Move to Trash")
+                        widget::button::standard(t!("action.trash.long", "Move to Trash"))
                             .on_press(Message::RemoveAsk(app.uuid.clone(), false))
                             .into(),
-                        widget::button::destructive("Delete permanently")
+                        widget::button::destructive(t!("action.delete", "Delete permanently"))
                             .on_press(Message::RemoveAsk(app.uuid.clone(), true))
                             .into(),
                     ])
@@ -1857,13 +1881,14 @@ impl App {
 
         rows.push(
             widget::settings::section()
-                .title("Command arguments")
+                .title(t!("detail.section.arguments", "Command arguments"))
                 .add(
                     widget::column::with_children(vec![
-                        widget::text::caption(
+                        widget::text::caption(t!(
+                            "detail.arguments.caption",
                             "One argument per line. These are passed as separate arguments, \
-                             never as a shell command.",
-                        )
+                             never as a shell command."
+                        ))
                         .into(),
                         widget::text_input("--example-flag", &detail.arguments_input)
                             .on_input(Message::ArgumentsChanged)
@@ -1873,12 +1898,15 @@ impl App {
                 )
                 .add(
                     widget::column::with_children(vec![
-                        widget::text::caption("Environment variables, one NAME=value per line.")
-                            .into(),
+                        widget::text::caption(t!(
+                            "detail.environment.caption",
+                            "Environment variables, one NAME=value per line."
+                        ))
+                        .into(),
                         widget::text_input("NAME=value", &detail.environment_input)
                             .on_input(Message::EnvironmentChanged)
                             .into(),
-                        widget::button::suggested("Save")
+                        widget::button::suggested(t!("action.save", "Save"))
                             .on_press(Message::SaveArgumentsAndEnvironment)
                             .into(),
                     ])
@@ -1889,7 +1917,7 @@ impl App {
 
         rows.push(
             widget::settings::section()
-                .title("Update source")
+                .title(t!("detail.section.source", "Update source"))
                 .add(
                     widget::column::with_children(vec![
                         widget::text_input(
@@ -1902,10 +1930,10 @@ impl App {
                             .on_input(Message::UpdateSourceConfigChanged)
                             .into(),
                         widget::row::with_children(vec![
-                            widget::button::suggested("Apply")
+                            widget::button::suggested(t!("action.apply", "Apply"))
                                 .on_press(Message::UpdateSourceApply(app.uuid.clone()))
                                 .into(),
-                            widget::button::standard("Reset")
+                            widget::button::standard(t!("action.reset", "Reset"))
                                 .on_press(Message::UpdateSourceUnset(app.uuid.clone()))
                                 .into(),
                         ])
@@ -1922,22 +1950,26 @@ impl App {
 
     fn view_inspect(&self) -> Element<'_, Message> {
         let mut col: Vec<Element<Message>> = vec![
-            widget::text::title3("Inspect an AppImage").into(),
-            widget::text::caption(
-                "Opening a file only inspects it. Nothing is integrated or executed.",
-            )
+            widget::text::title3(t!("inspect.title", "Inspect an AppImage")).into(),
+            widget::text::caption(t!(
+                "inspect.caption",
+                "Opening a file only inspects it. Nothing is integrated or executed."
+            ))
             .into(),
         ];
         col.push(
             widget::row::with_children(vec![
-                widget::text_input("Path to .AppImage", &self.inspect.path_input)
-                    .on_input(Message::InspectPathChanged)
-                    .on_submit(Message::InspectRun)
-                    .into(),
-                widget::button::standard("Browse…")
+                widget::text_input(
+                    t!("inspect.path.placeholder", "Path to .AppImage"),
+                    &self.inspect.path_input,
+                )
+                .on_input(Message::InspectPathChanged)
+                .on_submit(Message::InspectRun)
+                .into(),
+                widget::button::standard(t!("action.browse", "Browse…"))
                     .on_press(Message::InspectBrowse)
                     .into(),
-                widget::button::suggested("Inspect")
+                widget::button::suggested(t!("nav.inspect", "Inspect"))
                     .on_press(Message::InspectRun)
                     .into(),
             ])
@@ -1956,11 +1988,19 @@ impl App {
         }
 
         if self.busy.is_some() && self.inspect.summary.is_empty() {
-            col.push(widget::text::body("Inspecting… this reads and hashes the file.").into());
+            col.push(
+                widget::text::body(t!(
+                    "inspect.working",
+                    "Inspecting… this reads and hashes the file."
+                ))
+                .into(),
+            );
         }
 
         if !self.inspect.error.is_empty() {
-            col.push(widget::text::heading("Cannot inspect this file").into());
+            col.push(
+                widget::text::heading(t!("inspect.error.title", "Cannot inspect this file")).into(),
+            );
             col.push(widget::text::body(&self.inspect.error).into());
         }
 
@@ -1973,7 +2013,7 @@ impl App {
 
         if self.inspect.inspected_ok {
             col.push(
-                widget::button::suggested("Integrate")
+                widget::button::suggested(t!("action.integrate", "Integrate"))
                     .on_press(Message::IntegrateRun)
                     .into(),
             );
@@ -1984,16 +2024,16 @@ impl App {
     fn view_updates(&self) -> Element<'_, Message> {
         let mut col: Vec<Element<Message>> = Vec::new();
         let controls: Vec<Element<Message>> = vec![
-            widget::button::standard("Check now")
+            widget::button::standard(t!("updates.check", "Check now"))
                 .on_press(Message::UpdatesRefresh)
                 .into(),
-            widget::button::suggested("Update all")
+            widget::button::suggested(t!("updates.all", "Update all"))
                 .on_press(Message::UpdateAll)
                 .into(),
         ];
         col.push(
             widget::row::with_children(vec![
-                widget::text::title3("Updates").into(),
+                widget::text::title3(t!("nav.updates", "Updates")).into(),
                 widget::horizontal_space(Length::Fill).into(),
                 if self.narrow() {
                     widget::column::with_children(controls).spacing(4).into()
@@ -2006,13 +2046,19 @@ impl App {
         );
 
         if self.busy.is_some() {
-            col.push(widget::text::body("Checking update sources…").into());
+            col.push(widget::text::body(t!("updates.checking", "Checking update sources…")).into());
         }
 
         // Failures first: "everything is up to date" must never be shown for
         // apps that could not be checked at all.
         if !self.check_failures.is_empty() {
-            col.push(widget::text::heading("Some apps could not be checked").into());
+            col.push(
+                widget::text::heading(t!(
+                    "updates.failures.title",
+                    "Some apps could not be checked"
+                ))
+                .into(),
+            );
             for (name, error) in &self.check_failures {
                 col.push(widget::text::body(format!("{name}: {error}")).into());
             }
@@ -2020,9 +2066,13 @@ impl App {
 
         if self.updates.is_empty() && self.check_failures.is_empty() && self.busy.is_none() {
             col.push(if self.library.is_empty() {
-                widget::text::body("No AppImages are integrated yet.").into()
+                widget::text::body(t!(
+                    "updates.none.integrated",
+                    "No AppImages are integrated yet."
+                ))
+                .into()
             } else {
-                widget::text::body("Everything is up to date.").into()
+                widget::text::body(t!("updates.uptodate", "Everything is up to date.")).into()
             });
         }
 
@@ -2060,7 +2110,7 @@ impl App {
                         .spacing(2)
                         .into(),
                         widget::horizontal_space(Length::Fill).into(),
-                        widget::button::suggested("Update")
+                        widget::button::suggested(t!("action.update", "Update"))
                             .on_press(Message::UpdateOne(offer.uuid.clone()))
                             .into(),
                     ])
@@ -2076,9 +2126,9 @@ impl App {
 
     fn view_tasks(&self) -> Element<'_, Message> {
         let mut col: Vec<Element<Message>> = vec![widget::row::with_children(vec![
-            widget::text::title3("Tasks").into(),
+            widget::text::title3(t!("nav.tasks", "Tasks")).into(),
             widget::horizontal_space(Length::Fill).into(),
-            widget::button::standard("Clear finished")
+            widget::button::standard(t!("tasks.clear", "Clear finished"))
                 .on_press(Message::ClearFinishedTasks)
                 .into(),
         ])
@@ -2086,7 +2136,7 @@ impl App {
         .into()];
 
         if self.tasks.is_empty() {
-            col.push(widget::text::body("Nothing has run yet.").into());
+            col.push(widget::text::body(t!("tasks.empty", "Nothing has run yet.")).into());
         }
         for task in &self.tasks {
             let state = match task.state {
@@ -2122,34 +2172,49 @@ impl App {
     fn view_settings(&self) -> Element<'_, Message> {
         let settings_snapshot = self.with_controller(|c| SettingsSnapshot::read(c));
         let appearance_row = widget::row::with_children(vec![
-            widget::button::standard("System")
+            widget::button::standard(t!("appearance.system", "System"))
                 .on_press(Message::AppearanceSelected(Appearance::System))
                 .into(),
-            widget::button::standard("Light")
+            widget::button::standard(t!("appearance.light", "Light"))
                 .on_press(Message::AppearanceSelected(Appearance::Light))
                 .into(),
-            widget::button::standard("Dark")
+            widget::button::standard(t!("appearance.dark", "Dark"))
                 .on_press(Message::AppearanceSelected(Appearance::Dark))
                 .into(),
-            widget::text::body(format!("Current: {}", appearance_name(self.appearance))).into(),
+            widget::text::body(format!(
+                "{} {}",
+                t!("settings.appearance.current", "Current:"),
+                t!(
+                    match self.appearance {
+                        Appearance::System => "appearance.system",
+                        Appearance::Light => "appearance.light",
+                        Appearance::Dark => "appearance.dark",
+                    },
+                    appearance_name(self.appearance)
+                )
+            ))
+            .into(),
         ])
         .spacing(8);
 
         let col = widget::column::with_children(vec![
-            widget::text::title3("Settings").into(),
+            widget::text::title3(t!("nav.settings", "Settings")).into(),
             widget::settings::section()
-                .title("Appearance")
+                .title(t!("settings.appearance", "Appearance"))
                 .add(appearance_row)
                 .into(),
             widget::settings::section()
-                .title("Integration folder")
+                .title(t!("settings.folder", "Integration folder"))
                 .add(
                     widget::row::with_children(vec![
-                        widget::text_input("Managed folder", &self.managed_folder_input)
-                            .on_input(Message::ManagedFolderChanged)
-                            .on_submit(Message::ManagedFolderApply)
-                            .into(),
-                        widget::button::standard("Apply")
+                        widget::text_input(
+                            t!("settings.folder.placeholder", "Managed folder"),
+                            &self.managed_folder_input,
+                        )
+                        .on_input(Message::ManagedFolderChanged)
+                        .on_submit(Message::ManagedFolderApply)
+                        .into(),
+                        widget::button::standard(t!("action.apply", "Apply"))
                             .on_press(Message::ManagedFolderApply)
                             .into(),
                     ])
@@ -2157,11 +2222,14 @@ impl App {
                 )
                 .into(),
             widget::settings::section()
-                .title("Behaviour")
+                .title(t!("settings.behaviour", "Behaviour"))
                 // Each toggler carries its own label, so assistive technology
                 // announces what the switch is for.
                 .add(widget::settings::item(
-                    "Move the original into the library instead of copying",
+                    t!(
+                        "settings.movesource",
+                        "Move the original into the library instead of copying"
+                    ),
                     widget::toggler(
                         None,
                         settings_snapshot.move_source,
@@ -2169,7 +2237,10 @@ impl App {
                     ),
                 ))
                 .add(widget::settings::item(
-                    "Discover AppImages outside the managed folder",
+                    t!(
+                        "settings.outside",
+                        "Discover AppImages outside the managed folder"
+                    ),
                     widget::toggler(
                         None,
                         settings_snapshot.manage_outside_folder,
@@ -2177,7 +2248,10 @@ impl App {
                     ),
                 ))
                 .add(widget::settings::item(
-                    "Terminal apps: drop the .AppImage suffix from the name",
+                    t!(
+                        "settings.terminalsuffix",
+                        "Terminal apps: drop the .AppImage suffix from the name"
+                    ),
                     widget::toggler(
                         None,
                         settings_snapshot.terminal_omit_suffix,
@@ -2185,7 +2259,7 @@ impl App {
                     ),
                 ))
                 .add(widget::settings::item(
-                    "Verbose diagnostics",
+                    t!("settings.debug", "Verbose diagnostics"),
                     widget::toggler(
                         None,
                         settings_snapshot.debug_logging,
@@ -2194,9 +2268,12 @@ impl App {
                 ))
                 .into(),
             widget::settings::section()
-                .title("Update checks")
+                .title(t!("settings.updates", "Update checks"))
                 .add(widget::settings::item(
-                    "Check for updates in the background (notify only)",
+                    t!(
+                        "settings.background",
+                        "Check for updates in the background (notify only)"
+                    ),
                     widget::toggler(
                         None,
                         settings_snapshot.background_update_checks,
@@ -2204,28 +2281,33 @@ impl App {
                     ),
                 ))
                 .add(widget::settings::item(
-                    "Run those checks at login",
+                    t!("settings.autostart", "Run those checks at login"),
                     widget::toggler(None, self.autostart_present, Message::AutostartToggled),
                 ))
-                .add(widget::text::caption(
+                .add(widget::text::caption(t!(
+                    "settings.background.caption",
                     "Background checks only look at the update endpoints you configured, and \
-                         never download or apply anything.",
-                ))
+                         never download or apply anything."
+                )))
                 .into(),
             widget::settings::section()
-                .title("Unsafe extraction fallback")
+                .title(t!("settings.unsafe", "Unsafe extraction fallback"))
                 .add(widget::settings::item(
-                    "Run the AppImage to read its metadata when safe extraction fails",
+                    t!(
+                        "settings.unsafe.item",
+                        "Run the AppImage to read its metadata when safe extraction fails"
+                    ),
                     widget::toggler(
                         None,
                         settings_snapshot.unsafe_extraction_fallback,
                         Message::UnsafeFallbackToggled,
                     ),
                 ))
-                .add(widget::text::caption(
+                .add(widget::text::caption(t!(
+                    "settings.unsafe.caption",
                     "Off by default. This executes untrusted code, and each file still has to be \
-                     confirmed individually.",
-                ))
+                     confirmed individually."
+                )))
                 .into(),
         ])
         .spacing(12);
@@ -2235,31 +2317,41 @@ impl App {
     fn view_about(&self) -> Element<'_, Message> {
         widget::scrollable(
             widget::column::with_children(vec![
-            widget::text::title3("Gosh AppImage Manager").into(),
-            widget::text::body(format!("Version {}", limits::VERSION)).into(),
-            widget::text::body("Made by Gosh").into(),
-            widget::text::body(
+                // The product name is not translated.
+                widget::text::title3("Gosh AppImage Manager").into(),
+                widget::text::body(format!(
+                    "{} {}",
+                    t!("about.version", "Version"),
+                    limits::VERSION
+                ))
+                .into(),
+                widget::text::body(t!("about.byline", "Made by Gosh")).into(),
+                widget::text::body(t!(
+                "about.description",
                 "Native COSMIC Epoch application for safely inspecting, integrating, launching, \
-                 organizing, updating, and removing AppImages.",
-            )
-            .into(),
-            widget::text::body(
-                "Opening an AppImage never integrates or executes it. Updates are staged, \
-                 validated, and applied atomically with rollback.",
-            )
-            .into(),
-            widget::text::body(
-                "Behavioural reference: Gear Lever by Lorenzo Paderi. This is an independent \
-                 original implementation and is not endorsed by its authors.",
-            )
-            .into(),
-            widget::text::body(
+                 organizing, updating, and removing AppImages."
+            ))
+                .into(),
+                widget::text::body(t!(
+                    "about.safety",
+                    "Opening an AppImage never integrates or executes it. Updates are staged, \
+                 validated, and applied atomically with rollback."
+                ))
+                .into(),
+                widget::text::body(t!(
+                    "about.attribution",
+                    "Behavioural reference: Gear Lever by Lorenzo Paderi. This is an independent \
+                 original implementation and is not endorsed by its authors."
+                ))
+                .into(),
+                widget::text::body(t!(
+                "about.licence",
                 "Licensed under the GNU General Public License, version 3 or later. This program \
-                 comes with absolutely no warranty.",
-            )
-            .into(),
-            widget::text::body("No telemetry of any kind.").into(),
-        ])
+                 comes with absolutely no warranty."
+            ))
+                .into(),
+                widget::text::body(t!("about.telemetry", "No telemetry of any kind.")).into(),
+            ])
             .spacing(6),
         )
         .into()
@@ -2280,11 +2372,12 @@ impl App {
                          or replace the managed installation?"
                     ))
                     .primary_action(
-                        widget::button::suggested("Keep both")
+                        widget::button::suggested(t!("dialog.keepboth", "Keep both"))
                             .on_press(Message::IntegrateKeepBoth(path.clone())),
                     )
                     .tertiary_action(
-                        widget::button::standard("Cancel").on_press(Message::DialogDismiss),
+                        widget::button::standard(t!("action.cancel", "Cancel"))
+                            .on_press(Message::DialogDismiss),
                     );
                 // Replace is only offered when exactly one installation is
                 // implicated; the user no longer has to supply a UUID.
@@ -2330,7 +2423,8 @@ impl App {
                         .on_press(Message::RemoveConfirm),
                     )
                     .secondary_action(
-                        widget::button::standard("Cancel").on_press(Message::DialogDismiss),
+                        widget::button::standard(t!("action.cancel", "Cancel"))
+                            .on_press(Message::DialogDismiss),
                     )
                     .into()
             }
@@ -2343,9 +2437,13 @@ impl App {
                      separately, and background checks never use it.",
             )
             .primary_action(
-                widget::button::destructive("Enable").on_press(Message::UnsafeFallbackConfirm),
+                widget::button::destructive(t!("action.enable", "Enable"))
+                    .on_press(Message::UnsafeFallbackConfirm),
             )
-            .secondary_action(widget::button::standard("Keep off").on_press(Message::DialogDismiss))
+            .secondary_action(
+                widget::button::standard(t!("action.keepoff", "Keep off"))
+                    .on_press(Message::DialogDismiss),
+            )
             .into(),
             PendingDialog::UpdateForce { name, .. } => widget::dialog(format!("{name} is running"))
                 .body(
@@ -2353,11 +2451,12 @@ impl App {
                          make it behave unpredictably until it is restarted.",
                 )
                 .primary_action(
-                    widget::button::destructive("Update anyway")
+                    widget::button::destructive(t!("dialog.forceupdate", "Update anyway"))
                         .on_press(Message::UpdateForceConfirm),
                 )
                 .secondary_action(
-                    widget::button::standard("Cancel").on_press(Message::DialogDismiss),
+                    widget::button::standard(t!("action.cancel", "Cancel"))
+                        .on_press(Message::DialogDismiss),
                 )
                 .into(),
             PendingDialog::Adopt { path } => widget::dialog("Adopt this AppImage?")
@@ -2365,9 +2464,13 @@ impl App {
                     "{path} will be registered so it can be updated and removed here. Nothing on \
                      disk is changed, and its existing desktop entry is left alone."
                 ))
-                .primary_action(widget::button::suggested("Adopt").on_press(Message::AdoptConfirm))
+                .primary_action(
+                    widget::button::suggested(t!("action.adopt", "Adopt"))
+                        .on_press(Message::AdoptConfirm),
+                )
                 .secondary_action(
-                    widget::button::standard("Cancel").on_press(Message::DialogDismiss),
+                    widget::button::standard(t!("action.cancel", "Cancel"))
+                        .on_press(Message::DialogDismiss),
                 )
                 .into(),
         })

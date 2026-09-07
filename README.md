@@ -55,6 +55,10 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
+`tools/gui-smoke.sh` runs the GUI on a headless X server, captures each page
+and measures text contrast against the rendered pixels; it needs `xvfb`,
+`xdotool` and ImageMagick.
+
 `just` wraps the common flows: `just build`, `just build-gui`, `just test`,
 `just lint`, `just validate`, `just vendor <fbtools>`, `just flatpak-x86_64`,
 `just flatpak-aarch64`.
@@ -204,15 +208,12 @@ desktop entries, and icons are reused in place.
 ## Limitations
 
 - Zsync metadata is understood, but updates download the full file rather than applying a binary delta.
-- The GUI has not been visually verified on a running compositor. It compiles
-  and type-checks against libcosmic v0.12, and every operation behind it is
-  covered by tests, but no screenshots have been taken. See
-  `docs/verification.md`.
-- On X11/Xwayland the GUI panics before mapping a window (softbuffer 0.4.1
-  rejects the 32-bit visual libcosmic requests). Wayland, the primary target,
-  is unaffected.
-- Strings are English only. The AppStream metadata declares a gettext domain,
-  but no translation infrastructure exists yet.
+- The GUI has not been used on a real compositor. It renders, is driven and is
+  measured on a headless X server (`tools/gui-smoke.sh`), but window-manager
+  behaviour — minimum size, tiling, fractional scaling — is the compositor's
+  and there is none in that harness. See `docs/verification.md`.
+- Only English is shipped. The interface is fully localizable (see
+  `i18n/README.md`); no translations have been contributed yet.
 - A static/ftp source without version information reports "no version information" instead of guessing.
 - FTP is a legacy explicit option with an insecure-transport warning. Credentials in URLs are rejected.
 - Changing the managed folder away from `~/AppImages` in the Flatpak may require portal/document access for that path.

@@ -144,23 +144,32 @@ the previous implementation, showing the blow-up that made a hostile
 The replacement is linear and answers the 49-character case that used to run
 past three minutes in well under a second.
 
-## 7. Not verified
+## 7. Localizability
+
+```
+GOSHAIM_LOCALE_DIR=./i18n LC_ALL=qps cargo run --features gui
+```
+
+`qps` is a pseudolocale, not a language: every letter is accented and each
+string padded by about a third, so anything still in plain ASCII was never
+routed through the catalog and anything clipped is a layout that only fits
+English.
+
+Run against a rendered frame, it found four batches of strings that were
+still hard-coded -- the sort buttons, every `settings::item` label, the
+Inspect page's safety caption, and the About page's version line -- which
+reading the code had not. All are routed now. What remains in plain ASCII is
+what should: the product name, and file paths and versions, which are data.
+
+## 8. Not verified
 
 Stated plainly rather than implied:
 
-- **No visual pass.** The GUI compiles and type-checks, and the operations
-  behind it are covered by tests, but no screenshots have been taken and no
-  frame has been rendered. A manual pass on a COSMIC/Wayland session is still
-  outstanding.
-- **X11 is broken.** A private Xvfb seat showed the GUI panicking before
-  mapping any window:
-  `Visual 0x40 does not use softbuffer's pixel format and is unsupported`.
-  Visual `0x40` is a 32-bit TrueColor visual, chosen because libcosmic
-  requests a transparent window (`cosmic::app::Settings.transparent` defaults
-  to true and is `pub(crate)`, so application code cannot turn it off). The
-  pinned softbuffer 0.4.1 supports only 16/24-bit X11 visuals. Wayland — the
-  primary target — is unaffected. The Flatpak manifest still advertises
-  `--socket=fallback-x11`. Upstream fix required; no local workaround applied.
+- **No pass on a real compositor.** The GUI now renders, is driven, and is
+  measured on a headless X server (`tools/gui-smoke.sh`), but no one has used
+  it on a COSMIC/Wayland session. Window-manager behaviour — the minimum-size
+  hint, tiling, fractional scaling — is enforced by the compositor and there
+  is none here, so those remain unverified.
 - **No Flatpak build.** `flatpak-builder` is not installed here, so neither
   architecture was built and the packaged probes were not re-run. The manifest
   is unchanged by this work apart from what is noted in
@@ -172,7 +181,7 @@ Stated plainly rather than implied:
 - **No real AppImage was executed or integrated.** All fixtures are synthetic
   ELF files; the extraction tools are driven through the process seam.
 
-## 8. Findings
+## 9. Findings
 
 `AUDIT.md` records the end-to-end audit this work came out of: what was
 found, what was fixed, and what was deliberately not.
