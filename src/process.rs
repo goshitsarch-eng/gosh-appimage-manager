@@ -44,9 +44,23 @@ pub fn in_flatpak() -> bool {
 
 /// Resolve the argv actually spawned: host requests inside a sandbox go
 /// through arg-safe `flatpak-spawn --host` (no shell involved).
+///
+/// Environment pairs have to be forwarded explicitly with `--env=K=V`.
+/// Setting them on the child process sets them on `flatpak-spawn`, not on the
+/// program it starts on the host, so a user's custom variables were silently
+/// dropped in the Flatpak -- the only configuration we ship. Each pair is one
+/// argv element, so a value containing spaces or quotes needs no escaping and
+/// cannot be re-split.
 pub fn resolve_argv(req: &ProcessRequest) -> (String, Vec<String>) {
     if req.host && in_flatpak() {
-        let mut args = vec!["--host".to_string(), req.program.clone()];
+        let mut args = vec!["--host".to_string()];
+        for (key, value) in &req.env {
+            if key.is_empty() || key.contains('\0') || key.contains('=') || value.contains('\0') {
+                continue;
+            }
+            args.push(format!("--env={key}={value}"));
+        }
+        args.push(req.program.clone());
         args.extend(req.args.iter().cloned());
         ("flatpak-spawn".to_string(), args)
     } else {

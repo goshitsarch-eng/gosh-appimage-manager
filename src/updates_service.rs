@@ -142,6 +142,12 @@ impl<'a> UpdateService<'a> {
         if result.manager.is_empty() {
             result.manager = source.name().to_string();
         }
+        // Say plainly when nothing will verify the payload beyond its being a
+        // well-formed AppImage of the right architecture. This flag existed on
+        // both UpdateCheckResult and UpdateOffer and was never set by anything,
+        // so the "reduced verification" state the brief requires was never
+        // reachable, let alone shown.
+        result.reduced_verification = result.ok && parse_expected_sha256(&result.digest).is_none();
         result
     }
 
@@ -219,6 +225,7 @@ impl<'a> UpdateService<'a> {
                 download_size: checked.size,
                 digest: checked.digest.clone(),
                 reduced_verification: checked.reduced_verification,
+                digest_algo: checked.digest_algo.clone(),
                 embedded_source: app.embedded_update.clone(),
                 running,
             });
@@ -390,6 +397,7 @@ impl<'a> UpdateService<'a> {
         updated.available_size = 0;
         updated.update_available = false;
         updated.digest = checked.digest.clone();
+        updated.reduced_verification = checked.reduced_verification;
         updated.size = fs::metadata(&live)
             .map(|m| m.len() as i64)
             .unwrap_or(app.size);

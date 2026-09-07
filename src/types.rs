@@ -364,7 +364,10 @@ pub struct UpdateOffer {
     pub url: String,
     pub download_size: i64,
     pub digest: String,
+    /// True when nothing beyond AppImage/architecture validation will check
+    /// the downloaded payload -- no usable digest was advertised.
     pub reduced_verification: bool,
+    pub digest_algo: String,
     pub embedded_source: String,
     pub running: bool,
 }

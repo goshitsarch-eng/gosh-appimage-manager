@@ -147,15 +147,111 @@ impl<'a> AppImageInspector<'a> {
             }
         }
 
-        // The unsafe fallback stays off unless explicitly enabled AND
-        // confirmed for this exact file. This path never executes.
-        if options.allow_unsafe_extract && options.confirm_unsafe_extract {
+        // The unsafe fallback: run the AppImage's own `--appimage-extract`.
+        //
+        // This executes untrusted code, so it is reached only when metadata
+        // extraction failed *and* the setting is on *and* this exact file was
+        // confirmed. It is never used by tests or background flows, because
+        // neither sets confirm_unsafe_extract.
+        //
+        // Previously this branch only pushed a warning claiming code was being
+        // executed, while nothing ran: the setting, the confirmation dialog and
+        // the "proof of no execution" probe all pointed at a feature that did
+        // not exist, and the warning text was untrue.
+        let need_fallback = result.metadata.name.is_empty() && result.extraction_attempted;
+        if need_fallback && options.allow_unsafe_extract && options.confirm_unsafe_extract {
             result.warnings.push(
-                "Unsafe extraction fallback is enabled for this file; executing untrusted code"
+                "Unsafe extraction fallback used for this file: the AppImage was executed to \
+                 read its own metadata"
+                    .to_string(),
+            );
+            match self.extract_via_appimage(fs_path) {
+                Ok(metadata) => {
+                    result.extraction_used_unsafe_fallback = true;
+                    result.extractor_used = "--appimage-extract".to_string();
+                    if !metadata.extracted_icon_path.is_empty() {
+                        result.icon_staging_dir = Path::new(&metadata.extracted_icon_path)
+                            .parent()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                    }
+                    result.metadata = metadata;
+                }
+                Err(error) => result
+                    .warnings
+                    .push(format!("Unsafe extraction fallback failed: {error}")),
+            }
+        } else if need_fallback && options.allow_unsafe_extract {
+            result.warnings.push(
+                "Metadata could not be read safely. The unsafe fallback is enabled but needs \
+                 per-file confirmation."
                     .to_string(),
             );
         }
         result
+    }
+
+    /// Last resort: ask the AppImage to unpack itself.
+    ///
+    /// This runs the untrusted binary. Callers gate it behind an opt-in
+    /// setting plus a per-file confirmation; nothing here decides that.
+    /// The process is bounded by the extractor timeout and runs with its
+    /// working directory inside a private mode-0700 temp directory, so
+    /// whatever it writes lands there.
+    fn extract_via_appimage(&self, path: &Path) -> Result<AppImageMetadata, String> {
+        let work_parent = std::env::temp_dir().join("gosh-appimage-manager");
+        let work = safe_fs::private_temp_dir(&work_parent, "unsafe-")?;
+        let outcome = (|| {
+            let out = self.runner.run(&ProcessRequest {
+                program: safe_fs::argv_safe_path(path),
+                args: vec!["--appimage-extract".to_string()],
+                work_dir: work.to_string_lossy().into_owned(),
+                timeout_ms: limits::EXTRACT_TIMEOUT_MS,
+                ..Default::default()
+            });
+            if out.refused || out.timed_out || out.exit_code != 0 {
+                return Err(format!(
+                    "self-extraction failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+            }
+            // The AppImage runtime unpacks into ./squashfs-root.
+            let root = work.join("squashfs-root");
+            if !root.is_dir() {
+                return Err("self-extraction produced no squashfs-root".to_string());
+            }
+            let desktop_file = find_desktop_in(&root)
+                .ok_or_else(|| "no desktop entry in the extracted tree".to_string())?;
+            let bytes = fs::read(&desktop_file).map_err(|e| e.to_string())?;
+            if bytes.len() > limits::MAX_DESKTOP_FILE_BYTES {
+                return Err("desktop entry exceeds size bound".to_string());
+            }
+            let file = desktop::parse_desktop_bytes(&bytes)
+                .map_err(|e| format!("cannot parse desktop entry: {e}"))?;
+            let mut metadata = metadata_from_desktop(&file);
+            // Stage the icon the same way the safe path does.
+            if let Some((source, ext)) = find_icon_in(&root, &metadata.icon_name) {
+                let stage = safe_fs::private_temp_dir(&work_parent, "icon-")?;
+                let dest = stage.join(format!("icon.{ext}"));
+                match safe_fs::copy_bounded(
+                    &source,
+                    &dest,
+                    limits::MAX_ICON_BYTES,
+                    &AtomicBool::new(false),
+                ) {
+                    Ok(_) => {
+                        metadata.extracted_icon_path = dest.to_string_lossy().into_owned();
+                        metadata.icon_format = ext;
+                    }
+                    Err(_) => {
+                        let _ = safe_fs::remove_dir_no_follow(&stage);
+                    }
+                }
+            }
+            Ok(metadata)
+        })();
+        let _ = safe_fs::remove_dir_no_follow(&work);
+        outcome
     }
 
     /// Best-effort metadata extraction via pinned helper tools.
@@ -200,26 +296,7 @@ impl<'a> AppImageInspector<'a> {
             let desktop_bytes = staged.get(&desktop_member).cloned().unwrap_or_default();
             let file = desktop::parse_desktop_bytes(&desktop_bytes)
                 .map_err(|e| format!("Cannot parse desktop entry: {e}"))?;
-            let mut metadata = AppImageMetadata {
-                name: desktop::unescape_entry_value(file.entry("Name"))
-                    .chars()
-                    .take(limits::MAX_NAME_LENGTH)
-                    .collect(),
-                version: desktop::unescape_entry_value(file.entry("X-AppImage-Version")),
-                comment: desktop::unescape_entry_value(file.entry("Comment")),
-                icon_name: desktop::sanitize_icon_name(file.entry("Icon")),
-                exec_raw: file.entry("Exec").to_string(),
-                ..Default::default()
-            };
-            metadata.try_exec = file.entry("TryExec").to_string();
-            metadata.terminal = file.entry("Terminal") == "true";
-            metadata.website = file.entry("Url").to_string();
-            metadata.startup_wm_class = file.entry("StartupWMClass").to_string();
-            // Desktop fields the entry we write should carry over.
-            metadata.categories = split_desktop_list(file.entry("Categories"));
-            metadata.mime_types = split_desktop_list(file.entry("MimeType"));
-            metadata.exec_arguments = exec_arguments(file.entry("Exec"));
-            metadata.actions = parse_desktop_actions(&file);
+            let mut metadata = metadata_from_desktop(&file);
 
             // Icon: prefer the referenced icon, fall back to .DirIcon. The
             // bytes have to outlive `work`, which is removed on the way out,
@@ -402,6 +479,57 @@ impl<'a> AppImageInspector<'a> {
         }
         Ok(collected)
     }
+}
+
+/// Build metadata from a parsed desktop entry (shared by both extract paths).
+fn metadata_from_desktop(file: &desktop::DesktopFile) -> AppImageMetadata {
+    let mut metadata = AppImageMetadata {
+        name: desktop::unescape_entry_value(file.entry("Name"))
+            .chars()
+            .take(limits::MAX_NAME_LENGTH)
+            .collect(),
+        version: desktop::unescape_entry_value(file.entry("X-AppImage-Version")),
+        comment: desktop::unescape_entry_value(file.entry("Comment")),
+        icon_name: desktop::sanitize_icon_name(file.entry("Icon")),
+        exec_raw: file.entry("Exec").to_string(),
+        ..Default::default()
+    };
+    metadata.try_exec = file.entry("TryExec").to_string();
+    metadata.terminal = file.entry("Terminal") == "true";
+    metadata.website = file.entry("Url").to_string();
+    metadata.startup_wm_class = file.entry("StartupWMClass").to_string();
+    metadata.categories = split_desktop_list(file.entry("Categories"));
+    metadata.mime_types = split_desktop_list(file.entry("MimeType"));
+    metadata.exec_arguments = exec_arguments(file.entry("Exec"));
+    metadata.actions = parse_desktop_actions(file);
+    metadata
+}
+
+/// Top-level `*.desktop` in a self-extracted tree.
+fn find_desktop_in(root: &Path) -> Option<std::path::PathBuf> {
+    let entries = fs::read_dir(root).ok()?;
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.is_file() && p.extension().is_some_and(|e| e == "desktop"))
+}
+
+/// The referenced icon, or `.DirIcon`, in a self-extracted tree.
+fn find_icon_in(root: &Path, icon_name: &str) -> Option<(std::path::PathBuf, String)> {
+    if !icon_name.is_empty() {
+        for ext in ["png", "svg", "xpm"] {
+            let candidate = root.join(format!("{icon_name}.{ext}"));
+            if candidate.is_file() {
+                return Some((candidate, ext.to_string()));
+            }
+        }
+    }
+    let dir_icon = root.join(".DirIcon");
+    if dir_icon.is_file() {
+        let bytes = fs::read(&dir_icon).ok()?;
+        return Some((dir_icon, sniff_icon_extension(&bytes)));
+    }
+    None
 }
 
 /// Remove leftover work and icon-staging directories older than an hour.
