@@ -128,7 +128,7 @@ Status: `open` / `fixed` / `wontfix`.
 | P-5 | M | Syscalls in lookup | `src/registry.rs:438-451` | `by_path` calls `canonical_bounded` (an `lstat`, plus `readlink` hops) for **every** registry row on **every** lookup. | `library.rs:47-65` calls it once per discovered file → O(files × apps) syscalls per scan; `cli.rs:407,519` and `gui.rs:186` call it on hot paths. | **fixed** |
 | P-6 | M | I/O in the render path | `src/gui.rs:952-960` | `view_settings` calls `self.controller.autostart_desktop_path().exists()` while building the widget tree. | A filesystem `stat` on every frame the Settings page is visible. | **fixed** |
 | P-7 | L | Redundant hashing / copying | `src/updates_service.rs:218,249-252`; `src/integration.rs:293,302,316` | The update path `fs::copy`s the whole live AppImage as a backup, then re-hashes the file it just wrote from an in-memory buffer. Replace-integration makes up to three full copies. | On a 1 GB AppImage: one extra full read+write for the backup and one extra full read for the hash. A hard link would serve as the backup, and the buffer is already in memory. | **fixed** |
-| P-8 | L | Repeated /proc scans | `src/cli.rs:182-186`; `src/gui.rs:157-162` | `is_running` is called once per app; each call enumerates all of `/proc` and `readlink`s every `/proc/<pid>/exe`. | O(apps × processes) `readlink` calls per `--list-installed` or library refresh. | open |
+| P-8 | L | Repeated /proc scans | `src/cli.rs:182-186`; `src/gui.rs:157-162` | `is_running` is called once per app; each call enumerates all of `/proc` and `readlink`s every `/proc/<pid>/exe`. | O(apps × processes) `readlink` calls per `--list-installed` or library refresh. | **fixed** |
 | P-9 | L | Unbounded reader join | `src/process.rs:188-206` | After a timeout kill, the code unconditionally `join()`s the stdout/stderr reader threads. A grandchild holding the pipe write end keeps them blocked. | The 30 s extraction timeout can be defeated, hanging the caller (which is the UI thread — see P-1). | **fixed** |
 | L-1 | L | Baseline | `src/updates_sources.rs:616` | `clippy::nonminimal_bool`: `!(host.contains('.') && !host.starts_with('.'))`. | `cargo clippy --all-targets -- -D warnings` fails on the toolchain here; `docs/verification.md:44-48` claims it is clean. | **fixed** |
 | L-2 | L | Build | `Cargo.toml:50-51` | The `[patch]` on `cosmic-text` cannot resolve without the crates.io index, so `cargo build --offline` fails even for the CLI-only build. | Offline/air-gapped builds are impossible despite the Flatpak module using `CARGO_NET_OFFLINE=true`. | not fixed |
@@ -236,24 +236,24 @@ apply. README:2 and `metainfo.xml` also claim Plasma-native behaviour; the
 COSMIC toolkit does not provide Plasma integration, so that claim is assessed
 against freedesktop specs only.
 
-| ID | Sev | Area | Location | Finding |
-|---|---|---|---|---|
-| G-1 | H | State coverage | `src/gui.rs` (all five views) | **No loading state exists anywhere**, and cannot: every operation is synchronous (**P-1**), so the frame that would show a spinner never renders. Inspect, Updates, and Update-all all freeze instead. |
-| G-2 | H | State coverage | `gui.rs:874-876` | **No error state on the Updates page.** `list_updates` swallows every per-app failure (**C-6**), so a failed check renders the success copy "Everything is up to date." No offline state, no permission-denied state, no per-row failure indicator. |
-| G-3 | H | Component usage | `gui.rs:713-726,1045-1124` | `widget::dialog` is composed into a `column` **below the page body**, not presented as a modal layer. libcosmic dialogs are meant to be shown via the application's dialog surface. Consequences: no scrim, no focus trap, no `Esc` to dismiss, and every control behind the "dialog" stays live — a destructive confirmation that does not actually block the action it guards. The user may also have to scroll to reach it. |
-| G-4 | M | Accessibility | `gui.rs:940,945-950,954-959,969-974` | `widget::toggler(None, …)` passes no label. The visible text is a sibling `text::body` with no programmatic association, so assistive technology announces four unlabelled switches. |
-| G-5 | M | Accessibility | `gui.rs:816-818,714` | Errors and successes share one undifferentiated `text::body` / `text::caption` sink (`self.status`). No role, no live region, no severity styling — an error is typographically identical to "Integrated …", and it is never cleared. |
-| G-6 | M | Layout / responsive | `gui.rs:25`, `metainfo.xml` `<display_length compare="ge">360</display_length>` | The window is created at 1024×768 with **no minimum size**. Library rows and the Updates header are fixed `row::with_children` with no wrapping or breakpoint, so at narrow widths the three action buttons and the "Check now / Update all / Cancel" cluster overflow. The AppStream metadata advertises usability at 360 px; nothing in the code supports it. |
-| G-7 | M | Platform integration | `gui.rs` (no `key_binds`, no menu) | No menu bar, no keyboard shortcuts, no accelerators — not even `Ctrl+Q`, `Ctrl+O` for the Inspect browse action, `F5`/`Ctrl+R` for refresh, or `Delete` on a library row. Brief §12 requires "keyboard reachable actions and predictable focus". |
-| G-8 | M | Platform integration | `gui.rs:170-177`, `init` (line 303-353) | Appearance is applied **only** in response to `AppearanceSelected`. `init` never calls `apply_appearance()`, so a saved Light/Dark preference is not applied at startup — contradicting README:95 ("applied live with no restart") for the restart case. |
-| G-9 | M | Platform integration | `packaging/…yml:10` vs `docs/verification.md:180-202` | The manifest ships `--socket=fallback-x11`, but the project's own verification record documents a reproducible panic before any window is mapped on X11/Xwayland (softbuffer 0.4.1 rejects the 32-bit visual libcosmic requests). The manifest advertises a session type the app cannot start in. |
-| G-10 | M | Localization / RTL | `metainfo.xml` `<translation type="gettext">`; all of `gui.rs` | Translation infrastructure is advertised but absent (no `.po`, no gettext, no lookup calls). All strings are hardcoded English literals; there is no RTL consideration. |
-| G-11 | L | Consistency / terminology | `gui.rs:571-608,943-959` | Two separate toggles — "Background update checks (notify only)" and "Session autostart for background checks" — write overlapping state: `AutostartToggled` also sets `background_update_checks`. One reads the setting, the other reads a file's existence. The relationship is unexplained and the two can disagree. |
-| G-12 | L | Component usage | `gui.rs:825-827` | The Inspect page's primary action is `Message::IntegrateDismiss` — the *integrate* action carries a "dismiss" name. Cosmetic, but it is the kind of naming that produces the next wiring bug. |
-| G-13 | L | Consistency | `gui.rs:993` | The update-source editor accepts multi-line `key=value` input through a single-line `text_input`; `parse_config_lines` (line 1144-1156) splits on `\n`, which that widget cannot produce. Only one pair can ever be entered. |
-| G-14 | L | Consistency | `gui.rs:764-792` | Library rows expose Launch / Trash / Delete only. Brief §2.3's detail page — reveal in file manager, edit arguments, edit environment, refresh metadata, per-item update source, hash/type/arch/size/provenance — has no UI at all. |
-| G-15 | L | Virtualization | `gui.rs:764-793` | Every library row is materialised on every frame inside a `scrollable`; no virtualization. Acceptable at realistic library sizes, noted for completeness. |
-| G-16 | L | Motion / text scaling | `src/gui.rs` | No `prefers-reduced-motion` equivalent is consulted (libcosmic supplies little animation here, so impact is low) and no explicit text-scaling handling; layout uses fixed `spacing(8)`/`padding(16)` constants throughout rather than a spacing scale. |
+| ID | Sev | Area | Location | Finding | Status |
+|---|---|---|---|---|---|
+| G-1 | H | State coverage | `src/gui.rs` (all five views) | **No loading state exists anywhere**, and cannot: every operation is synchronous (**P-1**), so the frame that would show a spinner never renders. Inspect, Updates, and Update-all all freeze instead. | **fixed** |
+| G-2 | H | State coverage | `gui.rs:874-876` | **No error state on the Updates page.** `list_updates` swallows every per-app failure (**C-6**), so a failed check renders the success copy "Everything is up to date." No offline state, no permission-denied state, no per-row failure indicator. | **fixed** |
+| G-3 | H | Component usage | `gui.rs:713-726,1045-1124` | `widget::dialog` is composed into a `column` **below the page body**, not presented as a modal layer. libcosmic dialogs are meant to be shown via the application's dialog surface. Consequences: no scrim, no focus trap, no `Esc` to dismiss, and every control behind the "dialog" stays live — a destructive confirmation that does not actually block the action it guards. The user may also have to scroll to reach it. | **fixed** |
+| G-4 | M | Accessibility | `gui.rs:940,945-950,954-959,969-974` | `widget::toggler(None, …)` passes no label. The visible text is a sibling `text::body` with no programmatic association, so assistive technology announces four unlabelled switches. | **fixed** |
+| G-5 | M | Accessibility | `gui.rs:816-818,714` | Errors and successes share one undifferentiated `text::body` / `text::caption` sink (`self.status`). No role, no live region, no severity styling — an error is typographically identical to "Integrated …", and it is never cleared. | **fixed** |
+| G-6 | M | Layout / responsive | `gui.rs:25`, `metainfo.xml` `<display_length compare="ge">360</display_length>` | The window is created at 1024×768 with **no minimum size**. Library rows and the Updates header are fixed `row::with_children` with no wrapping or breakpoint, so at narrow widths the three action buttons and the "Check now / Update all / Cancel" cluster overflow. The AppStream metadata advertises usability at 360 px; nothing in the code supports it. | **fixed** |
+| G-7 | M | Platform integration | `gui.rs` (no `key_binds`, no menu) | No menu bar, no keyboard shortcuts, no accelerators — not even `Ctrl+Q`, `Ctrl+O` for the Inspect browse action, `F5`/`Ctrl+R` for refresh, or `Delete` on a library row. Brief §12 requires "keyboard reachable actions and predictable focus". | **fixed** |
+| G-8 | M | Platform integration | `gui.rs:170-177`, `init` (line 303-353) | Appearance is applied **only** in response to `AppearanceSelected`. `init` never calls `apply_appearance()`, so a saved Light/Dark preference is not applied at startup — contradicting README:95 ("applied live with no restart") for the restart case. | **fixed** |
+| G-9 | M | Platform integration | `packaging/…yml:10` vs `docs/verification.md:180-202` | The manifest ships `--socket=fallback-x11`, but the project's own verification record documents a reproducible panic before any window is mapped on X11/Xwayland (softbuffer 0.4.1 rejects the 32-bit visual libcosmic requests). The manifest advertises a session type the app cannot start in. | not fixed |
+| G-10 | M | Localization / RTL | `metainfo.xml` `<translation type="gettext">`; all of `gui.rs` | Translation infrastructure is advertised but absent (no `.po`, no gettext, no lookup calls). All strings are hardcoded English literals; there is no RTL consideration. | partly fixed |
+| G-11 | L | Consistency / terminology | `gui.rs:571-608,943-959` | Two separate toggles — "Background update checks (notify only)" and "Session autostart for background checks" — write overlapping state: `AutostartToggled` also sets `background_update_checks`. One reads the setting, the other reads a file's existence. The relationship is unexplained and the two can disagree. | **fixed** |
+| G-12 | L | Component usage | `gui.rs:825-827` | The Inspect page's primary action is `Message::IntegrateDismiss` — the *integrate* action carries a "dismiss" name. Cosmetic, but it is the kind of naming that produces the next wiring bug. | **fixed** |
+| G-13 | L | Consistency | `gui.rs:993` | The update-source editor accepts multi-line `key=value` input through a single-line `text_input`; `parse_config_lines` (line 1144-1156) splits on `\n`, which that widget cannot produce. Only one pair can ever be entered. | **fixed** |
+| G-14 | L | Consistency | `gui.rs:764-792` | Library rows expose Launch / Trash / Delete only. Brief §2.3's detail page — reveal in file manager, edit arguments, edit environment, refresh metadata, per-item update source, hash/type/arch/size/provenance — has no UI at all. | **fixed** |
+| G-15 | L | Virtualization | `gui.rs:764-793` | Every library row is materialised on every frame inside a `scrollable`; no virtualization. Acceptable at realistic library sizes, noted for completeness. | not fixed |
+| G-16 | L | Motion / text scaling | `src/gui.rs` | No `prefers-reduced-motion` equivalent is consulted (libcosmic supplies little animation here, so impact is low) and no explicit text-scaling handling; layout uses fixed `spacing(8)`/`padding(16)` constants throughout rather than a spacing scale. | not fixed |
 
 **Not assessed:** contrast ratios and visible focus rings are supplied by
 libcosmic's own `Theme` and were not overridden anywhere in `gui.rs`; verifying
@@ -287,45 +287,91 @@ scale (tens of apps), and its absence is not counted as a finding.
 
 ---
 
-## Fix order
+---
 
-Security-critical first, then correctness, then unwired features, then
-performance, then GUI conformance — as instructed. Within each band, ordered by
-severity then blast radius.
+## Fixes applied
 
-1. **S-4** glob_match exponential blow-up (measured DoS, reachable from a hostile AppImage through the background checker)
-2. **S-5** archive-member option injection into `7zz`/`unsquashfs`
-3. **S-1 / S-9** SSRF: validate the *resolved* address; close the IPv4-mapped / NAT64 / CGNAT / trailing-dot gaps
-4. **S-2 / S-3** SSRF and downgrade across redirects on all three client methods
-5. **S-6** `mkdir_0700` accepting hostile pre-existing paths
-6. **S-7** digest format (`sha256:` prefix) and the md5-as-sha256 fallback
-7. **S-8** architecture compatibility on update
-8. **S-10** zombie processes from `mem::forget`
-9. **S-12** unbounded in-memory download
-10. **S-14** registry/data-dir modes
-11. **C-1** incomplete integration rollback (measured)
-12. **C-2** no-argument CLI hang (measured)
-13. **C-3** FTP protocol desync (measured)
-14. **C-4** update applies when versions match (measured)
-15. **C-5** `%` escaping in Exec
-16. **C-6 / C-7** update-check errors swallowed; GUI panic on controller failure
-17. **C-8 … C-13** remaining correctness items
-18. Unwired features — the Phase 3 "partially wired" and "stub" tables
-19. **P-1 … P-9** performance
-20. **G-1 … G-16** GUI conformance
+19 commits, each one logical fix with a message explaining the defect rather
+than the diff, and a regression test unless noted. Test count went from 79 to
+136 across 21 suites.
 
-### Items I will stop and ask about rather than guess
+| Commit | Findings | Test added |
+|---|---|---|
+| Bound asset-name glob matching in linear time | S-4 | `test_glob.rs` — timing ceiling plus 16 semantics cases |
+| Refuse archive members that extractors read as switches | S-5 | option-shaped members and `argv_safe_path` |
+| Guard the resolved address and every redirect hop | S-1, S-2, S-3, S-9 | `test_ssrf.rs` (real socket) + address-class matrix |
+| Verify an existing private directory instead of trusting its name | S-6 | symlink / file / 0777 squatting |
+| Make update payload verification actually verify | S-7, S-8 | digest formats, prefixed-digest apply, foreign-arch refusal |
+| Reap detached children and stop the timeout path hanging | S-10, P-9 | zombie count before/after 8 launches |
+| Stream update downloads to disk | S-12 | oversized refusal, no partial file, 0600, cancellation |
+| Restore the running-app guard under Flatpak, tighten registry modes | S-11, S-14 | host-lookup parsing and fail-safe |
+| Roll back the artifacts a failed integration created | C-1 | `test_rollback.rs` — 4 failure points, truthful report, replace restore |
+| Fix correctness defects across CLI, updates, desktop entries | C-2, C-4, C-5, C-6, C-7, C-8, C-11, C-12, C-13 | percent escaping, protected paths, same-version refusal, reported failures, non-mutating probe |
+| Fix the FTP client's off-by-one replies, pin its data connection | C-3, plus the local-network opt-in | `test_ftp.rs` — real RFC 959 server, multi-line greetings, bounce, hostile PASV |
+| Extract and install icons, carry the desktop metadata | icon/metadata/`refresh_desktop_db`/`terminal_omit_suffix` stubs | `test_icon.rs` — installed bytes, `.DirIcon` sniffing, staging lifetime, metadata carry-over |
+| Make external discovery and adoption reachable | `manage_outside_folder`, `library.scan`/`adopt` dead | `test_library.rs` — opt-in gating, own-entry exclusion, inert adoption |
+| Build the unsafe extraction fallback, forward env, report reduced verification | fallback stub, Flatpak env drop, `reduced_verification` dead | gated execution and self-extraction metadata |
+| Stop rewriting the whole registry for every single-row change | P-4, P-5 | `test_registry_perf.rs` — measured, with correctness assertions |
+| Reuse HTTP clients per host and clear the lint gates | P-3, L-1, MSRV break | clippy gate itself |
+| Move GUI work off the drawing thread, build the missing screens | P-1, P-2, P-6, G-1…G-8, G-11…G-14, C-9, multi-file open | `test_detail.rs` + `cargo check/clippy --features gui` |
+| Report settings failures instead of discarding them | C-10 | `test_settings.rs` — corrupt, unreadable, absent, failed save |
+| Stop copying and re-reading whole AppImages needlessly | P-7 | backup survives the replacing rename |
+| Check which apps are running in one pass | P-8 | batch answer must equal per-app answer |
+| Stop tracking the ostree build repository | H-13 | n/a (23 MB of build output untracked) |
+| Correct the documentation to match what was verified | doc overstatements | n/a |
 
-These are product or architecture decisions, not defects with an obvious fix:
+### Verified fixes, not just asserted
 
-* **P-1 / P-2 / G-1 / G-3** — moving every operation off the UI thread means
-  introducing an async task layer and reworking `TaskQueue` into something the
-  GUI drives. That is an architectural change to the GUI's core loop.
-* **S-11** — restoring the running-app guard inside Flatpak requires either
-  `--share=pid` (a real sandbox weakening) or a host-side check via
-  `flatpak-spawn`. A permissions decision.
-* Unwired features (icon extraction, external discovery/adoption, the Tasks
-  page, the item detail page, multi-file import, drag-and-drop, localization,
-  the unsafe-extraction fallback) — these are unbuilt product scope, not bugs.
-  Deleting the dead scaffolding and honest documentation is one answer;
-  building them is another.
+Six findings were reproduced with a failing test *before* the fix and shown
+passing after: the glob blow-up (measured curve), the SSRF to loopback
+through an ordinary hostname (real socket), the orphaned AppImage and desktop
+entry after a failed integration, the FTP desync against a conformant server,
+the rejected-but-correct GitHub digest, and the accepted foreign-architecture
+update. Two were confirmed against the pre-fix code by reverting: the zombie
+leak (8 leaked, 8 reaped) and the rollback orphan.
+
+---
+
+## Not fixed, and why
+
+| ID | Finding | Reasoning |
+|---|---|---|
+| S-13 | `--talk-name=org.freedesktop.Flatpak` grants host command execution | Inherent to the design: launching an AppImage and trashing a file both require it, and no narrower portal exists for either. Removing it would break the app's primary function. Now stated in README rather than left implied. |
+| G-9 | Manifest advertises `--socket=fallback-x11` but the GUI panics on X11 | Upstream: libcosmic requests a transparent window via `Settings.transparent`, which is `pub(crate)`, and the pinned softbuffer 0.4.1 supports only 16/24-bit X11 visuals. Neither is reachable from application code. Dropping the socket would be a product decision about whether to advertise X11 at all — it is documented as a known limitation instead. |
+| G-10 | No localization | Partly fixed: the AppStream metadata no longer advertises a gettext domain that does not exist. Actually translating the application is new scope — it needs a string-extraction pass, a `.po` workflow, and RTL layout review — not a defect fix. |
+| G-15 | No list virtualization | Every row is materialised per frame. At realistic library sizes (tens of entries) this is not measurable, and the rows are `scrollable` children rather than a fixed viewport. Noted for completeness; would matter at hundreds. |
+| G-16 | No reduced-motion or explicit text-scaling handling | libcosmic supplies almost no animation on these screens, so reduced-motion has nothing to suppress. Text scaling is the toolkit's, and the layout uses relative units; verifying it properly needs a rendered frame, which this environment cannot produce. |
+| L-2 | `cargo build --offline` fails | **Not a defect.** Re-tested: it fails only against a cold registry cache, because the `cosmic-text` `[patch]` needs the index to resolve. With a populated cache — which is what the Flatpak build has via `cargo-sources.json` and `CARGO_NET_OFFLINE=true` — both `cargo build --offline` and `cargo check --offline --features gui` succeed. The original observation was an artifact of a fresh container. |
+| — | `models_ready()` returns a constant `true` | Left as-is and now documented in `docs/verification.md` as a placeholder that asserts nothing. Making `--self-test` meaningful here needs a decision about what readiness should mean for a CLI with no models; inventing one would be guessing. |
+| — | GitLab/Forgejo asset hosts are unrestricted | GitHub asset downloads are limited to `github.com` / `*.githubusercontent.com`; the other forges accept any HTTPS host their release JSON names. Self-hosted instances legitimately serve assets from arbitrary domains, so an allowlist would break real configurations. The URL guard, the resolved-address check and the redirect guard all still apply. Flagged as a deliberate asymmetry rather than silently equalised. |
+
+## Scope limits
+
+- **No rendered frame.** The GUI compiles and type-checks (`cargo check
+  --features gui` and `clippy --features gui --all-targets -- -D warnings`
+  both pass after installing `libwayland-dev` and `libxkbcommon-dev`), and
+  every operation behind it is covered by tests. No screenshot was taken and
+  no frame was drawn: this container has no compositor, and X11 is broken
+  upstream (G-9). Contrast ratios, focus rings and text scaling therefore
+  remain unverified rather than passed.
+- **No Flatpak build.** `flatpak-builder` is not installed here, so neither
+  architecture was rebuilt and the packaged probes were not re-run.
+- **No AppStream/desktop validation.** `desktop-file-validate` and
+  `appstreamcli` are absent. `data/com.goshapps.AppImageManager.desktop`
+  changed (`%U` → `%F`) and should be re-validated where those tools exist.
+
+## Final gate state
+
+```
+cargo build                                        ok
+cargo check --features gui                         ok
+cargo test                                         136 passed; 0 failed (21 suites)
+cargo clippy --all-targets -- -D warnings          ok
+cargo clippy --features gui --all-targets -D warnings  ok
+cargo fmt --check                                  clean
+cargo audit                                        0 vulnerabilities, 12 warnings (all GUI-only, unreachable from the CLI)
+--self-test                                        SELF_TEST_OK
+```
+
+Baseline for comparison: 79 tests, clippy failing, GUI unbuildable in this
+environment.
