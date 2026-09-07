@@ -18,6 +18,8 @@ const CLI_COMMANDS: &[&str] = &[
     "--list-update-managers",
     "--set-update-source",
     "--fetch-updates",
+    "--list-discovered",
+    "--adopt",
     "--probe-host",
     "--probe-inspect",
     "--probe-autostart",
@@ -39,6 +41,7 @@ fn print_help(stdout: &mut dyn Write) {
          gosh-appimage-manager [--update <path>|--all [--yes] [--force]]\n  \
          gosh-appimage-manager [--remove <path> [--yes] [--delete]] [--remove-all [--yes]]\n  \
          gosh-appimage-manager [--list-installed [--json]] [--list-updates [--json]]\n  \
+         gosh-appimage-manager [--list-discovered [--json]] [--adopt <path> [--yes]]\n  \
          gosh-appimage-manager [--list-update-managers] [--set-update-source <path> --manager <name> key=value... | --unset]\n  \
          gosh-appimage-manager [--fetch-updates] [--self-test]\n  \
          gosh-appimage-manager [--probe-host] [--probe-inspect <path>] [--probe-autostart]\n  \

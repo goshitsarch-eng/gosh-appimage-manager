@@ -270,6 +270,94 @@ pub fn run_cli(
         };
     }
 
+    if has_arg(args, "--list-discovered") {
+        // Discovery and adoption were fully implemented but reachable from no
+        // command and no UI, so external AppImages could never be adopted.
+        let discovered = controller.discover();
+        let mut items = Vec::new();
+        for app in &discovered {
+            if json {
+                let mut obj = serde_json::Map::new();
+                obj.insert("name".into(), serde_json::Value::String(app.name.clone()));
+                obj.insert("path".into(), serde_json::Value::String(app.path.clone()));
+                obj.insert("managed".into(), serde_json::Value::Bool(app.managed));
+                obj.insert("uuid".into(), serde_json::Value::String(app.uuid.clone()));
+                obj.insert(
+                    "origin".into(),
+                    serde_json::Value::String(
+                        match app.origin {
+                            crate::library::Origin::ManagedFolder => "managed-folder",
+                            crate::library::Origin::ExternalDesktopEntry => "external-entry",
+                        }
+                        .to_string(),
+                    ),
+                );
+                obj.insert(
+                    "desktop_path".into(),
+                    serde_json::Value::String(app.desktop_path.clone()),
+                );
+                items.push(obj);
+            } else {
+                let _ = writeln!(
+                    stdout,
+                    "{}\t{}\t{}",
+                    if app.managed { "managed" } else { "external" },
+                    app.name,
+                    app.path
+                );
+            }
+        }
+        return if json {
+            print_json("discovered", items, stdout)
+        } else {
+            ExitCode::Ok
+        };
+    }
+
+    if has_arg(args, "--adopt") {
+        let path = arg_value(args, "--adopt");
+        if path.is_empty() {
+            let _ = writeln!(stderr, "Usage: --adopt <path> [--yes]");
+            return ExitCode::Usage;
+        }
+        if !confirm(
+            &format!("Adopt {path}? (registers it; nothing on disk is changed)"),
+            yes,
+            interactive_tty,
+            stderr,
+            stdin,
+        ) {
+            return ExitCode::NeedsConfirmation;
+        }
+        // Validate it really is an AppImage before registering it. Adoption
+        // itself writes nothing but the registry row.
+        let inspected = controller.inspect_file(&path, &cancel, None);
+        if !inspected.magic_valid {
+            let _ = writeln!(
+                stderr,
+                "{}",
+                if inspected.error.is_empty() {
+                    "Not a valid AppImage".to_string()
+                } else {
+                    inspected.error.clone()
+                }
+            );
+            inspected.discard_staging();
+            return ExitCode::Validation;
+        }
+        inspected.discard_staging();
+        return match controller.adopt_external(&path) {
+            Ok(app) => {
+                let _ = writeln!(stderr, "Adopted {} as {}", app.managed_path, app.uuid);
+                ExitCode::Ok
+            }
+            Err(error) => {
+                let _ = writeln!(stderr, "{error}");
+                ExitCode::Failure
+            }
+        };
+    }
+
     if has_arg(args, "--integrate") {
         let path = arg_value(args, "--integrate");
         if path.is_empty() {

@@ -494,11 +494,21 @@ impl ManagedRegistry {
         self.save()
     }
 
-    /// Adopt an external desktop entry's target without rewriting anything.
+    /// Adopt an external AppImage: a registry row, and nothing else.
+    ///
+    /// `external` records whether the file lives outside the managed folder;
+    /// it used to be hardcoded true, which mislabelled adoptions of files
+    /// sitting in the managed folder itself.
+    ///
+    /// The row is marked owned so the app may manage it, and adopted so the
+    /// UI can say where it came from. No desktop entry or icon is written,
+    /// rewritten, or removed -- whatever integrated it before still owns
+    /// those, and removal only ever touches artifacts carrying our markers.
     pub fn adopt_external(
         &mut self,
         name: String,
         managed_path: String,
+        external: bool,
     ) -> Result<InstalledApp, String> {
         let mut app = InstalledApp::new_owned();
         app.uuid = Self::new_uuid();
@@ -510,7 +520,7 @@ impl ManagedRegistry {
         app.managed_path = managed_path;
         app.owned = true;
         app.adopted = true;
-        app.external_folder = true;
+        app.external_folder = external;
         self.upsert(app.clone())?;
         Ok(app)
     }

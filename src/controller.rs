@@ -178,6 +178,21 @@ impl AppController {
             .remove(&mut self.registry, req)
     }
 
+    /// Register an external AppImage without touching anything on disk.
+    ///
+    /// Borrow-safe facade: the library reads settings while the registry is
+    /// mutated, which the two `&self`/`&mut self` accessors cannot express.
+    pub fn adopt_external(&mut self, path: &str) -> Result<crate::types::InstalledApp, String> {
+        let library = AppImageLibrary::new(&self.settings);
+        library.adopt(&mut self.registry, path)
+    }
+
+    /// Discover AppImages in the managed folder, plus external ones when the
+    /// `manage_outside_folder` setting is on.
+    pub fn discover(&self) -> Vec<crate::library::DiscoveredApp> {
+        AppImageLibrary::new(&self.settings).scan(&self.registry)
+    }
+
     pub fn is_running(&self, app: &crate::types::InstalledApp) -> bool {
         LaunchService::new(&*self.runner, &*self.processes).is_running(app)
     }
