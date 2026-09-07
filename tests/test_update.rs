@@ -321,3 +321,130 @@ fn list_updates_json_schema() {
         assert!(updates[0].get(key).is_some(), "missing {key}");
     }
 }
+
+/// Audit finding S-7. GitHub returns `digest: "sha256:<hex>"`; the comparison
+/// was against the raw field, so a correctly digested asset failed every time.
+#[test]
+fn digest_formats_are_parsed_before_comparison() {
+    use goshaim_core::updates_service::parse_expected_sha256;
+    let hex = "a".repeat(64);
+    // GitHub's algorithm-prefixed form and GitLab's bare hex both verify.
+    assert_eq!(
+        parse_expected_sha256(&format!("sha256:{hex}")),
+        Some(hex.clone())
+    );
+    assert_eq!(
+        parse_expected_sha256(&format!("SHA256:{}", hex.to_uppercase())),
+        Some(hex.clone())
+    );
+    assert_eq!(parse_expected_sha256(&hex), Some(hex.clone()));
+    assert_eq!(
+        parse_expected_sha256(&format!("  sha256:{hex}  ")),
+        Some(hex.clone())
+    );
+    // Anything we cannot check must report that, not quietly pass.
+    assert_eq!(parse_expected_sha256(""), None);
+    assert_eq!(
+        parse_expected_sha256(&"a".repeat(32)),
+        None,
+        "an MD5 is not a SHA-256"
+    );
+    assert_eq!(
+        parse_expected_sha256(&format!("md5:{}", "a".repeat(32))),
+        None
+    );
+    assert_eq!(
+        parse_expected_sha256(&format!("sha512:{}", "a".repeat(128))),
+        None
+    );
+    assert_eq!(
+        parse_expected_sha256(&format!("sha256:{}", "z".repeat(64))),
+        None,
+        "non-hex"
+    );
+}
+
+/// The same finding, end to end: a real GitHub-shaped digest must now verify
+/// and let the update through.
+#[test]
+fn github_prefixed_digest_verifies_and_applies() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let live = common::write_fixture(h.tmp.path(), "V.AppImage");
+    let payload = goshaim_core::inspector::make_test_elf(
+        goshaim_core::types::Architecture::X86_64,
+        goshaim_core::types::AppImageType::Type2,
+    );
+    let real = {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(&payload))
+    };
+    let body = format!(
+        r#"{{"tag_name":"v2","assets":[{{"name":"app.AppImage","browser_download_url":"https://github.com/x/y/releases/download/v2/app.AppImage","size":128,"digest":"sha256:{real}"}}]}}"#
+    );
+    h.network.canned_body("api.github.com", body.as_bytes());
+    h.network
+        .canned_body("github.com/x/y/releases/download", &payload);
+
+    let app = seed_arch_app(&mut c, &live);
+    let result = c.apply_update(&app, false, &std::sync::atomic::AtomicBool::new(false));
+    assert!(
+        result.ok,
+        "correct digest must verify, got: {}",
+        result.error
+    );
+}
+
+/// Audit finding S-8. Parsing an architecture is not the same as being able to
+/// run it: an x86_64 install used to accept an aarch64 payload and break.
+#[test]
+fn foreign_architecture_update_is_refused() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let live = common::write_fixture(h.tmp.path(), "V.AppImage");
+    let before = std::fs::read(&live).unwrap();
+    let foreign = goshaim_core::inspector::make_test_elf(
+        goshaim_core::types::Architecture::AArch64,
+        goshaim_core::types::AppImageType::Type2,
+    );
+    let body = r#"{"tag_name":"v2","assets":[{"name":"app.AppImage","browser_download_url":"https://github.com/x/y/releases/download/v2/app.AppImage","size":128}]}"#;
+    h.network.canned_body("api.github.com", body.as_bytes());
+    h.network
+        .canned_body("github.com/x/y/releases/download", &foreign);
+
+    let app = seed_arch_app(&mut c, &live);
+    let result = c.apply_update(&app, false, &std::sync::atomic::AtomicBool::new(false));
+    assert!(
+        !result.ok,
+        "an aarch64 payload must not replace an x86_64 install"
+    );
+    assert!(
+        result.error.contains("aarch64") && result.error.contains("x86_64"),
+        "the error should name both architectures, got: {}",
+        result.error
+    );
+    assert_eq!(
+        std::fs::read(&live).unwrap(),
+        before,
+        "the working installation must be left untouched"
+    );
+}
+
+fn seed_arch_app(
+    c: &mut goshaim_core::controller::AppController,
+    live: &std::path::Path,
+) -> goshaim_core::types::InstalledApp {
+    let mut app = goshaim_core::types::InstalledApp::new_owned();
+    app.uuid = "arch-app".into();
+    app.name = "Victim".into();
+    app.version = "v1".into();
+    app.architecture = goshaim_core::types::Architecture::X86_64;
+    app.managed_path = live.to_string_lossy().into_owned();
+    app.update_manager = "github".into();
+    app.update_config.insert("username".into(), "x".into());
+    app.update_config.insert("repo".into(), "y".into());
+    app.update_config
+        .insert("filename".into(), "app.AppImage".into());
+    c.registry_mut().upsert(app.clone()).unwrap();
+    app
+}

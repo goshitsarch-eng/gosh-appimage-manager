@@ -23,6 +23,37 @@ use crate::updates_sources::{Config, UpdateCheckResult, UpdateSourceFactory};
 /// Resolved (manager, config) pair for one app.
 type ResolvedSource = (Box<dyn crate::updates_sources::UpdateSource>, Config);
 
+/// Extract a bare lowercase SHA-256 hex string from an advertised digest.
+///
+/// Forges do not agree on the encoding. GitHub's release API returns
+/// `"sha256:<hex>"`; GitLab's package files carry a bare hex `file_sha256`.
+/// The comparison used to be against the raw field, so every correctly
+/// digested GitHub asset failed verification -- and a GitLab `file_md5`
+/// fallback was compared as though it were SHA-256, which can never match
+/// either. Returns None when the value is absent or is not a SHA-256 we can
+/// check, so the caller can fail closed rather than skip verification.
+pub fn parse_expected_sha256(digest: &str) -> Option<String> {
+    let value = digest.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let hex_part = match value.split_once(':') {
+        Some((algo, rest)) => {
+            if !algo.eq_ignore_ascii_case("sha256") {
+                return None;
+            }
+            rest.trim()
+        }
+        None => value,
+    };
+    // A SHA-256 is 64 hex characters; anything else (an MD5, a truncated
+    // value, a base64 encoding) is not something we can verify.
+    if hex_part.len() != 64 || !hex_part.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(hex_part.to_ascii_lowercase())
+}
+
 pub struct UpdateService<'a> {
     settings: &'a SettingsStore,
     network: &'a dyn NetworkClient,
@@ -205,13 +236,43 @@ impl<'a> UpdateService<'a> {
             result.error = "Downloaded file is not a valid AppImage".to_string();
             return result;
         }
-        if !checked.digest.is_empty() {
+        // Architecture compatibility. Without this an x86_64 install could be
+        // replaced by an aarch64 payload and simply stop running; parsing an
+        // architecture is not the same as being able to execute it.
+        if !elf::architecture_supported(staged_info.architecture) {
+            let _ = fs::remove_file(&staging);
+            result.error = format!(
+                "Downloaded update is for an unsupported architecture: {}",
+                crate::types::architecture_name(staged_info.architecture)
+            );
+            return result;
+        }
+        if !matches!(app.architecture, crate::types::Architecture::Unknown)
+            && staged_info.architecture != app.architecture
+        {
+            let _ = fs::remove_file(&staging);
+            result.error = format!(
+                "Downloaded update is {} but the installed AppImage is {}",
+                crate::types::architecture_name(staged_info.architecture),
+                crate::types::architecture_name(app.architecture)
+            );
+            return result;
+        }
+        if let Some(expected) = parse_expected_sha256(&checked.digest) {
             let sum = safe_fs::sha256_file(&staging, cancel).unwrap_or_default();
-            if hex::encode(&sum) != checked.digest.to_lowercase() {
+            if hex::encode(&sum) != expected {
                 let _ = fs::remove_file(&staging);
                 result.error = "Staged update failed digest verification".to_string();
                 return result;
             }
+        } else if !checked.digest.is_empty() {
+            // A digest we cannot interpret must not silently count as verified.
+            let _ = fs::remove_file(&staging);
+            result.error = format!(
+                "Update advertised a digest this build cannot verify ({})",
+                checked.digest
+            );
+            return result;
         }
         // Rollback copy of the live file.
         let backup = safe_fs::sibling_temp(&live, ".gosh-upd-bak-");

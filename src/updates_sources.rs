@@ -606,12 +606,11 @@ impl GitlabSource {
                 pct(project),
                 fid
             );
+            // Only SHA-256 counts as a digest. `file_md5` used to be passed
+            // through here and then compared as if it were a SHA-256, which
+            // could never match; an unusable digest is worse than none,
+            // because it turns every update into a verification failure.
             let digest = json_string(file, "file_sha256");
-            let digest = if digest.is_empty() {
-                json_string(file, "file_md5")
-            } else {
-                digest
-            };
             return Some(UpdateCheckResult {
                 ok: true,
                 available: true,
