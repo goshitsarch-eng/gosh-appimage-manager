@@ -41,7 +41,7 @@ impl<'a> RemovalService<'a> {
         let out = self.runner.run(&ProcessRequest {
             program: "gio".to_string(),
             args: vec!["trash".to_string(), path.to_string()],
-            host: true,
+            host: crate::process::HostSpawn::Helper,
             timeout_ms: 10_000,
             ..Default::default()
         });

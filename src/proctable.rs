@@ -100,7 +100,7 @@ impl SysTable {
         let result = runner.run(&ProcessRequest {
             program: "pgrep".to_string(),
             args: vec!["-a".to_string(), "-f".to_string(), ".AppImage".to_string()],
-            host: true,
+            host: crate::process::HostSpawn::Helper,
             timeout_ms: 5_000,
             ..Default::default()
         });
@@ -167,7 +167,7 @@ impl SysTable {
         let result = runner.run(&ProcessRequest {
             program: "pgrep".to_string(),
             args: vec!["-x".to_string(), "-f".to_string(), executable.to_string()],
-            host: true,
+            host: crate::process::HostSpawn::Helper,
             timeout_ms: 5_000,
             ..Default::default()
         });

@@ -65,6 +65,16 @@ impl SharedRunner {
 
 impl ProcessRunner for SharedRunner {
     fn run(&self, req: &ProcessRequest) -> ProcessResult {
+        // Exercise the same host policy the real runner enforces, so tests
+        // cannot pass on a request production would refuse.
+        if let Err(error) = goshaim_core::process::host_spawn_permitted(req) {
+            return ProcessResult {
+                program: req.program.clone(),
+                refused: true,
+                stderr: error.into_bytes(),
+                ..Default::default()
+            };
+        }
         for hook in self.hooks.lock().unwrap().iter() {
             if let Some(result) = hook(req) {
                 return result;
@@ -90,6 +100,7 @@ impl ProcessRunner for SharedRunner {
     }
 
     fn start_detached(&self, req: &ProcessRequest) -> Result<(), String> {
+        goshaim_core::process::host_spawn_permitted(req)?;
         if *self.fail_start.lock().unwrap() {
             return Err("Cannot start: fake spawn failure".to_string());
         }

@@ -9,15 +9,91 @@ use std::time::Duration;
 
 use crate::limits;
 
+/// Whether a request may leave the sandbox, and as what.
+///
+/// The Flatpak manifest grants `--talk-name=org.freedesktop.Flatpak` so the
+/// manager can run an AppImage on the host. That grant is arbitrary host
+/// command execution, and it cannot be given up without giving up launching.
+/// What it *can* be given is a narrow definition of what is allowed through
+/// it, enforced at the one place every spawn passes: a fixed set of helper
+/// programs, plus AppImages the caller resolved from the registry. Anything
+/// else is refused before a process is created, so influencing a
+/// ProcessRequest is not enough to run something arbitrary on the host.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HostSpawn {
+    /// Stay inside the sandbox.
+    #[default]
+    No,
+    /// One of the fixed helper programs in `HOST_HELPERS`.
+    Helper,
+    /// An AppImage this application manages, named by absolute path.
+    ManagedAppImage,
+}
+
+/// Helper programs the manager is allowed to run on the host.
+///
+/// Each is here because a specific feature needs it: trashing a file the
+/// sandbox cannot reach, finding running applications in the host's PID
+/// namespace, opening a file manager, refreshing the desktop database, the
+/// NixOS AppImage shim, and the no-op used by `--probe-host`.
+pub const HOST_HELPERS: &[&str] = &[
+    "gio",
+    "pgrep",
+    "xdg-open",
+    "update-desktop-database",
+    "appimage-run",
+    "true",
+];
+
 #[derive(Debug, Clone, Default)]
 pub struct ProcessRequest {
     pub program: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
-    /// Run on the host via flatpak-spawn when sandboxed.
-    pub host: bool,
+    /// Whether this may run on the host via flatpak-spawn, and as what.
+    pub host: HostSpawn,
     pub timeout_ms: u64,
     pub work_dir: String,
+}
+
+/// Is this request allowed to run on the host at all?
+///
+/// Applied whether or not we are sandboxed, so the same rule is exercised in
+/// development and in the Flatpak rather than only in the configuration that
+/// is hardest to test.
+pub fn host_spawn_permitted(req: &ProcessRequest) -> Result<(), String> {
+    match req.host {
+        HostSpawn::No => Ok(()),
+        HostSpawn::Helper => {
+            if HOST_HELPERS.contains(&req.program.as_str()) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Refusing to run {} on the host: not a known helper",
+                    req.program
+                ))
+            }
+        }
+        HostSpawn::ManagedAppImage => {
+            let path = Path::new(&req.program);
+            if !path.is_absolute() {
+                return Err(format!(
+                    "Refusing to run {} on the host: managed applications are named by \
+                     absolute path",
+                    req.program
+                ));
+            }
+            // The caller resolved this from the registry; confirm it is still
+            // a real file rather than trusting the string it handed us.
+            match std::fs::metadata(path) {
+                Ok(meta) if meta.is_file() => Ok(()),
+                _ => Err(format!(
+                    "Refusing to run {} on the host: not a regular file",
+                    req.program
+                )),
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -52,7 +128,7 @@ pub fn in_flatpak() -> bool {
 /// argv element, so a value containing spaces or quotes needs no escaping and
 /// cannot be re-split.
 pub fn resolve_argv(req: &ProcessRequest) -> (String, Vec<String>) {
-    if req.host && in_flatpak() {
+    if req.host != HostSpawn::No && in_flatpak() {
         let mut args = vec!["--host".to_string()];
         for (key, value) in &req.env {
             if key.is_empty() || key.contains('\0') || key.contains('=') || value.contains('\0') {
@@ -86,6 +162,8 @@ impl SystemRunner {
         req: &ProcessRequest,
         detached: bool,
     ) -> Result<std::process::Child, String> {
+        // Enforce the host policy before anything is spawned.
+        host_spawn_permitted(req)?;
         let (program, args) = resolve_argv(req);
         if program.is_empty() || program.contains('\0') {
             return Err("Refused to run empty program".to_string());
@@ -316,6 +394,11 @@ impl ProcessRunner for FakeRunner {
             program: req.program.clone(),
             ..Default::default()
         };
+        if let Err(error) = host_spawn_permitted(req) {
+            result.refused = true;
+            result.stderr = error.into_bytes();
+            return result;
+        }
         for (key, (exit, out)) in &self.outputs {
             if req.program.contains(key) {
                 result.exit_code = *exit;
@@ -331,6 +414,7 @@ impl ProcessRunner for FakeRunner {
     }
 
     fn start_detached(&self, req: &ProcessRequest) -> Result<(), String> {
+        host_spawn_permitted(req)?;
         if self.fail_start {
             return Err("Cannot start: fake spawn failure".to_string());
         }

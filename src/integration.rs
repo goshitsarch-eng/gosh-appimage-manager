@@ -558,7 +558,7 @@ impl<'a> IntegrationService<'a> {
         let result = self.runner.run(&crate::process::ProcessRequest {
             program: "update-desktop-database".to_string(),
             args: vec![safe_fs::argv_safe_path(&self.settings.applications_dir())],
-            host: true,
+            host: crate::process::HostSpawn::Helper,
             timeout_ms: 10_000,
             ..Default::default()
         });

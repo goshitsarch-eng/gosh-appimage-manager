@@ -37,13 +37,15 @@ fn launch_records_argv_and_reports_start_only() {
 
     let h = Harness::new();
     let service = LaunchService::new(&h.runner, &h.table);
+    // A real file: the host policy refuses to launch a path that is not one.
+    let path = common::write_fixture(h.tmp.path(), "Demo.AppImage");
     let mut app = goshaim_core::types::InstalledApp::new_owned();
-    app.managed_path = "/tmp/Demo.AppImage".to_string();
+    app.managed_path = path.to_string_lossy().into_owned();
     app.arguments = vec!["--foo".to_string()];
     service.launch(&app).expect("launch");
     let spawned = h.runner.spawned.lock().unwrap();
     assert_eq!(spawned.len(), 1);
-    assert_eq!(spawned[0].0, "/tmp/Demo.AppImage");
+    assert_eq!(spawned[0].0, path.to_string_lossy());
     assert_eq!(spawned[0].1, vec!["--foo".to_string()]);
     // The fake returns at once: nothing waited, nothing killed.
 }
@@ -232,4 +234,80 @@ fn batch_running_check_agrees_with_the_per_app_check() {
 
     // And the empty case does not walk anything.
     assert!(c.running_uuids(&[]).is_empty());
+}
+
+/// Audit finding S-13. The Flatpak manifest grants
+/// `--talk-name=org.freedesktop.Flatpak` so an AppImage can be run on the
+/// host. That grant is arbitrary host command execution and cannot be given
+/// up without giving up launching -- but what passes through it can be
+/// narrowed to a fixed set of helpers plus AppImages resolved from the
+/// registry, enforced at the one place every spawn goes through.
+#[test]
+fn only_known_helpers_and_managed_appimages_reach_the_host() {
+    use goshaim_core::process::{host_spawn_permitted, HostSpawn, ProcessRequest, HOST_HELPERS};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let real = tmp.path().join("App.AppImage");
+    std::fs::write(&real, b"x").unwrap();
+
+    // Every advertised helper is permitted.
+    for helper in HOST_HELPERS {
+        let req = ProcessRequest {
+            program: (*helper).to_string(),
+            host: HostSpawn::Helper,
+            ..Default::default()
+        };
+        assert!(
+            host_spawn_permitted(&req).is_ok(),
+            "{helper} should be allowed"
+        );
+    }
+
+    // Anything else claiming to be a helper is refused.
+    for hostile in ["sh", "bash", "/bin/sh", "curl", "systemctl", "rm"] {
+        let req = ProcessRequest {
+            program: hostile.to_string(),
+            host: HostSpawn::Helper,
+            ..Default::default()
+        };
+        assert!(
+            host_spawn_permitted(&req).is_err(),
+            "{hostile} must not reach the host as a helper"
+        );
+    }
+
+    // A managed AppImage must be an absolute path to a real regular file.
+    let ok = ProcessRequest {
+        program: real.to_string_lossy().into_owned(),
+        host: HostSpawn::ManagedAppImage,
+        ..Default::default()
+    };
+    assert!(host_spawn_permitted(&ok).is_ok());
+
+    for bad in ["relative/App.AppImage", "/nowhere/Missing.AppImage", "sh"] {
+        let req = ProcessRequest {
+            program: bad.to_string(),
+            host: HostSpawn::ManagedAppImage,
+            ..Default::default()
+        };
+        assert!(
+            host_spawn_permitted(&req).is_err(),
+            "{bad} must not be launchable as a managed application"
+        );
+    }
+    // A directory is not launchable either.
+    let dir = ProcessRequest {
+        program: tmp.path().to_string_lossy().into_owned(),
+        host: HostSpawn::ManagedAppImage,
+        ..Default::default()
+    };
+    assert!(host_spawn_permitted(&dir).is_err());
+
+    // In-sandbox work is unaffected.
+    let inside = ProcessRequest {
+        program: "unsquashfs".to_string(),
+        host: HostSpawn::No,
+        ..Default::default()
+    };
+    assert!(host_spawn_permitted(&inside).is_ok());
 }

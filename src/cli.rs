@@ -801,7 +801,7 @@ pub fn run_self_test(
 pub fn run_host_probe(controller: &AppController, stdout: &mut dyn Write) -> ExitCode {
     let result = controller.runner().run(&ProcessRequest {
         program: "true".to_string(),
-        host: true,
+        host: crate::process::HostSpawn::Helper,
         timeout_ms: 5000,
         ..Default::default()
     });

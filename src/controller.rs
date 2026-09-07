@@ -207,7 +207,7 @@ impl AppController {
             args: vec![crate::safe_fs::argv_safe_path(std::path::Path::new(
                 &parent,
             ))],
-            host: true,
+            host: crate::process::HostSpawn::Helper,
             timeout_ms: 10_000,
             ..Default::default()
         })
