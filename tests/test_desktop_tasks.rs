@@ -187,3 +187,49 @@ fn argv_safe_path_neutralises_leading_dash() {
     assert_eq!(argv_safe_path(Path::new("./X.AppImage")), "./X.AppImage");
     assert_eq!(argv_safe_path(Path::new("X.AppImage")), "X.AppImage");
 }
+
+/// Audit finding S-6. The extraction parent is a predictable name in a shared
+/// temp directory, so an existing path there is not necessarily ours.
+#[test]
+fn mkdir_0700_refuses_hostile_preexisting_paths() {
+    use goshaim_core::safe_fs::mkdir_0700;
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    // A symlink pointing somewhere the attacker chose.
+    let victim = tmp.path().join("victim");
+    std::fs::create_dir_all(&victim).unwrap();
+    let link = tmp.path().join("planted-symlink");
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+    assert!(
+        mkdir_0700(&link).is_err(),
+        "a symlink must not be accepted as our private directory"
+    );
+
+    // A regular file squatting on the name.
+    let file = tmp.path().join("planted-file");
+    std::fs::write(&file, b"x").unwrap();
+    assert!(mkdir_0700(&file).is_err(), "a file is not a directory");
+
+    // A world-writable directory is tightened rather than trusted as-is.
+    let loose = tmp.path().join("planted-0777");
+    std::fs::create_dir_all(&loose).unwrap();
+    std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(mkdir_0700(&loose).is_ok());
+    let mode = std::fs::metadata(&loose).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o700,
+        "a writable-by-others directory must be secured"
+    );
+
+    // The ordinary paths still work: fresh creation, and a re-run on our own
+    // already-correct directory.
+    let fresh = tmp.path().join("nested/fresh");
+    assert!(mkdir_0700(&fresh).is_ok());
+    assert_eq!(
+        std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert!(mkdir_0700(&fresh).is_ok(), "must be idempotent");
+}

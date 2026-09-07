@@ -4,22 +4,70 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::limits;
 
 /// Create a directory (and parents) with mode 0700.
+///
+/// An existing path is accepted only if it is a real directory we own and no
+/// one else can write to. `dir.exists()` alone was not a check: it follows
+/// symlinks and says nothing about ownership or mode, so on a shared `/tmp` a
+/// local attacker could pre-create the predictable extraction parent
+/// (`$TMPDIR/gosh-appimage-manager`) as a symlink to a directory of their
+/// choosing, or as mode 0777, and decide where our output landed.
 pub fn mkdir_0700(dir: &Path) -> Result<(), String> {
-    if dir.exists() {
-        return Ok(());
+    match fs::symlink_metadata(dir) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "Refusing to use {}: it is a symlink",
+                    dir.display()
+                ));
+            }
+            if !meta.is_dir() {
+                return Err(format!(
+                    "Refusing to use {}: it is not a directory",
+                    dir.display()
+                ));
+            }
+            #[cfg(unix)]
+            {
+                let uid = unsafe { libc_geteuid() };
+                if meta.uid() != uid {
+                    return Err(format!(
+                        "Refusing to use {}: it is owned by another user",
+                        dir.display()
+                    ));
+                }
+                // Group- or world-writable means someone else can swap what is
+                // inside it after we have checked.
+                if meta.permissions().mode() & 0o022 != 0 {
+                    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+                        .map_err(|e| format!("Cannot secure directory {}: {e}", dir.display()))?;
+                }
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .map_err(|e| format!("Cannot create directory {}: {e}", dir.display()))?;
+            Ok(())
+        }
+        Err(e) => Err(format!("Cannot create directory {}: {e}", dir.display())),
     }
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .map_err(|e| format!("Cannot create directory {}: {e}", dir.display()))?;
-    Ok(())
+}
+
+#[cfg(unix)]
+unsafe fn libc_geteuid() -> u32 {
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    geteuid()
 }
 
 /// Create a private temp directory (mode 0700) under `parent`.
