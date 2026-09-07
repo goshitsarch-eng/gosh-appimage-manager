@@ -112,6 +112,23 @@ impl SystemRunner {
     }
 }
 
+/// Join an output-reader thread, giving up if it is stuck on a pipe held open
+/// by a grandchild rather than blocking the caller forever.
+fn join_bounded(handle: std::thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(READER_JOIN_GRACE_MS);
+    while !handle.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            // Leave it parked on the pipe; it holds nothing the caller needs
+            // and exits when the last writer closes.
+            return Vec::new();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    handle.join().unwrap_or_default()
+}
+
+const READER_JOIN_GRACE_MS: u64 = 2_000;
+
 #[cfg(unix)]
 fn libc_setsdt() {
     unsafe { libc_setsid() };
@@ -197,13 +214,22 @@ impl ProcessRunner for SystemRunner {
                 }
                 Err(_) => {
                     let _ = child.kill();
+                    // Reap here too; the previous code killed without waiting
+                    // and left a zombie behind on this path.
+                    let _ = child.wait();
                     result.timed_out = true;
                     None
                 }
             }
         };
-        result.stdout = stdout_handle.join().unwrap_or_default();
-        result.stderr = stderr_handle.join().unwrap_or_default();
+        // Killing the child closes our copies of the pipe ends, but a
+        // grandchild that inherited them keeps the reader threads blocked. An
+        // unconditional join would then hang the caller indefinitely and
+        // defeat the timeout entirely -- and on the GUI that caller is the
+        // thread drawing the window. Take whatever the readers have collected
+        // by the deadline and let any stragglers finish detached.
+        result.stdout = join_bounded(stdout_handle);
+        result.stderr = join_bounded(stderr_handle);
         if result.stdout.len() > limits::MAX_PROCESS_OUTPUT_BYTES
             || result.stderr.len() > limits::MAX_PROCESS_OUTPUT_BYTES
         {
@@ -225,9 +251,27 @@ impl ProcessRunner for SystemRunner {
     }
 
     fn start_detached(&self, req: &ProcessRequest) -> Result<(), String> {
-        let child = self.spawn_command(req, true)?;
-        // Forget the child: start-only semantics, never wait, never kill.
-        std::mem::forget(child);
+        let mut child = self.spawn_command(req, true)?;
+        // Start-only semantics: report success once the process has started,
+        // never wait for it and never kill it.
+        //
+        // The child still has to be reaped, though. setsid() makes it a
+        // session leader but does not reparent it, so it stays our direct
+        // child and becomes a zombie the moment it exits. `mem::forget` used
+        // to be used here to express "don't touch it", which is exactly what
+        // left the zombie: a long-lived GUI session accumulated one per launch
+        // until it hit the per-user process limit.
+        //
+        // Hand the reap to a detached thread instead. It blocks in wait()
+        // for as long as the app runs -- which costs one parked thread and
+        // nothing else -- and neither the caller nor the launched app waits
+        // on anything.
+        std::thread::Builder::new()
+            .name("goshaim-reap".to_string())
+            .spawn(move || {
+                let _ = child.wait();
+            })
+            .map_err(|e| format!("Cannot start {}: {e}", req.program))?;
         Ok(())
     }
 }
