@@ -197,10 +197,26 @@ pub fn unescape_entry_value(value: &str) -> String {
 }
 
 /// Build the full owned .desktop body for an installed app.
-pub fn build_desktop_file(app: &InstalledApp, managed_path: &str, terminal_suffix: bool) -> String {
+///
+/// `terminal_omit_suffix` drops a trailing `.AppImage` from the displayed name
+/// of a terminal application, matching the setting of the same name. It used
+/// to be accepted and discarded (`let _ = terminal_suffix;`), so the setting
+/// was persisted and had no effect anywhere.
+pub fn build_desktop_file(
+    app: &InstalledApp,
+    managed_path: &str,
+    terminal_omit_suffix: bool,
+) -> String {
     let mut name = app.name.clone();
     if name.is_empty() {
         name = "AppImage".to_string();
+    }
+    if terminal_omit_suffix && app.terminal {
+        if let Some(stripped) = name.strip_suffix(".AppImage") {
+            if !stripped.is_empty() {
+                name = stripped.to_string();
+            }
+        }
     }
     let exec = build_exec_line(managed_path, &app.environment, &app.arguments);
     let icon = if app.icon_path.is_empty() {
@@ -222,8 +238,38 @@ pub fn build_desktop_file(app: &InstalledApp, managed_path: &str, terminal_suffi
         "Terminal={}\n",
         if app.terminal { "true" } else { "false" }
     ));
-    let _ = terminal_suffix;
-    body.push_str("Categories=Utility;\n");
+    // Categories from the AppImage's own entry, sanitised during inspection;
+    // fall back to Utility so the entry is always classified.
+    let categories: Vec<&str> = app
+        .categories
+        .iter()
+        .map(String::as_str)
+        .filter(|c| !c.is_empty())
+        .take(16)
+        .collect();
+    if categories.is_empty() {
+        body.push_str("Categories=Utility;\n");
+    } else {
+        body.push_str(&format!("Categories={};\n", categories.join(";")));
+    }
+    if !app.mime_types.is_empty() {
+        let mimes: Vec<&str> = app
+            .mime_types
+            .iter()
+            .map(String::as_str)
+            .filter(|m| !m.is_empty())
+            .take(32)
+            .collect();
+        if !mimes.is_empty() {
+            body.push_str(&format!("MimeType={};\n", mimes.join(";")));
+        }
+    }
+    if !app.startup_wm_class.is_empty() {
+        body.push_str(&format!(
+            "StartupWMClass={}\n",
+            escape_entry_value(&app.startup_wm_class)
+        ));
+    }
     body.push_str("StartupNotify=true\n");
     if !app.version.is_empty() {
         body.push_str(&format!(

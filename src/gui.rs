@@ -115,6 +115,8 @@ pub enum Message {
 
 #[derive(Default)]
 struct InspectState {
+    /// The last inspection, kept so its icon staging can be released.
+    result: Option<crate::types::InspectionResult>,
     path_input: String,
     summary: Vec<String>,
     error: String,
@@ -177,6 +179,11 @@ impl App {
     }
 
     fn run_inspect(&mut self, path: &str) {
+        // Release the previous inspection's icon staging before starting
+        // another; inspecting repeatedly should not accumulate directories.
+        if let Some(previous) = self.inspect.result.take() {
+            previous.discard_staging();
+        }
         self.inspect.error.clear();
         self.inspect.summary.clear();
         self.inspect.inspected_ok = false;
@@ -207,6 +214,7 @@ impl App {
         }
         self.inspect.inspected_ok = true;
         self.inspect.conflict_path = path.to_string();
+        self.inspect.result = Some(result.clone());
         self.inspect.conflict_name = if result.metadata.name.is_empty() {
             path.to_string()
         } else {

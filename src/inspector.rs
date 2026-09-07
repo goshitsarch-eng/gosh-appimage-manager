@@ -134,6 +134,12 @@ impl<'a> AppImageInspector<'a> {
             result.extraction_attempted = true;
             match self.extract_metadata(fs_path, &info, &result.update_info) {
                 Ok((metadata, extractor)) => {
+                    if !metadata.extracted_icon_path.is_empty() {
+                        result.icon_staging_dir = Path::new(&metadata.extracted_icon_path)
+                            .parent()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                    }
                     result.metadata = metadata;
                     result.extractor_used = extractor;
                 }
@@ -160,6 +166,11 @@ impl<'a> AppImageInspector<'a> {
         _update: &EmbeddedUpdateInfo,
     ) -> Result<(AppImageMetadata, String), String> {
         let work_parent = std::env::temp_dir().join("gosh-appimage-manager");
+        // A caller that inspects without integrating has nothing to clean up
+        // its icon staging, so sweep anything left from an earlier run before
+        // creating more. Bounds the directory without requiring every caller
+        // to remember.
+        sweep_stale_staging(&work_parent);
         let work = safe_fs::private_temp_dir(&work_parent, "inspect-")?;
         let cleanup = || {
             let _ = safe_fs::remove_dir_no_follow(&work);
@@ -204,7 +215,19 @@ impl<'a> AppImageInspector<'a> {
             metadata.terminal = file.entry("Terminal") == "true";
             metadata.website = file.entry("Url").to_string();
             metadata.startup_wm_class = file.entry("StartupWMClass").to_string();
-            // Icon: prefer the referenced icon, fall back to .DirIcon.
+            // Desktop fields the entry we write should carry over.
+            metadata.categories = split_desktop_list(file.entry("Categories"));
+            metadata.mime_types = split_desktop_list(file.entry("MimeType"));
+            metadata.exec_arguments = exec_arguments(file.entry("Exec"));
+            metadata.actions = parse_desktop_actions(&file);
+
+            // Icon: prefer the referenced icon, fall back to .DirIcon. The
+            // bytes have to outlive `work`, which is removed on the way out,
+            // so copy the chosen icon into a staging directory the caller
+            // owns. Recording the archive member name here (as this used to)
+            // left a path into a deleted directory, which is why no
+            // integrated AppImage ever got an icon.
+            let mut chosen: Option<(String, String)> = None;
             if !metadata.icon_name.is_empty() {
                 for ext in ["png", "svg", "xpm"] {
                     let candidate = format!("{}.{}", metadata.icon_name, ext);
@@ -213,15 +236,42 @@ impl<'a> AppImageInspector<'a> {
                             self.extract_members(tool, path, &work, std::slice::from_ref(&member))?;
                         if let Some(bytes) = got.get(&member) {
                             if (bytes.len() as u64) <= limits::MAX_ICON_BYTES {
-                                metadata.extracted_icon_path = member;
+                                chosen = Some((member, ext.to_string()));
                                 break;
                             }
                         }
                     }
                 }
             }
-            if metadata.extracted_icon_path.is_empty() && staged.contains_key(".DirIcon") {
-                metadata.extracted_icon_path = ".DirIcon".to_string();
+            if chosen.is_none() {
+                if let Some(bytes) = staged.get(".DirIcon") {
+                    if (bytes.len() as u64) <= limits::MAX_ICON_BYTES {
+                        // .DirIcon carries no extension; sniff the content so
+                        // the installed file is named correctly.
+                        chosen = Some((".DirIcon".to_string(), sniff_icon_extension(bytes)));
+                    }
+                }
+            }
+            if let Some((member, ext)) = chosen {
+                let source = work.join(&member);
+                if source.is_file() {
+                    let stage = safe_fs::private_temp_dir(&work_parent, "icon-")?;
+                    let dest = stage.join(format!("icon.{ext}"));
+                    match safe_fs::copy_bounded(
+                        &source,
+                        &dest,
+                        limits::MAX_ICON_BYTES,
+                        &AtomicBool::new(false),
+                    ) {
+                        Ok(_) => {
+                            metadata.extracted_icon_path = dest.to_string_lossy().into_owned();
+                            metadata.icon_format = ext;
+                        }
+                        Err(_) => {
+                            let _ = safe_fs::remove_dir_no_follow(&stage);
+                        }
+                    }
+                }
             }
             Ok((metadata, tool.to_string()))
         })();
@@ -352,6 +402,157 @@ impl<'a> AppImageInspector<'a> {
         }
         Ok(collected)
     }
+}
+
+/// Remove leftover work and icon-staging directories older than an hour.
+///
+/// Best effort and non-fatal: anything still in use by a concurrent
+/// inspection is younger than the threshold, and a directory we cannot read
+/// or remove is simply left alone.
+fn sweep_stale_staging(parent: &Path) {
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten().take(4096) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !(name.starts_with("inspect-") || name.starts_with("icon-")) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_dir() {
+            continue;
+        }
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .map(|age| age > STALE_AFTER)
+            .unwrap_or(false);
+        if stale {
+            let _ = safe_fs::remove_dir_no_follow(&entry.path());
+        }
+    }
+}
+
+/// Split a `;`-delimited Desktop Entry list, bounded and sanitised.
+fn split_desktop_list(value: &str) -> Vec<String> {
+    value
+        .split(';')
+        .map(|item| item.trim())
+        .filter(|item| {
+            !item.is_empty()
+                && item.len() <= 128
+                && item
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '.' | '/'))
+        })
+        .map(|item| item.to_string())
+        .take(32)
+        .collect()
+}
+
+/// Take the argument tokens from an `Exec` line, dropping the program itself
+/// and any field codes. The result is an argument *array*, never a shell
+/// fragment; it becomes the app's default arguments.
+fn exec_arguments(exec: &str) -> Vec<String> {
+    let mut tokens = split_exec_tokens(exec);
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    tokens.remove(0);
+    tokens
+        .into_iter()
+        .filter(|t| !(t.len() == 2 && t.starts_with('%')))
+        .filter(|t| t.len() <= limits::MAX_ARGUMENT_LENGTH && !t.contains('\0'))
+        .take(limits::MAX_ARGUMENTS)
+        .collect()
+}
+
+/// Split an Exec value into tokens, honouring the spec's quoting.
+fn split_exec_tokens(exec: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut escaped = false;
+    let mut started = false;
+    for ch in exec.chars().take(limits::MAX_ARGUMENT_LENGTH * 4) {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_quotes => escaped = true,
+            '"' => {
+                in_quotes = !in_quotes;
+                started = true;
+            }
+            c if c.is_whitespace() && !in_quotes => {
+                if started || !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            c => {
+                current.push(c);
+                started = true;
+            }
+        }
+        if out.len() > limits::MAX_ARGUMENTS {
+            break;
+        }
+    }
+    if started || !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+/// Read `[Desktop Action <id>]` groups, keeping only argument tokens.
+///
+/// Actions from an untrusted AppImage may not carry their own program: the
+/// Exec is rewritten against the managed path when the entry is written, so
+/// only the arguments survive.
+fn parse_desktop_actions(file: &desktop::DesktopFile) -> Vec<crate::types::DesktopAction> {
+    let ids = split_desktop_list(file.entry("Actions"));
+    let mut actions = Vec::new();
+    for id in ids.into_iter().take(16) {
+        if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') || id.len() > 64 {
+            continue;
+        }
+        let Some(group) = file.groups.get(&format!("Desktop Action {id}")) else {
+            continue;
+        };
+        let name =
+            desktop::unescape_entry_value(group.get("Name").map(String::as_str).unwrap_or(""))
+                .chars()
+                .take(limits::MAX_NAME_LENGTH)
+                .collect::<String>();
+        let arguments = exec_arguments(group.get("Exec").map(String::as_str).unwrap_or(""));
+        actions.push(crate::types::DesktopAction {
+            id,
+            name,
+            arguments,
+        });
+    }
+    actions
+}
+
+/// Identify an icon's format from its leading bytes; `.DirIcon` has no
+/// extension and the file name decides how the desktop reads it.
+fn sniff_icon_extension(bytes: &[u8]) -> String {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return "png".to_string();
+    }
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]);
+    if head.contains("<svg") || head.contains("<?xml") {
+        return "svg".to_string();
+    }
+    if bytes.starts_with(b"/* XPM */") {
+        return "xpm".to_string();
+    }
+    "png".to_string()
 }
 
 fn parse_listing(tool: &str, stdout: &[u8]) -> Result<Vec<crate::types::ArchiveEntry>, String> {

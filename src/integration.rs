@@ -8,20 +8,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use crate::desktop;
-use crate::elf;
-use crate::inspector::{parse_upd_info, AppImageInspector};
+use crate::inspector::AppImageInspector;
 use crate::registry::ManagedRegistry;
 use crate::safe_fs;
 use crate::settings::SettingsStore;
 use crate::trash::TrashSink;
 use crate::types::{
-    AppImageType, ConflictPolicy, CopyMode, InspectOptions, InstalledApp, IntegrateFailPoint,
-    IntegrateRequest, IntegrateResult,
+    ConflictPolicy, CopyMode, InspectOptions, InstalledApp, IntegrateFailPoint, IntegrateRequest,
+    IntegrateResult,
 };
 
 pub struct IntegrationService<'a> {
     settings: &'a SettingsStore,
     inspector: AppImageInspector<'a>,
+    runner: &'a dyn crate::process::ProcessRunner,
     trash: &'a dyn TrashSink,
     fail_point: IntegrateFailPoint,
 }
@@ -35,6 +35,7 @@ impl<'a> IntegrationService<'a> {
         Self {
             settings,
             inspector: AppImageInspector::new(runner),
+            runner,
             trash,
             fail_point: IntegrateFailPoint::None,
         }
@@ -245,13 +246,39 @@ impl<'a> IntegrationService<'a> {
         app.size = staged_size;
         app.terminal = inspected.metadata.terminal;
         app.website = inspected.metadata.website.clone();
+        app.categories = inspected.metadata.categories.clone();
+        app.mime_types = inspected.metadata.mime_types.clone();
+        app.startup_wm_class = inspected.metadata.startup_wm_class.clone();
+        if app.default_arguments.is_empty() {
+            app.default_arguments = inspected.metadata.exec_arguments.clone();
+        }
+        if app.arguments.is_empty() {
+            app.arguments = app.default_arguments.clone();
+        }
+        if app.actions.is_empty() {
+            app.actions = inspected.metadata.actions.clone();
+        }
         app.embedded_update = inspected.update_info.raw.clone();
         if app.update_manager.is_empty() && !inspected.update_info.manager_hint.is_empty() {
             app.update_manager = inspected.update_info.manager_hint.clone();
         }
 
-        // 4. Stage desktop entry + icon.
+        // 4. Install the icon, then build the desktop entry that references
+        //    it. The entry used to be built first, so `Icon=` was always
+        //    written from an empty icon_path -- every entry read
+        //    `Icon=application-x-executable` even once an icon existed.
         let desktop_path = self.settings.applications_dir().join(&app.desktop_id);
+        // Whether these artifacts existed before this transaction decides
+        // whether rollback deletes them or restores them.
+        let desktop_existed = desktop_path.exists();
+        let staged_icon_temp: Option<(PathBuf, String)> = self.stage_icon(&inspected, &app.uuid);
+        let planned_icon = staged_icon_temp
+            .as_ref()
+            .map(|(_, ext)| self.icon_destination(&app.uuid, ext));
+        let icon_existed = planned_icon.as_ref().is_some_and(|p| p.exists());
+        if let Some(icon) = &planned_icon {
+            app.icon_path = icon.to_string_lossy().into_owned();
+        }
         let desktop_body = desktop::build_desktop_file(
             &app,
             &app.managed_path,
@@ -261,11 +288,6 @@ impl<'a> IntegrationService<'a> {
             let _ = fs::remove_file(&staged);
             Failure::new(e)
         })?;
-        // Whether these artifacts existed before this transaction decides
-        // whether rollback deletes them or restores them.
-        let desktop_existed = desktop_path.exists();
-        // Extract the icon file (best effort) into a temp to stage it.
-        let staged_icon_temp: Option<(PathBuf, String)> = self.stage_icon(&inspected, &app.uuid);
         let (final_desktop, final_icon) = self
             .install_desktop_and_icon(&desktop_path, &desktop_body, staged_icon_temp, &app.uuid)
             .map_err(|e| {
@@ -274,11 +296,6 @@ impl<'a> IntegrationService<'a> {
             })?;
         app.desktop_path = final_desktop.to_string_lossy().into_owned();
         app.icon_path = final_icon.to_string_lossy().into_owned();
-        let icon_existed = !final_icon.as_os_str().is_empty() && {
-            // install_files has already written it, so "existed before" is only
-            // knowable from the replace backup taken below.
-            replacing.is_some()
-        };
         self.fail(IntegrateFailPoint::DesktopInstall).map_err(|e| {
             let _ = fs::remove_file(&staged);
             let _ = fs::remove_file(&final_desktop);
@@ -404,6 +421,7 @@ impl<'a> IntegrationService<'a> {
             let _ = registry.restore(snapshot);
             rolled_back.extend(safe_fs::rollback_temps(&managed_dir, ".gosh-"));
             let _ = fs::remove_file(&staged);
+            Self::clear_icon_staging(&inspected);
             return Err(Failure {
                 error,
                 rolled_back,
@@ -455,20 +473,53 @@ impl<'a> IntegrationService<'a> {
                 source_removed,
             });
         }
-        let _ = (parse_upd_info(&[]), elf::host_architecture());
+        Self::clear_icon_staging(&inspected);
         Ok((app, source_removed))
     }
 
+    /// The icon the inspector staged, if any.
+    ///
+    /// Inspection copies the chosen icon out of its work directory into a
+    /// private staging directory precisely so it can be installed here. This
+    /// used to return None unconditionally, so no integrated AppImage ever got
+    /// an icon -- every entry fell back to `Icon=application-x-executable`.
     fn stage_icon(
         &self,
         inspected: &crate::types::InspectionResult,
         _uuid: &str,
     ) -> Option<(PathBuf, String)> {
-        // Icon bytes were located during inspection; re-extract minimally is
-        // out of scope for the transactional path — the desktop + binary are
-        // authoritative. Return None (no icon) rather than execute anything.
-        let _ = inspected;
-        None
+        let staged = &inspected.metadata.extracted_icon_path;
+        if staged.is_empty() {
+            return None;
+        }
+        let path = PathBuf::from(staged);
+        if !path.is_file() {
+            return None;
+        }
+        let ext = if inspected.metadata.icon_format.is_empty() {
+            "png".to_string()
+        } else {
+            inspected.metadata.icon_format.clone()
+        };
+        Some((path, ext))
+    }
+
+    /// Remove the inspector's icon staging directory once we are done with it.
+    fn clear_icon_staging(inspected: &crate::types::InspectionResult) {
+        inspected.discard_staging();
+    }
+
+    /// Where an icon with this extension will be installed. Known before the
+    /// copy happens, so the desktop entry can name it.
+    fn icon_destination(&self, uuid: &str, ext: &str) -> PathBuf {
+        let ext = match ext {
+            "svg" => "svg",
+            _ => "png",
+        };
+        self.settings
+            .icons_dir()
+            .join("256x256/apps")
+            .join(format!("gosh-appimage-{uuid}.{ext}"))
     }
 
     fn install_desktop_and_icon(
@@ -498,20 +549,25 @@ impl<'a> IntegrationService<'a> {
         )
     }
 
+    /// Ask the desktop to notice the entry we just installed.
+    ///
+    /// Best effort by design: a missing `update-desktop-database` is normal on
+    /// many systems and must never fail an otherwise successful integration.
+    /// This used to build the request and throw it away (`let _ = req;`), so
+    /// a newly integrated app could stay absent from the launcher until the
+    /// next login.
     fn refresh_desktop_db(&self) -> Result<(), String> {
-        // Best effort: update-desktop-database if present.
-        let req = crate::process::ProcessRequest {
+        let result = self.runner.run(&crate::process::ProcessRequest {
             program: "update-desktop-database".to_string(),
-            args: vec![self
-                .settings
-                .applications_dir()
-                .to_string_lossy()
-                .into_owned()],
+            args: vec![safe_fs::argv_safe_path(&self.settings.applications_dir())],
+            host: true,
             timeout_ms: 10_000,
             ..Default::default()
-        };
-        // No runner stored; skip when unavailable — never fail integration.
-        let _ = req;
+        });
+        if result.refused {
+            // The tool is not installed; nothing to do and nothing to report.
+            return Ok(());
+        }
         Ok(())
     }
 }
@@ -577,9 +633,4 @@ impl Failure {
             source_removed: false,
         }
     }
-}
-
-#[allow(dead_code)]
-fn app_type_supported(t: AppImageType) -> bool {
-    !matches!(t, AppImageType::Unknown)
 }

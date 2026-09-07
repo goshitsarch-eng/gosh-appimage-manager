@@ -182,10 +182,6 @@ fn redirect_policy(allow_private: bool) -> reqwest::redirect::Policy {
     })
 }
 
-fn client_for(host: &str, port: u16) -> Result<reqwest::blocking::Client, String> {
-    client_for_with(host, port, false)
-}
-
 fn client_for_with(
     host: &str,
     port: u16,
