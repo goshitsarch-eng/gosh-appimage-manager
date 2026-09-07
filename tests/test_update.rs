@@ -573,3 +573,93 @@ fn failed_checks_are_reported_not_silently_dropped() {
     assert_eq!(scan.skipped, 1);
     assert_eq!(scan.failures.len(), 1);
 }
+
+/// Audit item: forge asset hosts were unrestricted. A release document is
+/// attacker-influenced -- anyone who can publish a release, or a compromised
+/// instance, chooses the download URL. GitHub assets were pinned to
+/// github.com and its CDN, but GitLab, Codeberg and Forgejo accepted any
+/// HTTPS host their JSON named.
+#[test]
+fn forge_assets_must_come_from_the_forge_that_served_the_release() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let live = common::write_fixture(h.tmp.path(), "V.AppImage");
+
+    // Codeberg release naming an asset on an unrelated host.
+    let body = r#"[{"tag_name":"v2","assets":[{"name":"app.AppImage","browser_download_url":"https://attacker.example.com/evil.AppImage","size":1}]}]"#;
+    h.network.canned_body("codeberg.org", body.as_bytes());
+
+    let mut app = goshaim_core::types::InstalledApp::new_owned();
+    app.uuid = "cb".into();
+    app.name = "Victim".into();
+    app.version = "v1".into();
+    app.managed_path = live.to_string_lossy().into_owned();
+    app.update_manager = "codeberg".into();
+    app.update_config.insert("owner".into(), "someone".into());
+    app.update_config.insert("repo".into(), "thing".into());
+    app.update_config
+        .insert("filename".into(), "app.AppImage".into());
+    c.registry_mut().upsert(app.clone()).unwrap();
+
+    let result = c
+        .update_service()
+        .check(&app, &std::sync::atomic::AtomicBool::new(false));
+    assert!(
+        !result.available,
+        "an asset on an unrelated host must not be offered, got {:?}",
+        result.url
+    );
+
+    // The same release served from the forge itself is accepted.
+    let ok_body = r#"[{"tag_name":"v2","assets":[{"name":"app.AppImage","browser_download_url":"https://codeberg.org/someone/thing/releases/download/v2/app.AppImage","size":1}]}]"#;
+    h.network.canned_body("codeberg.org", ok_body.as_bytes());
+    let result = c
+        .update_service()
+        .check(&app, &std::sync::atomic::AtomicBool::new(false));
+    assert!(result.available, "a same-host asset should be offered");
+
+    // A subdomain of the forge is accepted too (release CDNs).
+    let cdn_body = r#"[{"tag_name":"v2","assets":[{"name":"app.AppImage","browser_download_url":"https://cdn.codeberg.org/x/app.AppImage","size":1}]}]"#;
+    h.network.canned_body("codeberg.org", cdn_body.as_bytes());
+    assert!(
+        c.update_service()
+            .check(&app, &std::sync::atomic::AtomicBool::new(false))
+            .available,
+        "a forge subdomain should be accepted"
+    );
+
+    // Self-hosted instances legitimately use a separate asset domain, so an
+    // explicit user opt-in exists.
+    h.network.canned_body("codeberg.org", body.as_bytes());
+    let mut opted = app.clone();
+    opted
+        .update_config
+        .insert("allow_any_asset_host".into(), "true".into());
+    assert!(
+        c.update_service()
+            .check(&opted, &std::sync::atomic::AtomicBool::new(false))
+            .available,
+        "the explicit opt-in should allow a foreign asset host"
+    );
+}
+
+/// The self-test's readiness line asserted nothing; it returned a constant.
+#[test]
+fn readiness_checks_something_real() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    assert!(c.readiness().is_ok(), "a fresh controller should be ready");
+
+    // A managed folder that is not an absolute path cannot work.
+    c.settings_mut()
+        .set_managed_folder(std::path::PathBuf::from("relative/path"))
+        .unwrap();
+    let error = c.readiness().unwrap_err();
+    assert!(error.contains("absolute"), "got: {error}");
+
+    // A file where the managed folder should be is also not workable.
+    let blocker = h.tmp.path().join("blocker");
+    std::fs::write(&blocker, b"x").unwrap();
+    c.settings_mut().set_managed_folder(blocker).unwrap();
+    assert!(c.readiness().unwrap_err().contains("not a directory"));
+}

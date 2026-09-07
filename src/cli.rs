@@ -716,6 +716,7 @@ pub fn run_self_test(
     stderr: &mut dyn Write,
 ) -> ExitCode {
     let mut failures: Vec<String> = Vec::new();
+    let mut reasons: Vec<String> = Vec::new();
     let mut check = |failures: &mut Vec<String>, name: &str, ok: bool| {
         let _ = writeln!(
             stderr,
@@ -727,7 +728,12 @@ pub fn run_self_test(
         }
     };
 
-    check(&mut failures, "models-ready", controller.models_ready());
+    // Readiness reports why it failed, not just that it did.
+    let readiness = controller.readiness();
+    if let Err(reason) = &readiness {
+        reasons.push(format!("readiness: {reason}"));
+    }
+    check(&mut failures, "readiness", readiness.is_ok());
 
     // Synthetic Type-2 fixture must validate without execution.
     let fixture = crate::inspector::make_test_elf(
@@ -783,6 +789,9 @@ pub fn run_self_test(
         let _ = writeln!(stdout, "SELF_TEST_OK");
         ExitCode::Ok
     } else {
+        for reason in &reasons {
+            let _ = writeln!(stderr, "[self-test] {reason}");
+        }
         let _ = writeln!(stderr, "SELF_TEST_FAIL: {}", failures.join(","));
         ExitCode::Failure
     }

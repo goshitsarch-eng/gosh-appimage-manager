@@ -434,6 +434,32 @@ fn github_asset_host_allowed(url: &str) -> bool {
     host == "github.com" || host.ends_with(".githubusercontent.com")
 }
 
+/// Is this asset URL served by the forge we asked, or a subdomain of it?
+///
+/// A release document is attacker-influenced -- anyone who can publish a
+/// release, or a compromised instance, chooses the download URL. GitHub assets
+/// were already pinned to github.com and its CDN, but GitLab, Codeberg and
+/// Forgejo accepted any HTTPS host their JSON named, so a release could point
+/// the download anywhere.
+///
+/// Self-hosted instances do legitimately serve assets from a separate domain,
+/// so this is not absolute: `allow_any_asset_host=true` on a source the user
+/// created opts out. Embedded metadata cannot set it.
+fn forge_asset_host_allowed(url: &str, forge_host: &str, config: &Config) -> bool {
+    if get_str(config, "allow_any_asset_host") == "true" {
+        return true;
+    }
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+    let forge = forge_host.trim().to_ascii_lowercase();
+    if forge.is_empty() {
+        return false;
+    }
+    host == forge || host.ends_with(&format!(".{forge}"))
+}
+
 // ---- gitlab ------------------------------------------------------------------
 
 impl UpdateSource for GitlabSource {
@@ -524,7 +550,12 @@ impl UpdateSource for GitlabSource {
                 continue;
             }
             let download = json_string(link, "url");
-            if download.is_empty() || url_guard::validate(&download, false, false).is_err() {
+            if download.is_empty()
+                || url_guard::validate(&download, false, local.allowed()).is_err()
+            {
+                continue;
+            }
+            if !forge_asset_host_allowed(&download, &host, config) {
                 continue;
             }
             return UpdateCheckResult {
@@ -542,7 +573,8 @@ impl UpdateSource for GitlabSource {
         for link in &links {
             let download = json_string(link, "direct_asset_url");
             if download.ends_with(".AppImage")
-                && url_guard::validate(&download, false, false).is_ok()
+                && url_guard::validate(&download, false, local.allowed()).is_ok()
+                && forge_asset_host_allowed(&download, &host, config)
             {
                 return UpdateCheckResult {
                     ok: true,
@@ -714,7 +746,10 @@ fn forgejo_check(
             continue;
         }
         let download = json_string(asset, "browser_download_url");
-        if download.is_empty() || url_guard::validate(&download, false, false).is_err() {
+        if download.is_empty() || url_guard::validate(&download, false, local.allowed()).is_err() {
+            continue;
+        }
+        if !forge_asset_host_allowed(&download, &host, config) {
             continue;
         }
         return UpdateCheckResult {

@@ -440,8 +440,49 @@ impl AppController {
         ))
     }
 
-    /// Non-mutating readiness probe used by --self-test.
+    /// Non-mutating readiness check used by `--self-test`.
+    ///
+    /// This returned a constant `true` and asserted nothing, so the
+    /// "models-ready: ok" line in the self-test was decoration. It now checks
+    /// the things that must hold before any operation can succeed, and names
+    /// what is wrong when they do not.
+    pub fn readiness(&self) -> Result<(), String> {
+        // The registry has to be readable; open() already loaded it, so a
+        // round trip through the connection proves the file is still usable.
+        let path = self.settings.registry_path();
+        if path.exists() && !path.is_file() {
+            return Err(format!("{} is not a regular file", path.display()));
+        }
+        let data_dir = self.settings.data_dir();
+        if data_dir.exists() && !data_dir.is_dir() {
+            return Err(format!("{} is not a directory", data_dir.display()));
+        }
+        // Settings that could not be read would silently run on defaults.
+        if let Some(error) = self.settings.load_error() {
+            return Err(error.to_string());
+        }
+        // The managed folder must be an absolute path we could create.
+        let managed = self.settings.managed_folder();
+        if !managed.is_absolute() {
+            return Err(format!(
+                "managed folder is not an absolute path: {}",
+                managed.display()
+            ));
+        }
+        if managed.exists() && !managed.is_dir() {
+            return Err(format!("{} is not a directory", managed.display()));
+        }
+        // Every update manager the CLI advertises must resolve.
+        for name in crate::updates_sources::UpdateSourceFactory::names() {
+            if crate::updates_sources::UpdateSourceFactory::by_name(name).is_none() {
+                return Err(format!("update manager {name} does not resolve"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Backwards-compatible boolean form.
     pub fn models_ready(&self) -> bool {
-        true
+        self.readiness().is_ok()
     }
 }
