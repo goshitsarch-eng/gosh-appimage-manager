@@ -63,5 +63,9 @@ Gear Lever workflow reference is preserved; the safety contract is unchanged.
 - `flatpak-builder --arch=x86_64` (org.flatpak.Builder 1.4.9): full build
   passes, release binary reports 3.0.0, in-builder `--self-test` prints
   SELF_TEST_OK, and `flatpak-builder --run` re-verifies SELF_TEST_OK.
-  `--arch=aarch64` (qemu-user): in progress; same manifest, per-arch
-  pinned toolchains for 7zz/dwarfs/Rust.
+- `flatpak-builder --arch=aarch64` (qemu-user, CARGO_BUILD_JOBS=4 via
+  per-arch build-options): full build passes (exit 0), ARM ELF verified,
+  in-builder `--self-test` prints SELF_TEST_OK, and `--run` re-verifies
+  SELF_TEST_OK plus `--version` 3.0.0. Same manifest; per-arch pinned
+  binaries for 7zz/dwarfs/Rust. The pinned toolchain is absent from both
+  final `/app` trees (top-level `/rust` cleanup).
