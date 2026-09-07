@@ -1817,16 +1817,7 @@ impl App {
         ];
         let mut fact_rows: Vec<Element<Message>> = Vec::new();
         for (label, value) in facts {
-            fact_rows.push(
-                widget::row::with_children(vec![
-                    widget::text::caption(label)
-                        .width(Length::Fixed(140.0))
-                        .into(),
-                    widget::text::body(value).into(),
-                ])
-                .spacing(8)
-                .into(),
-            );
+            fact_rows.push(label_value_row(label, value, self.narrow()));
         }
         rows.push(
             widget::settings::section()
@@ -1974,16 +1965,7 @@ impl App {
         }
 
         for (label, value) in &self.inspect.summary {
-            col.push(
-                widget::row::with_children(vec![
-                    widget::text::caption(label)
-                        .width(Length::Fixed(140.0))
-                        .into(),
-                    widget::text::body(value).into(),
-                ])
-                .spacing(8)
-                .into(),
-            );
+            col.push(label_value_row(label, value, self.narrow()));
         }
         for warning in &self.inspect.warnings {
             col.push(widget::text::body(format!("Warning: {warning}")).into());
@@ -2414,6 +2396,34 @@ impl SettingsSnapshot {
             background_update_checks: s.background_update_checks(),
             unsafe_extraction_fallback: s.unsafe_extraction_fallback(),
         }
+    }
+}
+
+/// A label/value pair.
+///
+/// The label column used to be `Length::Fixed(140.0)`. A fixed pixel width
+/// does not grow with the user's text size, so at large scaling the label
+/// clips while the value beside it moves on without it. Proportional widths
+/// hold the same split whatever the text size, and in the condensed layout
+/// the pair stacks rather than fighting over a narrow row.
+fn label_value_row<'a>(
+    label: impl Into<String>,
+    value: impl Into<String>,
+    narrow: bool,
+) -> Element<'a, Message> {
+    let label = widget::text::caption(label.into());
+    let value = widget::text::body(value.into());
+    if narrow {
+        widget::column::with_children(vec![label.into(), value.into()])
+            .spacing(2)
+            .into()
+    } else {
+        widget::row::with_children(vec![
+            label.width(Length::FillPortion(2)).into(),
+            value.width(Length::FillPortion(5)).into(),
+        ])
+        .spacing(8)
+        .into()
     }
 }
 
