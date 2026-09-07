@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
 use crate::limits;
-use crate::network::NetworkClient;
+use crate::network::{Local, NetworkClient};
 use crate::types::InstalledApp;
 use crate::url_guard;
 
@@ -45,9 +45,9 @@ fn pct(text: &str) -> String {
 }
 
 /// HEAD probe size as i64 (-1 when unknown or failed). Check-only.
-fn head_size(network: &dyn NetworkClient, url: &str) -> i64 {
+fn head_size(network: &dyn NetworkClient, url: &str, local: Local) -> i64 {
     network
-        .head_len(url)
+        .head_len(url, local)
         .ok()
         .flatten()
         .map(|s| s.min(i64::MAX as u64) as i64)
@@ -143,8 +143,11 @@ impl UpdateSource for StaticSource {
         if url.is_empty() {
             return UpdateCheckResult::fail(self.name(), "Static source needs a url".to_string());
         }
+        // Reaching a private-network endpoint is allowed only when the user
+        // set it on this source; embedded metadata can never set the key.
+        let local = Local::from_config(config);
         if url.ends_with(".zsync") {
-            let body = match network.get(&url, &[]) {
+            let body = match network.get(&url, &[], local) {
                 Ok(result) => {
                     if result.body.len() > limits::MAX_ZSYNC_BYTES {
                         return UpdateCheckResult::fail(
@@ -164,7 +167,7 @@ impl UpdateSource for StaticSource {
                 .get("download_url")
                 .cloned()
                 .unwrap_or_else(|| url.trim_end_matches(".zsync").to_string());
-            if let Err(e) = url_guard::validate(&download, false, false) {
+            if let Err(e) = url_guard::validate(&download, false, local.allowed()) {
                 return UpdateCheckResult::fail(self.name(), e);
             }
             let version = control
@@ -181,7 +184,7 @@ impl UpdateSource for StaticSource {
                     ..Default::default()
                 };
             }
-            let size = head_size(network, &download);
+            let size = head_size(network, &download, local);
             return UpdateCheckResult {
                 ok: true,
                 available: version != app.version,
@@ -193,7 +196,7 @@ impl UpdateSource for StaticSource {
             };
         }
         // Direct file URL: only a HEAD probe (check-only, never downloads).
-        match network.head_len(&url) {
+        match network.head_len(&url, local) {
             Ok(size) => {
                 let version = get_str(config, "version");
                 if version.is_empty() {
@@ -297,7 +300,7 @@ impl UpdateSource for GithubSource {
             "Accept".to_string(),
             "application/vnd.github+json".to_string(),
         )];
-        let body = match network.get(&api, &headers) {
+        let body = match network.get(&api, &headers, Local::from_config(config)) {
             Ok(result) => result.body,
             Err(e) => return UpdateCheckResult::fail(self.name(), e),
         };
@@ -495,7 +498,8 @@ impl UpdateSource for GitlabSource {
             host,
             pct(&project)
         );
-        let body = match network.get(&api, &[]) {
+        let local = Local::from_config(config);
+        let body = match network.get(&api, &[], local) {
             Ok(result) => result.body,
             Err(e) => return UpdateCheckResult::fail(self.name(), e),
         };
@@ -582,7 +586,8 @@ impl GitlabSource {
             pct(project),
             pct(&package)
         );
-        let body = network.get(&list_url, &[]).ok()?.body;
+        let local = Local::from_config(config);
+        let body = network.get(&list_url, &[], local).ok()?.body;
         let packages = parse_json_body(&body).ok()?;
         let id = packages.as_array()?.first()?.get("id")?.as_i64()?;
         let files_url = format!(
@@ -591,7 +596,7 @@ impl GitlabSource {
             pct(project),
             id
         );
-        let files_body = network.get(&files_url, &[]).ok()?.body;
+        let files_body = network.get(&files_url, &[], local).ok()?.body;
         let files = parse_json_body(&files_body).ok()?;
         let wanted = get_str(config, "filename");
         for file in files.as_array()? {
@@ -680,7 +685,8 @@ fn forgejo_check(
         pct(&owner),
         pct(&repo)
     );
-    let body = match network.get(&api, &[]) {
+    let local = Local::from_config(config);
+    let body = match network.get(&api, &[], local) {
         Ok(result) => result.body,
         Err(e) => return UpdateCheckResult::fail(manager, e),
     };
@@ -832,7 +838,7 @@ impl UpdateSource for FtpSource {
             return Err("FTP source needs an ftp:// URL".to_string());
         }
         // Credentials fail closed, no network.
-        url_guard::validate(&url, true, false).map(|_| ())
+        url_guard::validate(&url, true, Local::from_config(config).allowed()).map(|_| ())
     }
     fn check(
         &self,
@@ -854,7 +860,7 @@ impl UpdateSource for FtpSource {
                 ..Default::default()
             };
         }
-        match network.head_len(&url) {
+        match network.head_len(&url, Local::from_config(config)) {
             Ok(size) => UpdateCheckResult {
                 ok: true,
                 available: version != app.version,

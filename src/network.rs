@@ -19,10 +19,44 @@ pub struct FetchResult {
     pub final_url: String,
 }
 
+/// Whether a request may reach a loopback / link-local / private-network
+/// destination.
+///
+/// The brief allows this, but only for a source the user created and opted in
+/// on. It is a parameter rather than client state so that every call site
+/// states its own answer and `Local::Allowed` can be grepped for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Local {
+    Denied,
+    Allowed,
+}
+
+impl Local {
+    pub fn allowed(self) -> bool {
+        matches!(self, Local::Allowed)
+    }
+
+    /// Read the opt-in from an update-source config.
+    ///
+    /// Only ever set by a user editing a source. `config_from_embedded` never
+    /// produces this key, so an AppImage cannot opt itself in.
+    pub fn from_config(config: &std::collections::BTreeMap<String, String>) -> Self {
+        match config.get("allow_local_network").map(String::as_str) {
+            Some("true" | "yes" | "1") => Local::Allowed,
+            _ => Local::Denied,
+        }
+    }
+}
+
 pub trait NetworkClient: Send + Sync {
-    fn get(&self, url: &str, headers: &[(String, String)]) -> Result<FetchResult, String>;
-    fn head_len(&self, url: &str) -> Result<Option<u64>, String>;
-    fn download_bounded(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, String>;
+    fn get(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        local: Local,
+    ) -> Result<FetchResult, String>;
+    fn head_len(&self, url: &str, local: Local) -> Result<Option<u64>, String>;
+    fn download_bounded(&self, url: &str, max_bytes: u64, local: Local) -> Result<Vec<u8>, String>;
 
     /// Stream a download straight to `dest` (created mode 0600), returning the
     /// byte count.
@@ -39,6 +73,7 @@ pub trait NetworkClient: Send + Sync {
         dest: &std::path::Path,
         max_bytes: u64,
         cancel: &std::sync::atomic::AtomicBool,
+        local: Local,
     ) -> Result<u64, String>;
 }
 
@@ -229,13 +264,18 @@ impl ReqwestClient {
 }
 
 impl NetworkClient for ReqwestClient {
-    fn get(&self, url: &str, headers: &[(String, String)]) -> Result<FetchResult, String> {
+    fn get(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        local: Local,
+    ) -> Result<FetchResult, String> {
         if url.starts_with("ftp://") || url.starts_with("FTP://") {
             return Err("FTP must use the explicit legacy ftp source".to_string());
         }
-        let checked = url_guard::validate(url, false, false)?;
+        let checked = url_guard::validate(url, false, local.allowed())?;
         let (host, port) = host_port(&checked.url)?;
-        let client = client_for(&host, port)?;
+        let client = client_for_with(&host, port, local.allowed())?;
         let mut request = client.get(checked.url.clone());
         for (key, value) in headers {
             request = request.header(key.as_str(), value.as_str());
@@ -253,13 +293,13 @@ impl NetworkClient for ReqwestClient {
         Ok(FetchResult { body, final_url })
     }
 
-    fn head_len(&self, url: &str) -> Result<Option<u64>, String> {
+    fn head_len(&self, url: &str, local: Local) -> Result<Option<u64>, String> {
         if url.starts_with("ftp://") || url.starts_with("FTP://") {
-            return ftp_size(url);
+            return ftp_size(url, local);
         }
-        let checked = url_guard::validate(url, false, false)?;
+        let checked = url_guard::validate(url, false, local.allowed())?;
         let (host, port) = host_port(&checked.url)?;
-        let client = client_for(&host, port)?;
+        let client = client_for_with(&host, port, local.allowed())?;
         let response = client
             .head(checked.url.clone())
             .send()
@@ -278,13 +318,13 @@ impl NetworkClient for ReqwestClient {
             .and_then(|v| v.parse::<u64>().ok()))
     }
 
-    fn download_bounded(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+    fn download_bounded(&self, url: &str, max_bytes: u64, local: Local) -> Result<Vec<u8>, String> {
         if url.starts_with("ftp://") || url.starts_with("FTP://") {
-            return ftp_download(url, max_bytes);
+            return ftp_download(url, max_bytes, local);
         }
-        let checked = url_guard::validate(url, false, false)?;
+        let checked = url_guard::validate(url, false, local.allowed())?;
         let (host, port) = host_port(&checked.url)?;
-        let client = client_for(&host, port)?;
+        let client = client_for_with(&host, port, local.allowed())?;
         let response = client
             .get(checked.url.clone())
             .send()
@@ -306,14 +346,15 @@ impl NetworkClient for ReqwestClient {
         dest: &std::path::Path,
         max_bytes: u64,
         cancel: &std::sync::atomic::AtomicBool,
+        local: Local,
     ) -> Result<u64, String> {
         if url.starts_with("ftp://") || url.starts_with("FTP://") {
-            let body = ftp_download(url, max_bytes)?;
+            let body = ftp_download(url, max_bytes, local)?;
             return stream_to_file(body.as_slice(), dest, max_bytes, cancel);
         }
-        let checked = url_guard::validate(url, false, false)?;
+        let checked = url_guard::validate(url, false, local.allowed())?;
         let (host, port) = host_port(&checked.url)?;
-        let client = client_for(&host, port)?;
+        let client = client_for_with(&host, port, local.allowed())?;
         let response = client
             .get(checked.url.clone())
             .send()
@@ -336,8 +377,8 @@ fn ftp_warning() -> String {
     "WARNING: FTP is insecure plaintext transport; prefer https".to_string()
 }
 
-fn ftp_parse_url(url: &str) -> Result<(String, u16, String), String> {
-    let checked = url_guard::validate(url, true, false)?;
+fn ftp_parse_url(url: &str, local: Local) -> Result<(String, u16, String), String> {
+    let checked = url_guard::validate(url, true, local.allowed())?;
     if checked.url.scheme() != "ftp" {
         return Err("Not an ftp URL".to_string());
     }
@@ -355,96 +396,196 @@ fn ftp_parse_url(url: &str) -> Result<(String, u16, String), String> {
     Ok((host, port, path))
 }
 
-fn ftp_control(host: &str, port: u16) -> Result<std::net::TcpStream, String> {
-    let stream = std::net::TcpStream::connect_timeout(
-        &pinned_ip(host, port, false).map(|ip| std::net::SocketAddr::new(ip, port))?,
-        Duration::from_millis(10_000),
-    )
-    .map_err(|e| format!("FTP connection failed: {e}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_millis(limits::NETWORK_TIMEOUT_MS)))
+/// One FTP control connection, with its reply stream kept in step.
+///
+/// The previous code wrote a command and read exactly one line, and never
+/// consumed the server's `220` greeting. Every reply it read was therefore the
+/// answer to the *previous* command: the reply to USER was really the
+/// greeting, and the reply to SIZE was really the answer to TYPE. Confirmed
+/// against a conformant server -- a server answering `213 4096` produced
+/// Ok(None), and PASV parsing was handed the TYPE reply and failed, so FTP
+/// could neither report a size nor download anything.
+struct FtpControl {
+    stream: std::net::TcpStream,
+    reader: std::io::BufReader<std::net::TcpStream>,
+}
+
+impl FtpControl {
+    fn connect(host: &str, port: u16, local: Local) -> Result<Self, String> {
+        let stream = std::net::TcpStream::connect_timeout(
+            &pinned_ip(host, port, local.allowed())
+                .map(|ip| std::net::SocketAddr::new(ip, port))?,
+            Duration::from_millis(10_000),
+        )
         .map_err(|e| format!("FTP connection failed: {e}"))?;
-    Ok(stream)
-}
-
-fn ftp_exchange(stream: &mut std::net::TcpStream, command: &str) -> Result<String, String> {
-    use std::io::Write;
-    stream
-        .write_all(format!("{command}\r\n").as_bytes())
-        .map_err(|e| format!("FTP command failed: {e}"))?;
-    let mut reader = std::io::BufReader::new(
         stream
-            .try_clone()
-            .map_err(|e| format!("FTP command failed: {e}"))?,
-    );
-    let mut line = String::new();
-    use std::io::BufRead;
-    reader
-        .read_line(&mut line)
-        .map_err(|e| format!("FTP command failed: {e}"))?;
-    Ok(line)
+            .set_read_timeout(Some(Duration::from_millis(limits::NETWORK_TIMEOUT_MS)))
+            .map_err(|e| format!("FTP connection failed: {e}"))?;
+        let reader = std::io::BufReader::new(
+            stream
+                .try_clone()
+                .map_err(|e| format!("FTP connection failed: {e}"))?,
+        );
+        let mut control = Self { stream, reader };
+        // Consume the greeting before issuing anything, so command and reply
+        // stay paired from here on.
+        let greeting = control.read_reply()?;
+        if !greeting.starts_with('2') {
+            return Err(format!("FTP server refused the connection: {greeting}"));
+        }
+        Ok(control)
+    }
+
+    /// Read one complete reply, including the RFC 959 multi-line form
+    /// (`code-` continuation lines terminated by `code ` on its own line).
+    fn read_reply(&mut self) -> Result<String, String> {
+        use std::io::BufRead;
+        let mut first = String::new();
+        self.reader
+            .read_line(&mut first)
+            .map_err(|e| format!("FTP command failed: {e}"))?;
+        if first.is_empty() {
+            return Err("FTP connection closed".to_string());
+        }
+        let code: String = first.chars().take(3).collect();
+        let multiline = first.chars().nth(3) == Some('-');
+        if !multiline {
+            return Ok(first.trim_end().to_string());
+        }
+        // Bounded: a server must not be able to hold us here indefinitely.
+        for _ in 0..256 {
+            let mut line = String::new();
+            let read = self
+                .reader
+                .read_line(&mut line)
+                .map_err(|e| format!("FTP command failed: {e}"))?;
+            if read == 0 {
+                return Err("FTP connection closed mid-reply".to_string());
+            }
+            if line.starts_with(&code) && line.chars().nth(3) == Some(' ') {
+                return Ok(line.trim_end().to_string());
+            }
+        }
+        Err("FTP reply exceeded line bound".to_string())
+    }
+
+    /// The address of the server we are actually connected to.
+    fn peer_ip(&self) -> Option<std::net::IpAddr> {
+        self.stream.peer_addr().ok().map(|a| a.ip())
+    }
+
+    fn command(&mut self, command: &str) -> Result<String, String> {
+        use std::io::Write;
+        self.stream
+            .write_all(format!("{command}\r\n").as_bytes())
+            .map_err(|e| format!("FTP command failed: {e}"))?;
+        self.read_reply()
+    }
+
+    /// Log in anonymously, tolerating servers that skip the password step.
+    fn login(&mut self) -> Result<(), String> {
+        let user = self.command("USER anonymous")?;
+        if user.starts_with("33") {
+            let pass = self.command("PASS goshaim@example.com")?;
+            if !pass.starts_with('2') {
+                return Err(format!("FTP login failed: {pass}"));
+            }
+        } else if !user.starts_with('2') {
+            return Err(format!("FTP login failed: {user}"));
+        }
+        let binary = self.command("TYPE I")?;
+        if !binary.starts_with('2') {
+            return Err(format!("FTP cannot switch to binary mode: {binary}"));
+        }
+        Ok(())
+    }
 }
 
-pub fn ftp_size(url: &str) -> Result<Option<u64>, String> {
-    let (host, port, path) = ftp_parse_url(url)?;
-    let mut control = ftp_control(&host, port)?;
-    let _ = ftp_exchange(&mut control, "USER anonymous")?;
-    let _ = ftp_exchange(&mut control, "PASS goshaim@example.com")?;
-    let _ = ftp_exchange(&mut control, "TYPE I")?;
-    let reply = ftp_exchange(&mut control, &format!("SIZE {path}"))?;
-    let _ = ftp_exchange(&mut control, "QUIT");
+pub fn ftp_size(url: &str, local: Local) -> Result<Option<u64>, String> {
+    let (host, port, path) = ftp_parse_url(url, local)?;
+    let mut control = FtpControl::connect(&host, port, local)?;
+    control.login()?;
+    let reply = control.command(&format!("SIZE {path}"))?;
+    let _ = control.command("QUIT");
     match reply.strip_prefix("213") {
         Some(size) => size
             .trim()
             .parse::<u64>()
             .map(Some)
             .map_err(|_| "FTP SIZE parse failed".to_string()),
+        // A server that does not implement SIZE answers 5xx; that is "unknown",
+        // not an error.
         None => Ok(None),
     }
 }
 
-pub fn ftp_download(url: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
-    use std::io::Write;
-    let (host, port, path) = ftp_parse_url(url)?;
-    let mut control = ftp_control(&host, port)?;
-    let _ = ftp_exchange(&mut control, "USER anonymous")?;
-    let _ = ftp_exchange(&mut control, "PASS goshaim@example.com")?;
-    let _ = ftp_exchange(&mut control, "TYPE I")?;
-    let pasv = ftp_exchange(&mut control, "PASV")?;
-    let data_addr = parse_pasv(&pasv)?;
-    control
-        .write_all(format!("RETR {path}\r\n").as_bytes())
-        .map_err(|e| format!("FTP download failed: {e}"))?;
+pub fn ftp_download(url: &str, max_bytes: u64, local: Local) -> Result<Vec<u8>, String> {
+    let (host, port, path) = ftp_parse_url(url, local)?;
+    let mut control = FtpControl::connect(&host, port, local)?;
+    control.login()?;
+    let pasv = control.command("PASV")?;
+    if !pasv.starts_with("227") {
+        return Err(format!("FTP passive mode refused: {pasv}"));
+    }
+    let mut data_addr = parse_pasv(&pasv)?;
+    // The server picks this address, so it is untrusted. The classic FTP
+    // bounce is a server naming a *third* host, turning us into its proxy;
+    // checking only for local addresses would not catch that, and would also
+    // wrongly fire when the user has legitimately opted into a private
+    // endpoint. Pin the data connection to the host we are already talking to,
+    // which is the address policy already approved, and keep only the port the
+    // server chose.
+    let control_ip = control
+        .peer_ip()
+        .ok_or_else(|| "FTP data connection failed: control peer unknown".to_string())?;
+    if data_addr.ip() != control_ip {
+        return Err(format!(
+            "FTP rejected: server directed the data connection to {} instead of {control_ip}",
+            data_addr.ip()
+        ));
+    }
+    data_addr.set_ip(control_ip);
+    let retr = control.command(&format!("RETR {path}"))?;
+    if !(retr.starts_with("150") || retr.starts_with("125")) {
+        return Err(format!("FTP download failed: {retr}"));
+    }
     let data = std::net::TcpStream::connect_timeout(&data_addr, Duration::from_millis(10_000))
         .map_err(|e| format!("FTP data connection failed: {e}"))?;
     data.set_read_timeout(Some(Duration::from_millis(limits::NETWORK_TIMEOUT_MS)))
         .map_err(|e| format!("FTP data connection failed: {e}"))?;
     let cap = max_bytes.min(64 * 1024 * 1024 * 1024) as usize;
     let body = read_bounded(data, cap, "FTP download")?;
-    let _ = ftp_exchange(&mut control, "QUIT");
+    let _ = control.command("QUIT");
     Ok(body)
 }
 
-fn parse_pasv(reply: &str) -> Result<std::net::SocketAddr, String> {
+pub fn parse_pasv(reply: &str) -> Result<std::net::SocketAddr, String> {
     let start = reply
         .find('(')
         .ok_or_else(|| "FTP PASV parse failed".to_string())?;
     let end = reply
         .find(')')
         .ok_or_else(|| "FTP PASV parse failed".to_string())?;
-    let nums: Vec<u16> = reply[start + 1..end]
+    if end <= start {
+        return Err("FTP PASV parse failed".to_string());
+    }
+    // Each field is one octet. Parsing as u16 let a hostile server send values
+    // above 255, which then overflowed `nums[4] * 256` -- a panic in debug
+    // builds and a wrapped port in release.
+    let nums: Vec<u8> = reply[start + 1..end]
         .split(',')
-        .map(|s| s.trim().parse::<u16>())
+        .map(|s| s.trim().parse::<u8>())
         .collect::<Result<_, _>>()
         .map_err(|_| "FTP PASV parse failed".to_string())?;
     if nums.len() != 6 {
         return Err("FTP PASV parse failed".to_string());
     }
-    let ip = std::net::Ipv4Addr::new(nums[0] as u8, nums[1] as u8, nums[2] as u8, nums[3] as u8);
-    Ok(std::net::SocketAddr::new(
-        std::net::IpAddr::V4(ip),
-        nums[4] * 256 + nums[5],
-    ))
+    let ip = std::net::Ipv4Addr::new(nums[0], nums[1], nums[2], nums[3]);
+    let port = u16::from(nums[4]) * 256 + u16::from(nums[5]);
+    if port == 0 {
+        return Err("FTP PASV parse failed".to_string());
+    }
+    Ok(std::net::SocketAddr::new(std::net::IpAddr::V4(ip), port))
 }
 
 /// In-memory fake network for tests: canned bodies per URL substring.
@@ -478,10 +619,15 @@ impl FakeNetwork {
 }
 
 impl NetworkClient for FakeNetwork {
-    fn get(&self, url: &str, _headers: &[(String, String)]) -> Result<FetchResult, String> {
+    fn get(
+        &self,
+        url: &str,
+        _headers: &[(String, String)],
+        local: Local,
+    ) -> Result<FetchResult, String> {
         self.calls.lock().unwrap().push(url.to_string());
         // Credentials fail closed before any canned match.
-        url_guard::validate(url, false, false)?;
+        url_guard::validate(url, false, local.allowed())?;
         for (key, body) in self.bodies.lock().unwrap().iter() {
             if url.contains(key) {
                 if body.len() > limits::MAX_JSON_BODY_BYTES {
@@ -499,9 +645,9 @@ impl NetworkClient for FakeNetwork {
         Err(format!("Fake network has no canned body for {url}"))
     }
 
-    fn head_len(&self, url: &str) -> Result<Option<u64>, String> {
+    fn head_len(&self, url: &str, local: Local) -> Result<Option<u64>, String> {
         self.calls.lock().unwrap().push(format!("HEAD {url}"));
-        url_guard::validate(url, false, false)?;
+        url_guard::validate(url, false, local.allowed())?;
         for (key, size) in self.head_sizes.lock().unwrap().iter() {
             if url.contains(key) {
                 return Ok(Some(*size));
@@ -510,8 +656,8 @@ impl NetworkClient for FakeNetwork {
         Ok(None)
     }
 
-    fn download_bounded(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
-        let result = self.get(url, &[])?;
+    fn download_bounded(&self, url: &str, max_bytes: u64, local: Local) -> Result<Vec<u8>, String> {
+        let result = self.get(url, &[], local)?;
         if result.body.len() as u64 > max_bytes {
             return Err(format!("Download exceeds size bound ({max_bytes} bytes)"));
         }
@@ -524,8 +670,9 @@ impl NetworkClient for FakeNetwork {
         dest: &std::path::Path,
         max_bytes: u64,
         cancel: &std::sync::atomic::AtomicBool,
+        local: Local,
     ) -> Result<u64, String> {
-        let body = self.download_bounded(url, max_bytes)?;
+        let body = self.download_bounded(url, max_bytes, local)?;
         stream_to_file(body.as_slice(), dest, max_bytes, cancel)
     }
 }

@@ -54,7 +54,11 @@ fn repo_component_rules() {
 fn oversized_body_fails_closed() {
     let big = vec![b'x'; goshaim_core::limits::MAX_JSON_BODY_BYTES + 1];
     let net = goshaim_core::network::FakeNetwork::new().canned_body("example.com", &big);
-    let result = net.get("https://example.com/releases", &[]);
+    let result = net.get(
+        "https://example.com/releases",
+        &[],
+        goshaim_core::network::Local::Denied,
+    );
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("exceeds size bound"));
 }

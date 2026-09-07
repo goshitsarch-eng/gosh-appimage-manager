@@ -11,7 +11,7 @@ use crate::desktop;
 use crate::elf;
 use crate::inspector::parse_upd_info;
 use crate::limits;
-use crate::network::NetworkClient;
+use crate::network::{Local, NetworkClient};
 use crate::proctable::ProcessTable;
 use crate::registry::ManagedRegistry;
 use crate::removal::canonical_existing;
@@ -278,10 +278,13 @@ impl<'a> UpdateService<'a> {
         // Stream to the staging file rather than buffering the whole AppImage:
         // these are routinely hundreds of megabytes and the bound defaults to
         // 8 GiB. This is also the first point cancellation can take effect.
-        if let Err(error) = self
-            .network
-            .download_to_file(&checked.url, &staging, max_bytes, cancel)
-        {
+        if let Err(error) = self.network.download_to_file(
+            &checked.url,
+            &staging,
+            max_bytes,
+            cancel,
+            Local::from_config(&app.update_config),
+        ) {
             let _ = fs::remove_file(&staging);
             result.error = error;
             return result;

@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use goshaim_core::controller::AppController;
-use goshaim_core::network::{FetchResult, NetworkClient};
+use goshaim_core::network::{FetchResult, Local, NetworkClient};
 use goshaim_core::process::{ProcessRequest, ProcessResult, ProcessRunner};
 use goshaim_core::proctable::ProcessTable;
 use goshaim_core::settings::Dirs;
@@ -105,9 +105,14 @@ impl SharedNetwork {
 }
 
 impl NetworkClient for SharedNetwork {
-    fn get(&self, url: &str, _headers: &[(String, String)]) -> Result<FetchResult, String> {
+    fn get(
+        &self,
+        url: &str,
+        _headers: &[(String, String)],
+        local: Local,
+    ) -> Result<FetchResult, String> {
         self.calls.lock().unwrap().push(url.to_string());
-        goshaim_core::url_guard::validate(url, false, false)?;
+        goshaim_core::url_guard::validate(url, false, local.allowed())?;
         for (key, body) in self.bodies.lock().unwrap().iter() {
             if url.contains(key) {
                 if body.len() > goshaim_core::limits::MAX_JSON_BODY_BYTES {
@@ -125,9 +130,9 @@ impl NetworkClient for SharedNetwork {
         Err(format!("Fake network has no canned body for {url}"))
     }
 
-    fn head_len(&self, url: &str) -> Result<Option<u64>, String> {
+    fn head_len(&self, url: &str, local: Local) -> Result<Option<u64>, String> {
         self.calls.lock().unwrap().push(format!("HEAD {url}"));
-        goshaim_core::url_guard::validate(url, false, false)?;
+        goshaim_core::url_guard::validate(url, false, local.allowed())?;
         for (key, size) in self.head_sizes.lock().unwrap().iter() {
             if url.contains(key) {
                 return Ok(Some(*size));
@@ -136,8 +141,8 @@ impl NetworkClient for SharedNetwork {
         Ok(None)
     }
 
-    fn download_bounded(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
-        let result = self.get(url, &[])?;
+    fn download_bounded(&self, url: &str, max_bytes: u64, local: Local) -> Result<Vec<u8>, String> {
+        let result = self.get(url, &[], local)?;
         if result.body.len() as u64 > max_bytes {
             return Err(format!("Download exceeds size bound ({max_bytes} bytes)"));
         }
@@ -150,10 +155,11 @@ impl NetworkClient for SharedNetwork {
         dest: &Path,
         max_bytes: u64,
         cancel: &AtomicBool,
+        local: Local,
     ) -> Result<u64, String> {
         // Exercise the real streaming writer so the tests cover the same code
         // path the production client uses to land bytes on disk.
-        let body = self.download_bounded(url, max_bytes)?;
+        let body = self.download_bounded(url, max_bytes, local)?;
         goshaim_core::network::stream_to_file(body.as_slice(), dest, max_bytes, cancel)
     }
 }

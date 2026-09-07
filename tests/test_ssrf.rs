@@ -44,7 +44,7 @@ fn hostname_resolving_to_loopback_is_refused_before_connecting() {
         "the literal host is deliberately innocuous; that is the point"
     );
 
-    let result = goshaim_core::network::ftp_size(&url);
+    let result = goshaim_core::network::ftp_size(&url, goshaim_core::network::Local::Denied);
     assert!(
         result.is_err(),
         "a hostname resolving to loopback must be refused, got {result:?}"
