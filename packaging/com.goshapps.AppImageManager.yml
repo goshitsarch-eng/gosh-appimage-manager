@@ -27,6 +27,12 @@ build-options:
   # in /app/rust must never go through post-processing; release binaries
   # carry no debuginfo anyway.
   no-debuginfo: true
+  # qemu-user aarch64 compilation is memory-hungry; cap cargo parallelism
+  # on that arch so the build survives on desktop machines.
+  arch:
+    aarch64:
+      env:
+        CARGO_BUILD_JOBS: '4'
 cleanup:
   - /include
   - /lib/pkgconfig
