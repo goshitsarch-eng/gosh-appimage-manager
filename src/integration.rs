@@ -313,7 +313,7 @@ impl<'a> IntegrationService<'a> {
             let live = Path::new(&destination);
             if live.exists() {
                 let backup = safe_fs::sibling_temp(&destination, ".gosh-bak-app-");
-                fs::copy(live, &backup).map_err(|_| {
+                safe_fs::backup_copy(live, &backup).map_err(|_| {
                     let _ = fs::remove_file(&staged);
                     Failure::new("Cannot create replacement backup".to_string())
                 })?;

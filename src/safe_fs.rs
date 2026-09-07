@@ -216,6 +216,25 @@ pub fn rename_no_replace(src: &Path, dst: &Path) -> Result<(), String> {
     }
 }
 
+/// Make `backup` a rollback copy of `live`, cheaply where possible.
+///
+/// A hard link is the same bytes under a second name: the original stays
+/// reachable through `backup` even after `live` is renamed over, which is
+/// exactly what rollback needs, and it costs no space and no I/O regardless
+/// of how large the AppImage is. Copying a multi-gigabyte file to make a
+/// backup that is usually discarded seconds later is pure waste.
+///
+/// Falls back to a real copy when linking is refused -- a filesystem without
+/// hard links, or a destination on a different device.
+pub fn backup_copy(live: &Path, backup: &Path) -> Result<(), String> {
+    if fs::hard_link(live, backup).is_ok() {
+        return Ok(());
+    }
+    fs::copy(live, backup)
+        .map(|_| ())
+        .map_err(|e| format!("Cannot create backup of {}: {e}", live.display()))
+}
+
 /// Remove all `.{prefix}*` leftovers in `dir` (rollback), deepest first.
 pub fn rollback_temps(dir: &Path, prefix: &str) -> Vec<String> {
     let mut removed = Vec::new();

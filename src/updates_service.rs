@@ -348,9 +348,19 @@ impl<'a> UpdateService<'a> {
             );
             return result;
         }
+        // Hash the staged file once. It was hashed here for the digest check
+        // and then again after the replacement to record it, which is two full
+        // reads of a file that can be gigabytes.
+        let staged_hash = match safe_fs::sha256_file(&staging, cancel) {
+            Ok(sum) => sum,
+            Err(error) => {
+                let _ = fs::remove_file(&staging);
+                result.error = error;
+                return result;
+            }
+        };
         if let Some(expected) = parse_expected_sha256(&checked.digest) {
-            let sum = safe_fs::sha256_file(&staging, cancel).unwrap_or_default();
-            if hex::encode(&sum) != expected {
+            if hex::encode(&staged_hash) != expected {
                 let _ = fs::remove_file(&staging);
                 result.error = "Staged update failed digest verification".to_string();
                 return result;
@@ -366,7 +376,7 @@ impl<'a> UpdateService<'a> {
         }
         // Rollback copy of the live file.
         let backup = safe_fs::sibling_temp(&live, ".gosh-upd-bak-");
-        if live.exists() && fs::copy(&live, &backup).is_err() {
+        if live.exists() && safe_fs::backup_copy(&live, &backup).is_err() {
             let _ = fs::remove_file(&staging);
             result.error = "Cannot create replacement backup".to_string();
             return result;
@@ -401,7 +411,7 @@ impl<'a> UpdateService<'a> {
         updated.size = fs::metadata(&live)
             .map(|m| m.len() as i64)
             .unwrap_or(app.size);
-        updated.sha256 = safe_fs::sha256_file(&live, cancel).unwrap_or_default();
+        updated.sha256 = staged_hash;
         if self.fail_point == UpdateFailPoint::DesktopInstall {
             let _ = fs::rename(&backup, &live);
             let _ = registry.restore(snapshot);

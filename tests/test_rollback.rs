@@ -189,3 +189,40 @@ fn failed_replace_restores_the_previous_installation() {
         .collect();
     assert!(leftovers.is_empty(), "temp leftovers: {leftovers:?}");
 }
+
+/// Audit finding P-7. Rollback material is made with a hard link where the
+/// filesystem allows it: the same bytes under a second name, which survives
+/// the rename that replaces the original and costs neither space nor I/O.
+/// Copying a multi-gigabyte AppImage to make a backup that is discarded
+/// seconds later is pure waste.
+#[test]
+fn backup_material_survives_a_replacing_rename() {
+    use goshaim_core::safe_fs::backup_copy;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let live = tmp.path().join("App.AppImage");
+    let backup = tmp.path().join(".gosh-bak-App");
+    let original = b"the original payload".to_vec();
+    std::fs::write(&live, &original).unwrap();
+
+    backup_copy(&live, &backup).expect("making a backup should succeed");
+    assert_eq!(std::fs::read(&backup).unwrap(), original);
+
+    // Replace `live` the way the update path does.
+    let staged = tmp.path().join(".gosh-upd-App");
+    std::fs::write(&staged, b"the new payload").unwrap();
+    std::fs::rename(&staged, &live).unwrap();
+
+    // The backup must still hold the previous content: renaming replaces the
+    // directory entry, not the inode the link points at.
+    assert_eq!(
+        std::fs::read(&backup).unwrap(),
+        original,
+        "the backup must not follow the replacement"
+    );
+    assert_eq!(std::fs::read(&live).unwrap(), b"the new payload".to_vec());
+
+    // And restoring it puts the original back.
+    std::fs::rename(&backup, &live).unwrap();
+    assert_eq!(std::fs::read(&live).unwrap(), original);
+}
