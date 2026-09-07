@@ -58,7 +58,6 @@
       </description>
     </release>
   </releases>
-  <translation type="gettext">gosh-appimage-manager</translation>
   <branding>
     <color type="primary" scheme_preference="light">#f4c84a</color>
     <color type="primary" scheme_preference="dark">#0b1224</color>

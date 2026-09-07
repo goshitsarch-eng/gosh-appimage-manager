@@ -68,9 +68,11 @@ GUI. `--version` prints `3.0.0`.
 gosh-appimage-manager --integrate <path> [--keep-both|--replace] [--replace-uuid UUID|--target PATH] [--yes]
 gosh-appimage-manager --update <path>|--all [--yes] [--force]
 gosh-appimage-manager --remove <path> [--yes] [--delete]
-gosh-appimage-manager --remove-all [--yes]
+gosh-appimage-manager --remove-all [--yes] [--delete]
 gosh-appimage-manager --list-installed [--json]
 gosh-appimage-manager --list-updates [--json]
+gosh-appimage-manager --list-discovered [--json]
+gosh-appimage-manager --adopt <path> [--yes]
 gosh-appimage-manager --list-update-managers
 gosh-appimage-manager --set-update-source <path> --manager <name> key=value...
 gosh-appimage-manager --set-update-source <path> --unset
@@ -81,22 +83,49 @@ gosh-appimage-manager --probe-inspect <path>
 gosh-appimage-manager --probe-autostart
 ```
 
-JSON list output uses `schema_version: 1` with `installed` or `updates` arrays.
-`--fetch-updates` is non-mutating (check metadata only) and prints a notice on
-stderr. Diagnostics go to stderr so stdout remains valid JSON.
+JSON list output uses `schema_version: 1` with an `installed`, `updates`, or
+`discovered` array. `--fetch-updates` is non-mutating (check metadata only)
+and prints a notice on stderr. Diagnostics go to stderr so stdout remains
+valid JSON. `--list-updates` and `--fetch-updates` exit `8` when an app's
+update check failed, so a script can tell "nothing to update" apart from
+"nothing could be checked"; the JSON document on stdout is still complete.
+
+`--list-discovered` reports AppImages in the managed folder and, when
+"discover AppImages outside the managed folder" is on, ones referenced by
+desktop entries elsewhere. `--adopt` registers such a file so it can be
+updated and removed here; nothing on disk is changed and its existing desktop
+entry is left alone.
+
+All three probes are non-mutating: `--probe-autostart` renders and verifies
+the autostart entry it *would* install without writing it or changing any
+setting.
 
 ## GUI
 
 `cargo run --features gui` (or the Flatpak) opens the libcosmic shell:
-Library / Inspect / Updates / Settings / About, with badges, progress,
-autostart switch, update-source editors, an inspect conflict dialog, and
-rollback/cancel behavior driven by the same core as the CLI.
+Library / Inspect / Updates / Tasks / Settings / About.
 
-Settings > Appearance offers System / Light / Dark with Gosh's own palettes,
-applied live with no restart. System follows the COSMIC theme mode.
-Destructive choices (replace/keep-both, Trash vs permanent delete, unsafe
-extraction opt-in, force-updating a running app) always go through a cosmic
-dialog. Positional file arguments open straight into the Inspect page.
+Every operation that touches disk, spawns a process, hashes, or uses the
+network runs on a worker thread, so the window keeps repainting and Cancel
+takes effect. The Tasks page shows running and recent work with progress and
+errors. Selecting a library entry opens a detail page: launch, reveal in the
+file manager, check and update, refresh metadata, edit the argument list and
+environment pairs, set or reset the update source, and the file's path,
+desktop id, hash, type, architecture, size, manager and provenance.
+
+Library has search and sorting. AppImages found outside the managed folder
+are listed for explicit adoption. Destructive choices — replace or keep both,
+Trash versus permanent delete, enabling the unsafe extraction fallback,
+updating a running app — go through a modal dialog that names the exact file.
+
+Building the GUI needs the Wayland and XKB development headers
+(`libwayland-dev`, `libxkbcommon-dev` on Debian/Ubuntu; present in the
+Flatpak SDK).
+
+Settings > Appearance offers System / Light / Dark, applied live with no
+restart and restored at startup. System follows the COSMIC theme mode.
+Positional file arguments open straight into the Inspect page; several files
+are inspected and confirmed one at a time.
 
 ## Flatpak
 
@@ -150,14 +179,40 @@ desktop entries, and icons are reused in place.
 - Archive paths with `..`, absolute names, or escaping symlinks are rejected.
 - Desktop `Exec` is built from program plus argument tokens. No shell strings.
 - Trash failure never becomes delete. Permanent delete requires an extra confirmation and refuses protected paths.
+- Update sources are checked against the address DNS actually returns, not
+  just the hostname, and every redirect hop is checked before it is followed.
+  Reaching a loopback or private-network endpoint needs an explicit
+  `allow_local_network=true` on a source the user created; embedded metadata
+  in an AppImage can never set it.
+- Updates verify an advertised SHA-256 (GitHub's `sha256:` form and GitLab's
+  bare hex), refuse a digest they cannot interpret, and refuse a payload whose
+  architecture differs from the installed one. An update with no published
+  checksum is shown as "reduced verification".
+- Running-app detection works inside the Flatpak sandbox, where `/proc` shows
+  only the sandbox itself, by asking the host through `flatpak-spawn`. A probe
+  that fails means "cannot tell", never "not running".
 - Launch is start-only detached. The manager never waits five seconds and kills the app.
 - Updates download to staging, validate as an AppImage, then atomically replace with rollback material retained until success.
 - Running apps block updates unless `--force` is explicit.
-- The unsafe `--appimage-extract` fallback is off by default, warned, and never used in tests or background checks.
+- The unsafe `--appimage-extract` fallback is off by default. It runs only when
+  safe extraction found nothing, the setting is on, *and* that exact file was
+  confirmed; it is never reached by tests or background checks.
+- A failed integration removes everything it created and restores everything
+  it replaced. Nothing is left in the managed folder or the applications
+  directory.
 
 ## Limitations
 
 - Zsync metadata is understood, but updates download the full file rather than applying a binary delta.
+- The GUI has not been visually verified on a running compositor. It compiles
+  and type-checks against libcosmic v0.12, and every operation behind it is
+  covered by tests, but no screenshots have been taken. See
+  `docs/verification.md`.
+- On X11/Xwayland the GUI panics before mapping a window (softbuffer 0.4.1
+  rejects the 32-bit visual libcosmic requests). Wayland, the primary target,
+  is unaffected.
+- Strings are English only. The AppStream metadata declares a gettext domain,
+  but no translation infrastructure exists yet.
 - A static/ftp source without version information reports "no version information" instead of guessing.
 - FTP is a legacy explicit option with an insecure-transport warning. Credentials in URLs are rejected.
 - Changing the managed folder away from `~/AppImages` in the Flatpak may require portal/document access for that path.
