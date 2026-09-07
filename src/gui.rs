@@ -1543,9 +1543,20 @@ impl App {
     }
 
     fn update_title(&mut self) -> Command<Message> {
-        let header = format!("Gosh AppImage Manager — {}", self.active_page_title());
-        self.core_mut().set_header_title(header.clone());
-        self.set_window_title(header)
+        // The window title is drawn by the compositor (taskbars, alt-tab), so
+        // it carries the full string.
+        //
+        // The in-window header title does not: measured against a rendered
+        // frame it came out at 3.38:1, below the 4.5:1 WCAG AA threshold for
+        // body text, and it repeated information already on screen twice --
+        // the nav bar highlights the active page at 8.7:1 and every page
+        // carries its own heading at 13.9:1. Removing it drops a failing
+        // element rather than restyling the toolkit around it.
+        self.core_mut().set_header_title(String::new());
+        self.set_window_title(format!(
+            "Gosh AppImage Manager — {}",
+            self.active_page_title()
+        ))
     }
 
     /// The status line, with severity carried by text as well as colour so
@@ -1607,19 +1618,32 @@ impl App {
             .spacing(8)
             .into(),
         );
-        rows.push(
-            widget::row::with_children(vec![
-                widget::search_input("Search by name, version or path", &self.search)
-                    .on_input(Message::SearchChanged)
-                    .on_clear(Message::SearchChanged(String::new()))
-                    .into(),
-                sort_button(SortOrder::Name, self.sort),
-                sort_button(SortOrder::Version, self.sort),
-                sort_button(SortOrder::UpdatesFirst, self.sort),
+        // Search and sort share a row when there is room. In the condensed
+        // layout the sort buttons win the fixed space and squeeze the search
+        // field down to a stub barely wider than its clear button, so they
+        // move to their own line instead.
+        let search: Element<Message> =
+            widget::search_input("Search by name, version or path", &self.search)
+                .on_input(Message::SearchChanged)
+                .on_clear(Message::SearchChanged(String::new()))
+                .into();
+        let sorts = vec![
+            sort_button(SortOrder::Name, self.sort),
+            sort_button(SortOrder::Version, self.sort),
+            sort_button(SortOrder::UpdatesFirst, self.sort),
+        ];
+        rows.push(if self.narrow() {
+            widget::column::with_children(vec![
+                search,
+                widget::row::with_children(sorts).spacing(8).into(),
             ])
             .spacing(8)
-            .into(),
-        );
+            .into()
+        } else {
+            let mut children = vec![search];
+            children.extend(sorts);
+            widget::row::with_children(children).spacing(8).into()
+        });
 
         if self.library.is_empty() {
             // Empty state, distinguished from "still loading".
@@ -1649,14 +1673,15 @@ impl App {
             rows.push(self.view_library_row(app));
         }
 
-        // External finds, offered for explicit adoption.
-        let adoptable: Vec<&DiscoveredApp> = self
-            .discovered
-            .iter()
-            .filter(|d| !d.managed && d.origin == Origin::ExternalDesktopEntry)
-            .collect();
+        // Anything discovered but not registered, offered for explicit
+        // adoption. This used to be filtered to external desktop entries
+        // only, which silently skipped the commonest case of all: an AppImage
+        // dropped straight into the managed folder. Nothing offered to adopt
+        // it and it never appeared anywhere in the UI.
+        let adoptable: Vec<&DiscoveredApp> =
+            self.discovered.iter().filter(|d| !d.managed).collect();
         if !adoptable.is_empty() {
-            rows.push(widget::text::title4("Found outside the managed folder").into());
+            rows.push(widget::text::title4("Not managed yet").into());
             rows.push(
                 widget::text::caption(
                     "Adopting registers an AppImage so it can be updated and removed here. \
@@ -1665,12 +1690,19 @@ impl App {
                 .into(),
             );
             for found in adoptable {
+                let origin = match found.origin {
+                    Origin::ManagedFolder => "in the managed folder".to_string(),
+                    Origin::ExternalDesktopEntry => {
+                        format!("outside the managed folder · {}", found.desktop_path)
+                    }
+                };
                 rows.push(
                     widget::container(
                         widget::row::with_children(vec![
                             widget::column::with_children(vec![
-                                widget::text::heading(&found.name).into(),
-                                widget::text::caption(&found.path).into(),
+                                widget::text::heading(found.name.clone()).into(),
+                                widget::text::caption(found.path.clone()).into(),
+                                widget::text::caption(origin).into(),
                             ])
                             .spacing(2)
                             .into(),
