@@ -123,16 +123,85 @@ fixed in that file and re-verified with the gates above:
   actual entry state; it now reads entry existence.
 - The unsafe-extraction "Enable (warned)" button sent `Noop`; a real
   `UnsafeFallbackConfirm` message now enables it after the warning.
+- The shared page footer printed "Made by Gosh" under every screen; the
+  caption was removed from the shared view and kept only on the About
+  page, which already carries it.
 
-## 7. Not run in this environment
+## 7. Packaged probes (prebuilt build-dir-x86_64, real 23.08 sandbox)
 
-- Live GUI interaction/screenshots: no display server in this container.
-  Needs one manual pass on a COSMIC session over the five fixed controls.
-- Packaged smoke (`flatpak-builder --run build-dir
-  packaging/com.goshapps.AppImageManager.yml gosh-appimage-manager
-  --self-test`): `flatpak-builder` is not installed here.
+`flatpak-builder` is not installed here; `flatpak build` from the same CLI
+runs the existing `build-dir-x86_64` directly
+(`flatpak-builder --run` is a thin wrapper over it). `flatpak build`
+resolves its runtimes from the real HOME, so the app home cannot be
+isolated with `HOME=`; `GOSHAIM_HOME=` did not propagate into the build
+sandbox either, so these probes ran against the live home and their residue
+(one autostart entry, one empty `registry.sqlite`) was deleted afterwards
+and verified absent.
 
-## 8. Worktree
+```
+GOSHAIM_HOME=/tmp/gosh-aim-flatpak-home flatpak build build-dir-x86_64 \
+  gosh-appimage-manager --self-test
+# SELF_TEST_OK, exit 0
+```
+
+```
+flatpak build build-dir-x86_64 gosh-appimage-manager --probe-host
+host_spawn_program=true
+host_spawn_exit=1
+in_flatpak=true
+managed_folder=/home/gosh/AppImages
+HOST_PROBE_OK
+```
+
+(`host_spawn_exit=1` is the build sandbox refusing host spawn; the probe
+still reports OK. A natively run probe exits 0 — see section 5.)
+
+```
+flatpak build build-dir-x86_64 gosh-appimage-manager --probe-autostart
+autostart_path=/home/gosh/.config/autostart/com.goshapps.AppImageManager-updates.desktop
+[Desktop Entry]
+Type=Application
+Name=Gosh AppImage Manager update checks
+Exec=flatpak run com.goshapps.AppImageManager --fetch-updates
+...
+AUTOSTART_OK
+```
+
+The Flatpak Exec line is correct. The written entry was removed after the
+probe.
+
+```
+flatpak build build-dir-x86_64 gosh-appimage-manager --fetch-updates
+0 update(s) available
+```
+
+Exit 0, non-mutating.
+
+## 8. GUI visual pass: blocked by an X11 startup crash (new finding)
+
+A private Xvfb seat (user-extracted Xvfb, `:99`, GLX+llvmpipe present) was
+provisioned so the live desktop was never touched. The GUI binary launches,
+sits in its event loop, then panics before mapping any window:
+
+```
+thread 'main' panicked at iced/tiny_skia/src/window/compositor.rs:56:10:
+Create softbuffer surface for window: PlatformError(Some("Visual 0x40 does
+not use softbuffer's pixel format and is unsupported"), None)
+```
+
+`xdpyinfo` shows visual `0x40` is a 32-bit TrueColor visual, selected
+because libcosmic requests a transparent window
+(`cosmic::app::Settings.transparent` defaults to `true` and is
+`pub(crate)`, so app code cannot toggle it). The pinned softbuffer 0.4.1
+(pop-os `cosmic-4.0` fork) only supports 16/24-bit X11 visuals, so the GUI
+cannot start on any X11/Xwayland session; Wayland (the primary target) is
+unaffected. No headless Wayland compositor is installable without root, and
+the live session was off-limits, so no screenshots could be captured.
+Visual verification still needs one manual pass on a COSMIC/Wayland
+session. Upstream fix (public transparency toggle or 32-bit softbuffer
+support) is out of tree; no local workaround was applied.
+
+## 9. Worktree
 
 `git diff --stat` for this session touches `src/gui.rs`, `src/main.rs`
 (dead-import scoping), and this record. `git status` shows no other
