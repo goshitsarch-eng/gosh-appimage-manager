@@ -186,8 +186,17 @@ impl AppController {
         &self,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Vec<crate::types::UpdateOffer> {
+        self.scan_updates(cancel).offers
+    }
+
+    /// Check every app and report failures alongside offers, so callers can
+    /// distinguish "up to date" from "could not check".
+    pub fn scan_updates(
+        &self,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> crate::updates_service::UpdateScan {
         UpdateService::new(&self.settings, &*self.network, &*self.processes)
-            .list_updates(&self.registry, cancel)
+            .list_updates_detailed(&self.registry, cancel)
     }
 
     pub fn apply_update(
@@ -245,6 +254,15 @@ impl AppController {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("Cannot create autostart dir: {e}"))?;
         }
+        let body = self.render_autostart_entry()?;
+        crate::safe_fs::atomic_write(&path, body.as_bytes(), 0o644)
+    }
+
+    /// Build the autostart entry body without writing it anywhere.
+    ///
+    /// Kept separate so the diagnostic probe can verify the Exec line without
+    /// installing the entry or changing the user's settings.
+    pub fn render_autostart_entry(&self) -> Result<String, String> {
         let exec = if crate::process::in_flatpak() {
             "flatpak run com.goshapps.AppImageManager --fetch-updates".to_string()
         } else {
@@ -253,10 +271,9 @@ impl AppController {
                 .unwrap_or_else(|_| "gosh-appimage-manager".to_string());
             format!("{} --fetch-updates", desktop::escape_exec_arg(&exe))
         };
-        let body = format!(
+        Ok(format!(
             "[Desktop Entry]\nType=Application\nName=Gosh AppImage Manager update checks\nExec={exec}\nIcon=com.goshapps.AppImageManager\nTerminal=false\nCategories=Utility;\nX-GNOME-Autostart-enabled=true\n"
-        );
-        crate::safe_fs::atomic_write(&path, body.as_bytes(), 0o644)
+        ))
     }
 
     /// Non-mutating readiness probe used by --self-test.

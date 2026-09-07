@@ -319,7 +319,16 @@ impl Application for App {
         if let Some(id) = first {
             nav_model.activate(id);
         }
-        let controller = AppController::new().expect("controller initialises");
+        let controller = match AppController::new() {
+            Ok(controller) => controller,
+            Err(error) => {
+                // A read-only home, a corrupt registry or a full disk must not
+                // abort the process before a window exists; the user gets a
+                // shell that can report the problem instead of a panic.
+                eprintln!("Gosh AppImage Manager cannot start: {error}");
+                std::process::exit(1);
+            }
+        };
         let appearance = controller.settings().appearance();
         let managed_folder_input = controller
             .settings()

@@ -189,15 +189,21 @@ pub fn is_forbidden_permanent_target(canonical: &Path, home: &Path) -> bool {
     if canonical == Path::new("/") {
         return true;
     }
+    let parent = canonical.parent();
     for root in [Path::new("/home"), Path::new("/root"), home] {
+        // The directory itself.
         if canonical == root {
             return true;
         }
-        if let Some(parent) = canonical.parent() {
-            if parent == Path::new("/") || parent == Path::new("/home") || parent == home {
-                return true;
-            }
+        // Anything sitting directly inside it: /home/<user>, /root/<x>, and
+        // the top level of this user's home are all too close to the root of
+        // someone's data to delete by path alone.
+        if parent == Some(root) {
+            return true;
         }
+    }
+    if parent == Some(Path::new("/")) {
+        return true;
     }
     // Never delete the managed file's own containing tree roots.
     if canonical.components().count() <= 2 {

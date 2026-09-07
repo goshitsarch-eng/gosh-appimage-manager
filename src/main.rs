@@ -154,7 +154,6 @@ fn run_gui_or_hint(args: Vec<String>) {
 
 #[cfg(not(feature = "gui"))]
 fn run_gui_or_hint(args: Vec<String>) {
-    let _ = args;
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let _ = writeln!(
@@ -166,8 +165,19 @@ fn run_gui_or_hint(args: Vec<String>) {
         out,
         "This build has no GUI. Rebuild with --features gui, or pass --help for CLI usage."
     );
-    // Keep Write import used in all configurations.
-    use std::io::Read;
-    let _ = std::io::stdin().lock().bytes().next();
+    if !args.is_empty() {
+        let _ = writeln!(
+            out,
+            "\nIgnored argument(s): {}. This build cannot open files in a window.",
+            args.join(" ")
+        );
+    }
+    let _ = writeln!(out);
+    print_help(&mut out);
     let _ = out.flush();
+    // Exit rather than waiting on stdin. A read here used to hang the process
+    // forever on the exact flow the README documents (`cargo build` then
+    // `cargo run`), which looks like a freeze rather than a build without a
+    // GUI.
+    std::process::exit(ExitCode::Usage as i32);
 }

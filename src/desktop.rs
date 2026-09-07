@@ -9,19 +9,27 @@ use std::path::{Path, PathBuf};
 use crate::limits;
 use crate::types::{EnvPair, InstalledApp};
 
-/// Escape one Exec token (mirrors DesktopParser::escapeExecArg).
+/// Escape one Exec token.
+///
+/// A bare two-character `%x` is passed through so callers can emit a real
+/// field code deliberately. Every other `%` is a literal and must be written
+/// `%%`: the Desktop Entry spec reserves `%` for field codes, so an argument
+/// like `--tag=50%` or a filename such as `100% done.txt` was previously
+/// handed to the launcher with a live (or malformed) field code in it and came
+/// back mangled.
 pub fn escape_exec_arg(token: &str) -> String {
     if token.len() == 2 && token.starts_with('%') {
         return token.to_string();
     }
-    let need_quote = token
+    let escaped_percent = token.replace('%', "%%");
+    let need_quote = escaped_percent
         .chars()
         .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '\\' | '$' | '`' | '\''));
     if !need_quote {
-        return token.to_string();
+        return escaped_percent;
     }
     let mut out = String::from("\"");
-    for ch in token.chars() {
+    for ch in escaped_percent.chars() {
         if matches!(ch, '"' | '\\' | '$' | '`') {
             out.push('\\');
         }

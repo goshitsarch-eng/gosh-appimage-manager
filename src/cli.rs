@@ -199,9 +199,17 @@ pub fn run_cli(
     }
 
     if has_arg(args, "--list-updates") {
-        let offers = controller.check_updates(&cancel);
+        let scan = controller.scan_updates(&cancel);
+        let offers = &scan.offers;
+        for failure in &scan.failures {
+            let _ = writeln!(
+                stderr,
+                "{}: update check failed ({}): {}",
+                failure.name, failure.manager, failure.error
+            );
+        }
         let mut items = Vec::new();
-        for offer in &offers {
+        for offer in offers {
             if json {
                 let app = controller.registry().by_uuid(&offer.uuid);
                 let mut obj = serde_json::Map::new();
@@ -250,10 +258,15 @@ pub fn run_cli(
                 );
             }
         }
-        return if json {
-            print_json("updates", items, stdout)
-        } else {
+        if json {
+            print_json("updates", items, stdout);
+        }
+        // stdout stays a valid, complete JSON document either way; the exit
+        // code is what tells a script the list may be short.
+        return if scan.failures.is_empty() {
             ExitCode::Ok
+        } else {
+            ExitCode::Network
         };
     }
 
@@ -462,6 +475,10 @@ pub fn run_cli(
             return ExitCode::NeedsConfirmation;
         }
         let apps = controller.registry().apps();
+        // Per-item results: one stuck entry must not abandon the rest, and the
+        // user needs a summary of what actually happened.
+        let mut removed = 0usize;
+        let mut failed = 0usize;
         for app in &apps {
             if !app.owned {
                 continue;
@@ -476,12 +493,22 @@ pub fn run_cli(
                 assume_yes: true,
             };
             let outcome = controller.remove_app(&req);
-            if !outcome.ok {
-                let _ = writeln!(stderr, "{}", outcome.error);
-                return ExitCode::Failure;
+            if outcome.ok {
+                removed += 1;
+            } else {
+                failed += 1;
+                let _ = writeln!(stderr, "{}: {}", app.managed_path, outcome.error);
             }
         }
-        return ExitCode::Ok;
+        let _ = writeln!(
+            stderr,
+            "Removed {removed} of {owned_count}; {failed} failed"
+        );
+        return if failed > 0 {
+            ExitCode::Failure
+        } else {
+            ExitCode::Ok
+        };
     }
 
     if has_arg(args, "--remove") {
@@ -533,13 +560,21 @@ pub fn run_cli(
             return ExitCode::Ok;
         }
         let manager = arg_value(args, "--manager");
+        // Only the tokens after `--manager <name>` are configuration. Scanning
+        // all of argv meant a source path containing '=' was silently parsed
+        // into the update config.
         let mut config = BTreeMap::new();
-        for arg in args {
-            if arg.contains('=') && !arg.starts_with('-') {
-                let mut split = arg.splitn(2, '=');
-                let key = split.next().unwrap_or_default().to_string();
-                let value = split.next().unwrap_or_default().to_string();
-                config.insert(key, value);
+        let config_start = args
+            .iter()
+            .position(|a| a == "--manager")
+            .map(|i| i + 2)
+            .unwrap_or(args.len());
+        for arg in args.iter().skip(config_start) {
+            if arg.starts_with('-') {
+                continue;
+            }
+            if let Some((key, value)) = arg.split_once('=') {
+                config.insert(key.to_string(), value.to_string());
             }
         }
         let mut error = String::new();
@@ -552,17 +587,29 @@ pub fn run_cli(
     }
 
     if has_arg(args, "--fetch-updates") {
-        let offers = controller.check_updates(&cancel);
-        let _ = writeln!(stderr, "{} update(s) available", offers.len());
-        if !offers.is_empty() {
-            for offer in &offers {
-                let _ = writeln!(
-                    stderr,
-                    "{} {} -> {}",
-                    offer.name, offer.current_version, offer.available_version
-                );
-            }
-            controller.notifier().notify_offers(&offers);
+        let scan = controller.scan_updates(&cancel);
+        let _ = writeln!(stderr, "{} update(s) available", scan.offers.len());
+        for offer in &scan.offers {
+            let _ = writeln!(
+                stderr,
+                "{} {} -> {}",
+                offer.name, offer.current_version, offer.available_version
+            );
+        }
+        // Report what could not be checked rather than folding it into
+        // "0 updates available", which reads as "you are up to date".
+        for failure in &scan.failures {
+            let _ = writeln!(
+                stderr,
+                "{}: update check failed ({}): {}",
+                failure.name, failure.manager, failure.error
+            );
+        }
+        if !scan.offers.is_empty() {
+            controller.notifier().notify_offers(&scan.offers);
+        }
+        if !scan.failures.is_empty() {
+            return ExitCode::Network;
         }
         return ExitCode::Ok;
     }
@@ -757,19 +804,25 @@ pub fn run_inspect_probe(
     }
 }
 
-/// Write and verify the session autostart entry for background checks.
+/// Render and verify the session autostart entry without installing it.
+///
+/// This is a diagnostic. It used to enable background update checks in the
+/// user's settings and write a real autostart entry, so running a probe opted
+/// the user into a login-time network task and left residue behind that had to
+/// be cleaned up by hand. It now renders the entry to a private temporary
+/// directory and verifies that, touching neither settings nor the session.
 pub fn run_autostart_probe(controller: &mut AppController, stdout: &mut dyn Write) -> ExitCode {
-    controller.settings_mut().set_background_update_checks(true);
-    if let Err(e) = controller.sync_autostart(true) {
-        let _ = writeln!(stdout, "AUTOSTART_MISSING ({e})");
-        return ExitCode::Failure;
-    }
     let path = controller.autostart_desktop_path();
     let _ = writeln!(stdout, "autostart_path={}", path.display());
-    let body = match std::fs::read(&path) {
-        Ok(body) => body,
-        Err(_) => {
-            let _ = writeln!(stdout, "AUTOSTART_MISSING");
+    let _ = writeln!(
+        stdout,
+        "autostart_installed={}",
+        if path.exists() { "true" } else { "false" }
+    );
+    let body = match controller.render_autostart_entry() {
+        Ok(body) => body.into_bytes(),
+        Err(e) => {
+            let _ = writeln!(stdout, "AUTOSTART_MISSING ({e})");
             return ExitCode::Failure;
         }
     };

@@ -233,3 +233,28 @@ fn mkdir_0700_refuses_hostile_preexisting_paths() {
     );
     assert!(mkdir_0700(&fresh).is_ok(), "must be idempotent");
 }
+
+/// Audit finding C-5. The Desktop Entry spec reserves `%` for field codes, so
+/// a literal percent in a user argument has to be written `%%`. It was passed
+/// through raw, which mangled ordinary filenames and let an argument of
+/// exactly `%U` become a live field code by accident.
+#[test]
+fn literal_percent_is_escaped_in_exec_arguments() {
+    use goshaim_core::desktop::{build_exec_line, escape_exec_arg};
+
+    assert_eq!(escape_exec_arg("--tag=50%"), "--tag=50%%");
+    assert_eq!(escape_exec_arg("100% done.txt"), "\"100%% done.txt\"");
+    assert_eq!(escape_exec_arg("a%b%c"), "a%%b%%c");
+    // A deliberate two-character field code is still emitted as one.
+    assert_eq!(escape_exec_arg("%U"), "%U");
+    assert_eq!(escape_exec_arg("%f"), "%f");
+    // Tokens without a percent are untouched.
+    assert_eq!(escape_exec_arg("--verbose"), "--verbose");
+
+    let line = build_exec_line(
+        "/apps/X.AppImage",
+        &[],
+        &["--open".to_string(), "100% done.txt".to_string()],
+    );
+    assert_eq!(line, "/apps/X.AppImage --open \"100%% done.txt\"");
+}

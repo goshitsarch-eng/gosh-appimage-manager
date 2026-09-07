@@ -54,24 +54,41 @@ fn inspect_probe_invalid_file_fails() {
     assert!(String::from_utf8_lossy(&out).contains("INSPECT_NO_EXECUTION"));
 }
 
+/// Audit finding C-13. The probe verifies the autostart entry it *would*
+/// install. It must not install it, and must not enable background update
+/// checks: the brief requires diagnostic probes to be non-mutating, and this
+/// one used to opt the user into a login-time network task as a side effect.
 #[test]
-fn autostart_probe_writes_and_verifies_entry() {
+fn autostart_probe_verifies_without_mutating() {
     let h = Harness::new();
     let mut c = h.controller();
+    let autostart = c.autostart_desktop_path();
+    let background_before = c.settings().background_update_checks();
+
     let mut out = Vec::new();
-    // Outside flatpak the Exec line is the current exe + --fetch-updates.
     let code = goshaim_core::cli::run_autostart_probe(&mut c, &mut out);
     let text = String::from_utf8_lossy(&out);
-    assert!(text.contains("autostart_path="));
-    if goshaim_core::process::in_flatpak()
-        || std::env::var("FLATPAK_ID").as_deref() == Ok("com.goshapps.AppImageManager")
-    {
-        assert!(text.contains("AUTOSTART_OK"));
-    } else {
-        assert!(text.contains("AUTOSTART_OK"), "got: {text}");
-    }
-    assert!(text.contains("--fetch-updates"));
+
+    // It still proves the Exec line is right.
+    assert!(text.contains("autostart_path="), "got: {text}");
+    assert!(text.contains("--fetch-updates"), "got: {text}");
+    assert!(text.contains("AUTOSTART_OK"), "got: {text}");
     assert_eq!(code as i32, goshaim_core::types::ExitCode::Ok as i32);
+
+    // And it leaves nothing behind.
+    assert!(
+        !autostart.exists(),
+        "the probe must not install the autostart entry"
+    );
+    assert_eq!(
+        c.settings().background_update_checks(),
+        background_before,
+        "the probe must not change the background-checks setting"
+    );
+    assert!(
+        text.contains("autostart_installed=false"),
+        "the probe should report whether an entry is actually installed: {text}"
+    );
 }
 
 #[test]

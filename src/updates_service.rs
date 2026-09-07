@@ -20,6 +20,29 @@ use crate::settings::SettingsStore;
 use crate::types::{InstalledApp, IntegrateResult, UpdateFailPoint, UpdateOffer};
 use crate::updates_sources::{Config, UpdateCheckResult, UpdateSourceFactory};
 
+/// One app whose update check could not complete.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateCheckFailure {
+    pub uuid: String,
+    pub name: String,
+    pub manager: String,
+    pub error: String,
+}
+
+/// The outcome of checking every app: what is offered, and what could not be
+/// checked at all. The distinction is the difference between telling a user
+/// they are up to date and telling them the truth.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateScan {
+    pub offers: Vec<UpdateOffer>,
+    pub failures: Vec<UpdateCheckFailure>,
+    /// Apps with no update source configured; not an error.
+    pub skipped: usize,
+    /// Apps an update check was actually attempted for.
+    pub checked: usize,
+    pub cancelled: bool,
+}
+
 /// Resolved (manager, config) pair for one app.
 type ResolvedSource = (Box<dyn crate::updates_sources::UpdateSource>, Config);
 
@@ -123,21 +146,59 @@ impl<'a> UpdateService<'a> {
     }
 
     /// List offers for apps whose remote version differs. Check-only.
+    ///
+    /// Failures are discarded here; callers that need to tell "nothing to
+    /// update" apart from "nothing could be checked" should use
+    /// `list_updates_detailed`.
     pub fn list_updates(
         &self,
         registry: &ManagedRegistry,
         cancel: &AtomicBool,
     ) -> Vec<UpdateOffer> {
-        let mut offers = Vec::new();
+        self.list_updates_detailed(registry, cancel).offers
+    }
+
+    /// Check every app and report both the offers and the failures.
+    ///
+    /// The offers-only view silently drops every per-app error, so a total
+    /// network outage, an expired certificate or a misconfigured source was
+    /// indistinguishable from "everything is up to date" -- the UI cheerfully
+    /// said so having checked nothing.
+    pub fn list_updates_detailed(
+        &self,
+        registry: &ManagedRegistry,
+        cancel: &AtomicBool,
+    ) -> UpdateScan {
+        let mut scan = UpdateScan::default();
         for app in registry.apps() {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                scan.cancelled = true;
                 break;
             }
             if app.update_manager.is_empty() && app.embedded_update.is_empty() {
+                scan.skipped += 1;
                 continue;
             }
+            scan.checked += 1;
             let checked = self.check(&app, cancel);
-            if !checked.ok || !checked.available || checked.url.is_empty() {
+            if !checked.ok {
+                scan.failures.push(UpdateCheckFailure {
+                    uuid: app.uuid.clone(),
+                    name: app.name.clone(),
+                    manager: if checked.manager.is_empty() {
+                        app.update_manager.clone()
+                    } else {
+                        checked.manager.clone()
+                    },
+                    error: if checked.error.is_empty() {
+                        "Update check failed".to_string()
+                    } else {
+                        checked.error.clone()
+                    },
+                });
+                continue;
+            }
+            if !checked.available || checked.url.is_empty() {
                 continue;
             }
             if checked.version.is_empty() || checked.version == app.version {
@@ -148,7 +209,7 @@ impl<'a> UpdateService<'a> {
                     .unwrap_or_else(|| PathBuf::from(&app.managed_path));
                 self.processes.is_running(&canon.to_string_lossy())
             };
-            offers.push(UpdateOffer {
+            scan.offers.push(UpdateOffer {
                 uuid: app.uuid.clone(),
                 name: app.name.clone(),
                 current_version: app.version.clone(),
@@ -162,7 +223,7 @@ impl<'a> UpdateService<'a> {
                 running,
             });
         }
-        offers
+        scan
     }
 
     /// Download, validate, atomically replace, and re-register.
@@ -185,6 +246,18 @@ impl<'a> UpdateService<'a> {
         }
         if !checked.available || checked.url.is_empty() {
             result.error = "No update available".to_string();
+            return result;
+        }
+        // The forge sources report `available: true` whenever they find a
+        // matching asset; only list_updates compared versions. So applying
+        // directly -- which is what `--update <path>` does -- would re-download
+        // and replace a working installation with the identical version.
+        if checked.version.is_empty() {
+            result.error = "No version information in update metadata".to_string();
+            return result;
+        }
+        if checked.version == app.version {
+            result.error = format!("Already at the latest version ({})", app.version);
             return result;
         }
         let canon = canonical_existing(&app.managed_path)

@@ -504,3 +504,72 @@ fn cancelled_download_removes_the_partial_file() {
         "a cancelled download must not leave a partial file"
     );
 }
+
+/// Audit finding C-4. The forge sources report `available: true` for any
+/// matching asset; only list_updates compared versions. Applying directly --
+/// which is what `--update <path>` does -- therefore replaced a working
+/// installation with the identical version.
+#[test]
+fn applying_when_already_current_is_refused() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let live = common::write_fixture(h.tmp.path(), "V.AppImage");
+    let before = std::fs::read(&live).unwrap();
+    let payload = goshaim_core::inspector::make_test_elf(
+        goshaim_core::types::Architecture::X86_64,
+        goshaim_core::types::AppImageType::Type2,
+    );
+    // The remote advertises exactly the version already installed.
+    let body = r#"{"tag_name":"v1","assets":[{"name":"app.AppImage","browser_download_url":"https://github.com/x/y/releases/download/v1/app.AppImage","size":128}]}"#;
+    h.network.canned_body("api.github.com", body.as_bytes());
+    h.network
+        .canned_body("github.com/x/y/releases/download", &payload);
+
+    let app = seed_arch_app(&mut c, &live);
+    let result = c.apply_update(&app, false, &std::sync::atomic::AtomicBool::new(false));
+    assert!(
+        !result.ok,
+        "must not replace an install with its own version"
+    );
+    assert!(
+        result.error.contains("Already at the latest version"),
+        "got: {}",
+        result.error
+    );
+    assert_eq!(
+        std::fs::read(&live).unwrap(),
+        before,
+        "file must be untouched"
+    );
+}
+
+/// Audit finding C-6. A failed check must be reported as a failure, not folded
+/// into "no updates available" -- which reads to a user as "you are current".
+#[test]
+fn failed_checks_are_reported_not_silently_dropped() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let live = common::write_fixture(h.tmp.path(), "V.AppImage");
+    // No canned body for api.github.com: the check fails, as it would with the
+    // network down or a certificate expired.
+    let app = seed_arch_app(&mut c, &live);
+
+    let scan = c.scan_updates(&std::sync::atomic::AtomicBool::new(false));
+    assert!(scan.offers.is_empty(), "no offer can be produced");
+    assert_eq!(scan.checked, 1, "the app should have been checked");
+    assert_eq!(scan.failures.len(), 1, "the failure must be reported");
+    assert_eq!(scan.failures[0].uuid, app.uuid);
+    assert!(
+        !scan.failures[0].error.is_empty(),
+        "the failure must carry a reason"
+    );
+
+    // An app with no update source is skipped, not counted as a failure.
+    let mut plain = goshaim_core::types::InstalledApp::new_owned();
+    plain.uuid = "plain".into();
+    plain.managed_path = live.to_string_lossy().into_owned();
+    c.registry_mut().upsert(plain).unwrap();
+    let scan = c.scan_updates(&std::sync::atomic::AtomicBool::new(false));
+    assert_eq!(scan.skipped, 1);
+    assert_eq!(scan.failures.len(), 1);
+}
