@@ -710,13 +710,10 @@ impl Application for App {
             Page::Settings => self.view_settings(),
             Page::About => self.view_about(),
         };
-        let mut stack = widget::column::with_children(vec![
-            body,
-            widget::text::caption(&self.status).into(),
-            widget::text::caption("Made by Gosh").into(),
-        ])
-        .spacing(8)
-        .into();
+        let mut stack =
+            widget::column::with_children(vec![body, widget::text::caption(&self.status).into()])
+                .spacing(8)
+                .into();
         if let Some(dialog) = self.view_dialog() {
             stack = widget::column::with_children(vec![stack, dialog])
                 .spacing(8)
