@@ -248,6 +248,21 @@ pub fn sha256_file(path: &Path, cancel: &std::sync::atomic::AtomicBool) -> Resul
     Ok(hasher.finalize().to_vec())
 }
 
+/// Render `path` safe to pass as a positional argument to an external tool.
+///
+/// A relative path beginning with `-` (`./-x.AppImage` opened as `-x.AppImage`)
+/// would be read as a switch by every extractor we shell out to. Prefixing
+/// `./` keeps the path meaning exactly the same file while making it
+/// unambiguously positional. Absolute paths already cannot be confused.
+pub fn argv_safe_path(path: &Path) -> String {
+    let text = path.to_string_lossy().into_owned();
+    if text.starts_with('-') {
+        format!("./{text}")
+    } else {
+        text
+    }
+}
+
 /// Resolve symlinks up to a hop limit; fails closed on loops/escape.
 pub fn canonical_bounded(path: &Path) -> Result<PathBuf, String> {
     let mut current = path.to_path_buf();
@@ -271,7 +286,8 @@ pub fn canonical_bounded(path: &Path) -> Result<PathBuf, String> {
     Err(format!("Too many symlink levels: {}", path.display()))
 }
 
-/// Reject archive member paths: absolute, `..`, overlong, device-ish.
+/// Reject archive member paths: absolute, `..`, overlong, device-ish, or
+/// anything that an extractor would read as a command-line switch.
 pub fn valid_archive_member(path: &str) -> Result<(), String> {
     if path.is_empty() {
         return Err("Empty archive path".to_string());
@@ -281,6 +297,15 @@ pub fn valid_archive_member(path: &str) -> Result<(), String> {
     }
     if path.starts_with('/') || path.starts_with('\\') {
         return Err(format!("Archive path is absolute: {path}"));
+    }
+    // Member names are appended to the extractor's argv as positional
+    // arguments. `unsquashfs` has no `--` end-of-options terminator, so a
+    // member called `-o/somewhere` or `-x` would be parsed as a switch —
+    // with 7-Zip, `-o` redirects extraction out of the private temp dir
+    // entirely. Names are attacker-controlled (they come from the archive's
+    // own listing), so refuse the shape rather than trust the tool.
+    if path.starts_with('-') {
+        return Err(format!("Archive path looks like an option: {path}"));
     }
     let mut depth: i32 = 0;
     for part in path.split('/').flat_map(|s| s.split('\\')) {

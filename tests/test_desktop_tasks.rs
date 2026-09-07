@@ -132,3 +132,58 @@ fn task_queue_runs_and_bounds_history() {
     assert_eq!(failing.state, goshaim_core::types::TaskState::Failed);
     assert!(failing.retryable);
 }
+
+/// Audit finding S-5. Member names are appended to the extractor's argv as
+/// positional arguments and `unsquashfs` has no `--` terminator, so a member
+/// that looks like a switch is a switch. With 7-Zip, `-o<dir>` redirects
+/// extraction out of the private temp directory. The names come from the
+/// archive's own listing, so they are fully attacker-controlled.
+#[test]
+fn option_shaped_archive_members_are_refused() {
+    use goshaim_core::safe_fs::valid_archive_member;
+    for hostile in [
+        "-o/tmp/pwned/evil.desktop",
+        "-x",
+        "--help",
+        "-e/etc/passwd",
+        "-p secret",
+        "-scrc",
+    ] {
+        assert!(
+            valid_archive_member(hostile).is_err(),
+            "member {hostile:?} would be parsed as an extractor switch"
+        );
+    }
+    // Ordinary members keep working, including ones that merely contain a dash.
+    for benign in [
+        "usr/share/applications/app.desktop",
+        ".DirIcon",
+        "some-app-1.2.desktop",
+        "a/b-c/d.png",
+    ] {
+        assert!(
+            valid_archive_member(benign).is_ok(),
+            "member {benign:?} should still be accepted"
+        );
+    }
+}
+
+/// The archive path itself is user-supplied; a relative name starting with `-`
+/// must stay positional without changing which file it names.
+#[test]
+fn argv_safe_path_neutralises_leading_dash() {
+    use goshaim_core::safe_fs::argv_safe_path;
+    use std::path::Path;
+    assert_eq!(argv_safe_path(Path::new("-x.AppImage")), "./-x.AppImage");
+    assert_eq!(
+        argv_safe_path(Path::new("--rm.AppImage")),
+        "./--rm.AppImage"
+    );
+    // Unambiguous paths are passed through untouched.
+    assert_eq!(
+        argv_safe_path(Path::new("/apps/X.AppImage")),
+        "/apps/X.AppImage"
+    );
+    assert_eq!(argv_safe_path(Path::new("./X.AppImage")), "./X.AppImage");
+    assert_eq!(argv_safe_path(Path::new("X.AppImage")), "X.AppImage");
+}

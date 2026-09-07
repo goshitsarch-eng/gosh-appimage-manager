@@ -237,14 +237,14 @@ impl<'a> AppImageInspector<'a> {
         let (program, args) = match tool {
             "unsquashfs" => (
                 "unsquashfs".to_string(),
-                vec!["-l".to_string(), path.to_string_lossy().into_owned()],
+                vec!["-l".to_string(), safe_fs::argv_safe_path(path)],
             ),
             "7zz" => (
                 "7zz".to_string(),
                 vec![
                     "l".to_string(),
                     "-ba".to_string(),
-                    path.to_string_lossy().into_owned(),
+                    safe_fs::argv_safe_path(path),
                 ],
             ),
             _ => {
@@ -290,7 +290,7 @@ impl<'a> AppImageInspector<'a> {
                     "-d".to_string(),
                     dest.to_string_lossy().into_owned(),
                     "-f".to_string(),
-                    path.to_string_lossy().into_owned(),
+                    safe_fs::argv_safe_path(path),
                 ],
             ),
             "7zz" => (
@@ -298,7 +298,7 @@ impl<'a> AppImageInspector<'a> {
                 vec![
                     "x".to_string(),
                     format!("-o{}", dest.to_string_lossy()),
-                    path.to_string_lossy().into_owned(),
+                    safe_fs::argv_safe_path(path),
                 ],
             ),
             _ => return Err(format!("No safe extractor {tool}")),
