@@ -92,3 +92,78 @@ fn github_validation_matrix() {
     assert!(!good("gosh", ".."));
     assert!(!good("gosh", &"r".repeat(200)));
 }
+
+/// Audit finding S-9. The literal-host guard missed every transitional IPv4
+/// encoding and the shared/CGNAT range, so an attacker only had to spell the
+/// address differently. Measured before the fix: all of these were allowed.
+#[test]
+fn transitional_and_shared_addresses_are_local() {
+    for hostile in [
+        "https://[::ffff:127.0.0.1]/x",       // IPv4-mapped loopback
+        "https://[::ffff:169.254.169.254]/x", // IPv4-mapped cloud metadata
+        "https://[64:ff9b::7f00:1]/x",        // NAT64-embedded loopback
+        "https://[64:ff9b::a9fe:a9fe]/x",     // NAT64-embedded metadata
+        "https://100.64.0.1/x",               // carrier-grade NAT
+        "https://192.0.0.1/x",                // IETF protocol assignments
+        "https://198.19.0.1/x",               // benchmarking range
+        "https://255.255.255.255/x",          // broadcast
+        "https://localhost./x",               // trailing-dot loopback name
+        "https://db.internal./x",             // trailing-dot internal name
+    ] {
+        assert!(
+            goshaim_core::url_guard::validate(hostile, false, false).is_err(),
+            "{hostile} should need an explicit local-network opt-in"
+        );
+    }
+    // Ordinary public destinations are unaffected.
+    for benign in [
+        "https://api.github.com/repos/x/y/releases/latest",
+        "https://8.8.8.8/x",
+        "https://[2606:4700:4700::1111]/x",
+        "https://101.64.0.1/x", // just outside 100.64.0.0/10
+    ] {
+        assert!(
+            goshaim_core::url_guard::validate(benign, false, false).is_ok(),
+            "{benign} should still be allowed"
+        );
+    }
+}
+
+/// Audit finding S-2. A redirect hop is guarded before it is followed, so the
+/// internal request is never issued at all.
+#[test]
+fn redirect_into_a_local_destination_is_refused() {
+    let public = url::Url::parse("https://updates.example.com/app").unwrap();
+    for hop in [
+        "https://127.0.0.1/admin",
+        "https://10.0.0.5/admin",
+        "https://[::ffff:169.254.169.254]/latest/meta-data/",
+        "https://localhost./admin",
+    ] {
+        let next = url::Url::parse(hop).unwrap();
+        assert!(
+            goshaim_core::url_guard::check_redirect(&public, &next).is_err(),
+            "redirect to {hop} must be refused"
+        );
+    }
+    // A normal cross-host redirect still works.
+    let ok = url::Url::parse("https://cdn.example.net/app.AppImage").unwrap();
+    assert!(goshaim_core::url_guard::check_redirect(&public, &ok).is_ok());
+}
+
+/// Audit finding S-3. The downgrade guard applies to redirect hops on every
+/// method, not only to `get`'s final URL.
+#[test]
+fn redirect_downgrade_and_scheme_change_are_refused() {
+    let https = url::Url::parse("https://updates.example.com/app").unwrap();
+    for hop in [
+        "http://updates.example.com/app",
+        "ftp://updates.example.com/app",
+    ] {
+        let next = url::Url::parse(hop).unwrap();
+        assert!(
+            goshaim_core::url_guard::check_redirect(&https, &next).is_err(),
+            "redirect to {hop} must be refused"
+        );
+    }
+}

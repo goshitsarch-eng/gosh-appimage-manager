@@ -25,24 +25,76 @@ pub trait NetworkClient: Send + Sync {
     fn download_bounded(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, String>;
 }
 
-fn pinned_ip(host: &str, port: u16) -> Result<std::net::IpAddr, String> {
+/// Resolve `host` and pin the request to a single address.
+///
+/// Resolution is the point where a guard actually bites: `url_guard::validate`
+/// can only inspect the literal host string, and any name at all may resolve
+/// to loopback, link-local or RFC1918 space. Checking the address we are about
+/// to connect to closes that gap, and pinning it means the address cannot be
+/// swapped between the check and the connection (DNS rebinding).
+fn pinned_ip(host: &str, port: u16, allow_private: bool) -> Result<std::net::IpAddr, String> {
     let addrs = (host, port)
         .to_socket_addrs()
         .map_err(|e| format!("DNS resolution failed for {host}: {e}"))?;
-    addrs
+    let ip = addrs
         .map(|a| a.ip())
         .next()
-        .ok_or_else(|| format!("DNS resolution failed for {host}: no addresses"))
+        .ok_or_else(|| format!("DNS resolution failed for {host}: no addresses"))?;
+    if !allow_private && url_guard::is_local_ip(&ip) {
+        return Err(format!(
+            "URL rejected: {host} resolves to a local-network address ({ip}); \
+             local-network destinations need an explicit opt-in"
+        ));
+    }
+    Ok(ip)
+}
+
+/// Redirect policy that validates every hop *before* it is followed.
+///
+/// reqwest follows redirects inside `send()`, so inspecting only the final URL
+/// afterwards is too late — the intermediate requests have already reached the
+/// internal host, which is the entire payload of an SSRF. This runs the same
+/// guard on each hop and refuses the chain rather than the outcome.
+fn redirect_policy(allow_private: bool) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= limits::MAX_REDIRECTS {
+            return attempt.error("URL rejected: too many redirects");
+        }
+        let previous = match attempt.previous().last() {
+            Some(url) => url.clone(),
+            None => return attempt.stop(),
+        };
+        if let Err(e) = url_guard::check_redirect(&previous, attempt.url()) {
+            return attempt.error(e);
+        }
+        // The hop's host is fresh, so it gets a fresh resolution check too;
+        // the `.resolve()` pin only ever covered the original host.
+        match host_port(attempt.url()) {
+            Ok((host, port)) => match pinned_ip(&host, port, allow_private) {
+                Ok(_) => attempt.follow(),
+                Err(e) => attempt.error(e),
+            },
+            Err(e) => attempt.error(e),
+        }
+    })
 }
 
 fn client_for(host: &str, port: u16) -> Result<reqwest::blocking::Client, String> {
-    let ip = pinned_ip(host, port)?;
+    client_for_with(host, port, false)
+}
+
+fn client_for_with(
+    host: &str,
+    port: u16,
+    allow_private: bool,
+) -> Result<reqwest::blocking::Client, String> {
+    let ip = pinned_ip(host, port, allow_private)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_millis(limits::NETWORK_TIMEOUT_MS))
         .connect_timeout(Duration::from_millis(10_000))
         // Pin this host to the single resolved address for the request.
         .resolve(host, std::net::SocketAddr::new(ip, port))
-        .redirect(reqwest::redirect::Policy::limited(limits::MAX_REDIRECTS))
+        .redirect(redirect_policy(allow_private))
         .user_agent(format!("{}/{}", limits::EXECUTABLE_NAME, limits::VERSION))
         .build()
         .map_err(|e| format!("Cannot build network client: {e}"))?;
@@ -78,6 +130,22 @@ fn read_bounded<R: Read>(mut reader: R, max: usize, what: &str) -> Result<Vec<u8
     Ok(out)
 }
 
+/// Belt-and-braces check on where a request actually ended up.
+///
+/// `redirect_policy` refuses bad hops before they are followed; this catches
+/// anything that reached the final URL by another route and, in particular,
+/// keeps every method — not just `get` — from accepting a plaintext endpoint.
+fn guard_final_url(requested: &url::Url, final_url: &url::Url) -> Result<(), String> {
+    if final_url == requested {
+        return Ok(());
+    }
+    url_guard::check_redirect(requested, final_url)?;
+    if requested.scheme() == "https" && final_url.scheme() != "https" {
+        return Err("URL rejected: refusing https-to-http downgrade".to_string());
+    }
+    Ok(())
+}
+
 pub struct ReqwestClient;
 
 impl Default for ReqwestClient {
@@ -108,13 +176,7 @@ impl NetworkClient for ReqwestClient {
             .send()
             .map_err(|e| format!("Network request failed: {e}"))?;
         let final_url = response.url().to_string();
-        // Downgrade + credential guard across the redirect chain.
-        let final_parsed =
-            url::Url::parse(&final_url).map_err(|_| "URL rejected: bad redirect".to_string())?;
-        url_guard::check_redirect(&checked.url, &final_parsed)?;
-        if final_parsed.scheme() == "http" {
-            return Err("URL rejected: refusing https-to-http downgrade".to_string());
-        }
+        guard_final_url(&checked.url, response.url())?;
         let status = response.status();
         if !status.is_success() {
             return Err(format!("Network request failed: HTTP {status}"));
@@ -134,6 +196,7 @@ impl NetworkClient for ReqwestClient {
             .head(checked.url.clone())
             .send()
             .map_err(|e| format!("Network request failed: {e}"))?;
+        guard_final_url(&checked.url, response.url())?;
         if !response.status().is_success() {
             return Err(format!(
                 "Network request failed: HTTP {}",
@@ -158,6 +221,7 @@ impl NetworkClient for ReqwestClient {
             .get(checked.url.clone())
             .send()
             .map_err(|e| format!("Network request failed: {e}"))?;
+        guard_final_url(&checked.url, response.url())?;
         if !response.status().is_success() {
             return Err(format!(
                 "Network request failed: HTTP {}",
@@ -197,7 +261,7 @@ fn ftp_parse_url(url: &str) -> Result<(String, u16, String), String> {
 
 fn ftp_control(host: &str, port: u16) -> Result<std::net::TcpStream, String> {
     let stream = std::net::TcpStream::connect_timeout(
-        &pinned_ip(host, port).map(|ip| std::net::SocketAddr::new(ip, port))?,
+        &pinned_ip(host, port, false).map(|ip| std::net::SocketAddr::new(ip, port))?,
         Duration::from_millis(10_000),
     )
     .map_err(|e| format!("FTP connection failed: {e}"))?;
