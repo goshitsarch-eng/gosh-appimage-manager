@@ -70,9 +70,7 @@ enum PendingDialog {
         name: String,
         permanent: bool,
     },
-    UnsafeExtract {
-        path: String,
-    },
+    UnsafeExtract,
     UpdateForce {
         uuid: String,
         name: String,
@@ -82,6 +80,7 @@ enum PendingDialog {
 #[derive(Clone, Debug)]
 pub enum Message {
     InspectPathChanged(String),
+    InspectReplaceUuidChanged(String),
     InspectBrowse,
     InspectDialog(Result<url::Url, String>),
     InspectRun,
@@ -102,6 +101,8 @@ pub enum Message {
     BackgroundToggled(bool),
     MoveSourceToggled(bool),
     UnsafeFallbackToggled(bool),
+    UnsafeFallbackConfirm,
+    UpdateSourceUuidChanged(String),
     AppearanceSelected(Appearance),
     ManagedFolderChanged(String),
     ManagedFolderApply,
@@ -112,6 +113,7 @@ pub enum Message {
     Noop,
 }
 
+#[derive(Default)]
 struct InspectState {
     path_input: String,
     summary: Vec<String>,
@@ -120,20 +122,6 @@ struct InspectState {
     conflict_name: String,
     replace_uuid: String,
     inspected_ok: bool,
-}
-
-impl Default for InspectState {
-    fn default() -> Self {
-        Self {
-            path_input: String::new(),
-            summary: Vec::new(),
-            error: String::new(),
-            conflict_path: String::new(),
-            conflict_name: String::new(),
-            replace_uuid: String::new(),
-            inspected_ok: false,
-        }
-    }
 }
 
 #[derive(Default)]
@@ -153,11 +141,11 @@ pub struct App {
     library: Vec<InstalledApp>,
     running: Vec<String>,
     updates: Vec<UpdateOffer>,
-    tasks: Vec<String>,
     inspect: InspectState,
     dialog: Option<PendingDialog>,
     batch: BatchState,
     managed_folder_input: String,
+    source_uuid_input: String,
     source_manager_input: String,
     source_config_input: String,
     status: String,
@@ -192,6 +180,7 @@ impl App {
         self.inspect.error.clear();
         self.inspect.summary.clear();
         self.inspect.inspected_ok = false;
+        self.inspect.replace_uuid.clear();
         let cancel = AtomicBool::new(false);
         let existing = self
             .controller
@@ -345,11 +334,11 @@ impl Application for App {
             library: Vec::new(),
             running: Vec::new(),
             updates: Vec::new(),
-            tasks: Vec::new(),
             inspect: InspectState::default(),
             dialog: None,
             batch: BatchState::default(),
             managed_folder_input,
+            source_uuid_input: String::new(),
             source_manager_input: String::new(),
             source_config_input: String::new(),
             status: String::new(),
@@ -381,6 +370,14 @@ impl Application for App {
             }
             Message::InspectPathChanged(path) => {
                 self.inspect.path_input = path;
+                Command::none()
+            }
+            Message::InspectReplaceUuidChanged(uuid) => {
+                self.inspect.replace_uuid = uuid;
+                Command::none()
+            }
+            Message::UpdateSourceUuidChanged(uuid) => {
+                self.source_uuid_input = uuid;
                 Command::none()
             }
             Message::InspectBrowse => Command::perform(
@@ -578,9 +575,9 @@ impl Application for App {
                             .settings_mut()
                             .set_background_update_checks(enabled);
                         self.status = if enabled {
-                            "Background update checks on (notify only)"
+                            "Login update checks on (notify only)"
                         } else {
-                            "Background update checks off"
+                            "Login update checks off"
                         }
                         .to_string();
                     }
@@ -589,9 +586,24 @@ impl Application for App {
                 Command::none()
             }
             Message::BackgroundToggled(enabled) => {
+                // Turning background checks off must also remove the login
+                // entry; otherwise --fetch-updates would keep running (and
+                // contacting update endpoints) at every login after opt-out.
+                if !enabled {
+                    if let Err(error) = self.controller.sync_autostart(false) {
+                        self.status = format!("Cannot disable background checks: {error}");
+                        return Command::none();
+                    }
+                }
                 self.controller
                     .settings_mut()
                     .set_background_update_checks(enabled);
+                self.status = if enabled {
+                    "Background update checks on (notify only)"
+                } else {
+                    "Background update checks off"
+                }
+                .to_string();
                 Command::none()
             }
             Message::MoveSourceToggled(enabled) => {
@@ -601,9 +613,7 @@ impl Application for App {
             Message::UnsafeFallbackToggled(enabled) => {
                 if enabled {
                     // Enabling is itself a confirmed dialog (warned, per-file).
-                    self.dialog = Some(PendingDialog::UnsafeExtract {
-                        path: String::new(),
-                    });
+                    self.dialog = Some(PendingDialog::UnsafeExtract);
                 } else {
                     self.controller
                         .settings_mut()
@@ -611,11 +621,21 @@ impl Application for App {
                 }
                 Command::none()
             }
+            Message::UnsafeFallbackConfirm => {
+                self.dialog = None;
+                self.controller
+                    .settings_mut()
+                    .set_unsafe_extraction_fallback(true);
+                self.status =
+                    "Unsafe extraction fallback on (per-file confirmation still required)"
+                        .to_string();
+                Command::none()
+            }
             Message::AppearanceSelected(appearance) => {
                 self.appearance = appearance;
                 self.controller.settings_mut().set_appearance(appearance);
                 // Live switch, no restart.
-                return self.apply_appearance();
+                self.apply_appearance()
             }
             Message::ManagedFolderChanged(path) => {
                 self.managed_folder_input = path;
@@ -655,6 +675,8 @@ impl Application for App {
                         self.status = format!("Update source invalid: {error}");
                     }
                     self.refresh_library();
+                } else {
+                    self.status = "No installed app with that UUID".to_string();
                 }
                 Command::none()
             }
@@ -667,13 +689,15 @@ impl Application for App {
                         self.status = format!("Cannot remove update source: {error}");
                     }
                     self.refresh_library();
+                } else {
+                    self.status = "No installed app with that UUID".to_string();
                 }
                 Command::none()
             }
         }
     }
 
-    fn view(&self) -> Element<Self::Message> {
+    fn view(&self) -> Element<'_, Self::Message> {
         let page = self
             .nav_model
             .active_data::<Page>()
@@ -721,7 +745,7 @@ where
         self.core_mut().set_header_title(header.clone());
         self.set_window_title(header)
     }
-    fn view_library(&self) -> Element<Message> {
+    fn view_library(&self) -> Element<'_, Message> {
         let mut rows: widget::Column<Message> = widget::Column::new();
         rows = rows.push(
             widget::row::with_children(vec![
@@ -751,6 +775,7 @@ where
                     .spacing(8)
                     .into(),
                     widget::text::caption(&app.managed_path).into(),
+                    widget::text::caption(format!("UUID: {}", app.uuid)).into(),
                     widget::row::with_children(vec![
                         widget::button::standard("Launch")
                             .on_press(Message::Launch(app.uuid.clone()))
@@ -771,7 +796,7 @@ where
         widget::scrollable(rows).into()
     }
 
-    fn view_inspect(&self) -> Element<Message> {
+    fn view_inspect(&self) -> Element<'_, Message> {
         let mut col: widget::Column<Message> = widget::Column::new();
         col = col.push(widget::text::title3("Inspect an AppImage"));
         col = col.push(widget::text::caption(
@@ -804,12 +829,7 @@ where
                         .on_press(Message::IntegrateDismiss)
                         .into(),
                     widget::text_input("Replace UUID (optional)", &self.inspect.replace_uuid)
-                        .on_input(|uuid| {
-                            // Stored via a dedicated pass below; keep the message
-                            // stream simple by reusing the path message channel.
-                            let _ = uuid;
-                            Message::Noop
-                        })
+                        .on_input(Message::InspectReplaceUuidChanged)
                         .into(),
                 ])
                 .spacing(8),
@@ -818,7 +838,7 @@ where
         widget::scrollable(col).into()
     }
 
-    fn view_updates(&self) -> Element<Message> {
+    fn view_updates(&self) -> Element<'_, Message> {
         let mut col: widget::Column<Message> = widget::Column::new();
         col = col.push(
             widget::row::with_children(vec![
@@ -881,7 +901,7 @@ where
         widget::scrollable(col).into()
     }
 
-    fn view_settings(&self) -> Element<Message> {
+    fn view_settings(&self) -> Element<'_, Message> {
         let settings = self.controller.settings();
         let appearance_row = widget::row::with_children(vec![
             widget::button::standard("System")
@@ -898,10 +918,12 @@ where
         .spacing(8);
         let col = widget::column::with_children(vec![
             widget::text::title3("Settings").into(),
-            widget::settings::section().title("Appearance")
+            widget::settings::section()
+                .title("Appearance")
                 .add(appearance_row)
                 .into(),
-            widget::settings::section().title("Integration folder")
+            widget::settings::section()
+                .title("Integration folder")
                 .add(
                     widget::row::with_children(vec![
                         widget::text_input("Managed folder", &self.managed_folder_input)
@@ -914,7 +936,8 @@ where
                     .spacing(8),
                 )
                 .into(),
-            widget::settings::section().title("Behavior")
+            widget::settings::section()
+                .title("Behavior")
                 .add(widget::row::with_children(vec![
                     widget::text::body("Move source into library (trash source)").into(),
                     widget::toggler(None, settings.move_source(), Message::MoveSourceToggled)
@@ -922,36 +945,73 @@ where
                 ]))
                 .add(widget::row::with_children(vec![
                     widget::text::body("Background update checks (notify only)").into(),
-                    widget::toggler(None, settings.background_update_checks(), Message::BackgroundToggled)
-                        .into(),
+                    widget::toggler(
+                        None,
+                        settings.background_update_checks(),
+                        Message::BackgroundToggled,
+                    )
+                    .into(),
                 ]))
                 .add(widget::row::with_children(vec![
                     widget::text::body("Session autostart for background checks").into(),
-                    widget::toggler(None, settings.background_update_checks(), Message::AutostartToggled)
-                        .into(),
+                    widget::toggler(
+                        None,
+                        self.controller.autostart_desktop_path().exists(),
+                        Message::AutostartToggled,
+                    )
+                    .into(),
                 ]))
                 .into(),
-            widget::settings::section().title("Unsafe extraction fallback")
+            widget::settings::section()
+                .title("Unsafe extraction fallback")
                 .add(widget::row::with_children(vec![
                     widget::text::body(
                         "Off by default. Executes untrusted code; requires per-file confirmation.",
                     )
                     .into(),
-                    widget::toggler(None, settings.unsafe_extraction_fallback(), Message::UnsafeFallbackToggled)
-                        .into(),
+                    widget::toggler(
+                        None,
+                        settings.unsafe_extraction_fallback(),
+                        Message::UnsafeFallbackToggled,
+                    )
+                    .into(),
                 ]))
                 .into(),
-            widget::settings::section().title("Update source editor")
+            widget::settings::section()
+                .title("Update source editor")
                 .add(
                     widget::column::with_children(vec![
-                        widget::text_input("Manager (static, github, gitlab, codeberg, forgejo, ftp)", &self.source_manager_input)
-                            .on_input(Message::UpdateSourceManagerChanged)
-                            .into(),
+                        widget::text_input(
+                            "App UUID (shown under each Library entry)",
+                            &self.source_uuid_input,
+                        )
+                        .on_input(Message::UpdateSourceUuidChanged)
+                        .into(),
+                        widget::text_input(
+                            "Manager (static, github, gitlab, codeberg, forgejo, ftp)",
+                            &self.source_manager_input,
+                        )
+                        .on_input(Message::UpdateSourceManagerChanged)
+                        .into(),
                         widget::text_input("key=value lines", &self.source_config_input)
                             .on_input(Message::UpdateSourceConfigChanged)
                             .into(),
+                        widget::row::with_children(vec![
+                            widget::button::suggested("Apply source")
+                                .on_press(Message::UpdateSourceApply(
+                                    self.source_uuid_input.clone(),
+                                ))
+                                .into(),
+                            widget::button::standard("Remove source")
+                                .on_press(Message::UpdateSourceUnset(
+                                    self.source_uuid_input.clone(),
+                                ))
+                                .into(),
+                        ])
+                        .spacing(8)
+                        .into(),
                         widget::text::caption(
-                            "Pick an app in the Library, then apply here. Per-app editors live beside each row.",
+                            "Copy the app UUID from the Library, choose a manager, then Apply.",
                         )
                         .into(),
                     ])
@@ -963,7 +1023,7 @@ where
         widget::scrollable(col).into()
     }
 
-    fn view_about(&self) -> Element<Message> {
+    fn view_about(&self) -> Element<'_, Message> {
         widget::scrollable(widget::column::with_children(vec![
             widget::text::title3("Gosh AppImage Manager").into(),
             widget::text::body(format!("Version {}", limits::VERSION)).into(),
@@ -985,7 +1045,7 @@ where
         .into()
     }
 
-    fn view_dialog(&self) -> Option<Element<Message>> {
+    fn view_dialog(&self) -> Option<Element<'_, Message>> {
         let pending = self.dialog.clone()?;
         match pending {
             PendingDialog::IntegrateConflict {
@@ -1037,14 +1097,14 @@ where
                         .into(),
                 )
             }
-            PendingDialog::UnsafeExtract { .. } => Some(
+            PendingDialog::UnsafeExtract => Some(
                 widget::dialog("Enable unsafe extraction fallback?")
                     .body(
                         "This executes untrusted AppImage code via --appimage-extract. It stays off unless you also confirm each file, and it is never used in background checks.",
                     )
                     .primary_action(
                         widget::button::destructive("Enable (warned)")
-                            .on_press(Message::Noop),
+                            .on_press(Message::UnsafeFallbackConfirm),
                     )
                     .secondary_action(
                         widget::button::standard("Keep off").on_press(Message::DialogDismiss),

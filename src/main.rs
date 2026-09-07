@@ -1,7 +1,7 @@
 // Gosh AppImage Manager 3.0.0 — entry point. Made by Gosh.
 // Same binary serves CLI (no GUI) and the libcosmic GUI shell.
 
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Write};
 
 use goshaim_core::cli;
 use goshaim_core::controller::AppController;
@@ -166,7 +166,8 @@ fn run_gui_or_hint(args: Vec<String>) {
         out,
         "This build has no GUI. Rebuild with --features gui, or pass --help for CLI usage."
     );
-    // Keep Read/Write imports used in all configurations.
+    // Keep Write import used in all configurations.
+    use std::io::Read;
     let _ = std::io::stdin().lock().bytes().next();
     let _ = out.flush();
 }
