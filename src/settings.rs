@@ -87,6 +87,10 @@ pub struct SettingsStore {
     appearance: Appearance,
     debug_logging: bool,
     max_appimage_bytes: i64,
+    /// Set when an existing settings file could not be read or parsed.
+    load_error: Option<String>,
+    /// True once an existing file has been read successfully.
+    loaded: bool,
 }
 
 impl SettingsStore {
@@ -104,6 +108,8 @@ impl SettingsStore {
             appearance: Appearance::System,
             debug_logging: false,
             max_appimage_bytes: limits::DEFAULT_MAX_APPIMAGE_BYTES,
+            load_error: None,
+            loaded: false,
         };
         store.managed_folder = store.dirs.default_managed_folder();
         store.load();
@@ -124,45 +130,45 @@ impl SettingsStore {
         &self.managed_folder
     }
 
-    pub fn set_managed_folder(&mut self, folder: PathBuf) {
+    pub fn set_managed_folder(&mut self, folder: PathBuf) -> Result<(), String> {
         self.managed_folder = folder;
-        self.save();
+        self.save()
     }
 
     pub fn move_source(&self) -> bool {
         self.move_source
     }
 
-    pub fn set_move_source(&mut self, value: bool) {
+    pub fn set_move_source(&mut self, value: bool) -> Result<(), String> {
         self.move_source = value;
-        self.save();
+        self.save()
     }
 
     pub fn manage_outside_folder(&self) -> bool {
         self.manage_outside_folder
     }
 
-    pub fn set_manage_outside_folder(&mut self, value: bool) {
+    pub fn set_manage_outside_folder(&mut self, value: bool) -> Result<(), String> {
         self.manage_outside_folder = value;
-        self.save();
+        self.save()
     }
 
     pub fn terminal_omit_suffix(&self) -> bool {
         self.terminal_omit_suffix
     }
 
-    pub fn set_terminal_omit_suffix(&mut self, value: bool) {
+    pub fn set_terminal_omit_suffix(&mut self, value: bool) -> Result<(), String> {
         self.terminal_omit_suffix = value;
-        self.save();
+        self.save()
     }
 
     pub fn background_update_checks(&self) -> bool {
         self.background_update_checks
     }
 
-    pub fn set_background_update_checks(&mut self, value: bool) {
+    pub fn set_background_update_checks(&mut self, value: bool) -> Result<(), String> {
         self.background_update_checks = value;
-        self.save();
+        self.save()
     }
 
     /// Unsafe `--appimage-extract` fallback. Off by default, warned, and never
@@ -171,40 +177,40 @@ impl SettingsStore {
         self.unsafe_extraction_fallback
     }
 
-    pub fn set_unsafe_extraction_fallback(&mut self, value: bool) {
+    pub fn set_unsafe_extraction_fallback(&mut self, value: bool) -> Result<(), String> {
         self.unsafe_extraction_fallback = value;
-        self.save();
+        self.save()
     }
 
     pub fn appearance(&self) -> Appearance {
         self.appearance
     }
 
-    pub fn set_appearance(&mut self, value: Appearance) {
+    pub fn set_appearance(&mut self, value: Appearance) -> Result<(), String> {
         self.appearance = value;
-        self.save();
+        self.save()
     }
 
     pub fn debug_logging(&self) -> bool {
         self.debug_logging
     }
 
-    pub fn set_debug_logging(&mut self, value: bool) {
+    pub fn set_debug_logging(&mut self, value: bool) -> Result<(), String> {
         self.debug_logging = value;
-        self.save();
+        self.save()
     }
 
     pub fn max_appimage_bytes(&self) -> i64 {
         self.max_appimage_bytes
     }
 
-    pub fn set_max_appimage_bytes(&mut self, value: i64) {
+    pub fn set_max_appimage_bytes(&mut self, value: i64) -> Result<(), String> {
         let clamped = limits::clamp_max_appimage_bytes(value);
         if clamped == self.max_appimage_bytes {
-            return;
+            return Ok(());
         }
         self.max_appimage_bytes = clamped;
-        self.save();
+        self.save()
     }
 
     pub fn applications_dir(&self) -> PathBuf {
@@ -237,13 +243,35 @@ impl SettingsStore {
     }
 
     fn load(&mut self) {
-        let Ok(body) = fs::read(&self.config_path) else {
-            return;
+        let body = match fs::read(&self.config_path) {
+            Ok(body) => body,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                // Unreadable is not the same as absent. Say so, and leave
+                // `loaded` false so a save cannot quietly overwrite a file we
+                // never managed to read.
+                self.load_error = Some(format!(
+                    "Cannot read {}: {e}. Using defaults; your settings were not changed.",
+                    self.config_path.display()
+                ));
+                return;
+            }
         };
-        let Ok(map): Result<BTreeMap<String, serde_json::Value>, _> = serde_json::from_slice(&body)
-        else {
-            return;
+        let map: BTreeMap<String, serde_json::Value> = match serde_json::from_slice(&body) {
+            Ok(map) => map,
+            Err(e) => {
+                // A corrupt file used to reset every setting to its default in
+                // silence, and the next change overwrote the original -- so a
+                // stray byte destroyed the user's configuration with no notice.
+                self.load_error = Some(format!(
+                    "{} is not valid JSON ({e}). Using defaults; the existing file is left \
+                     untouched until you change a setting.",
+                    self.config_path.display()
+                ));
+                return;
+            }
         };
+        self.loaded = true;
         let str_entry = |key: &str| {
             map.get(key)
                 .and_then(|v| v.as_str())
@@ -267,7 +295,12 @@ impl SettingsStore {
         }
     }
 
-    fn save(&self) {
+    /// Persist the current settings.
+    ///
+    /// Returns the failure rather than discarding it: a setting that silently
+    /// fails to save looks exactly like one that saved, and reappears at its
+    /// old value on the next launch with no explanation.
+    fn save(&self) -> Result<(), String> {
         let mut map = BTreeMap::new();
         map.insert(
             "ManagedFolder".to_string(),
@@ -291,13 +324,23 @@ impl SettingsStore {
             "MaxAppImageBytes".to_string(),
             serde_json::Value::Number(self.max_appimage_bytes.into()),
         );
-        let Ok(body) = serde_json::to_vec_pretty(&map) else {
-            return;
-        };
+        let body = serde_json::to_vec_pretty(&map)
+            .map_err(|e| format!("Cannot serialise settings: {e}"))?;
         if let Some(parent) = self.config_path.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
         }
-        // Best effort; settings must never crash the app.
-        let _ = crate::safe_fs::atomic_write(&self.config_path, &body, 0o600);
+        crate::safe_fs::atomic_write(&self.config_path, &body, 0o600)
+    }
+
+    /// A problem reading the settings file at startup, if there was one.
+    pub fn load_error(&self) -> Option<&str> {
+        self.load_error.as_deref()
+    }
+
+    /// Whether an existing settings file was read successfully. False when the
+    /// file was absent, unreadable, or corrupt.
+    pub fn loaded(&self) -> bool {
+        self.loaded
     }
 }

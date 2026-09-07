@@ -51,7 +51,7 @@ fn external_entries_are_found_only_when_the_setting_is_on() {
     // Off by default: only the managed folder is scanned.
     assert!(c.discover().is_empty(), "external discovery must be opt-in");
 
-    c.settings_mut().set_manage_outside_folder(true);
+    c.settings_mut().set_manage_outside_folder(true).unwrap();
     let found = c.discover();
     assert_eq!(found.len(), 1, "found: {found:?}");
     assert_eq!(found[0].path, target.to_string_lossy());
@@ -71,7 +71,7 @@ fn external_entries_are_found_only_when_the_setting_is_on() {
 fn our_own_entries_are_not_reported_as_external() {
     let h = Harness::new();
     let mut c = h.controller();
-    c.settings_mut().set_manage_outside_folder(true);
+    c.settings_mut().set_manage_outside_folder(true).unwrap();
     let source = write_fixture(h.tmp.path(), "Demo.AppImage");
     let result = c.integrate(
         &goshaim_core::types::IntegrateRequest {

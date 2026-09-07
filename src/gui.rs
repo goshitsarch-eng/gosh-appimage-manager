@@ -366,6 +366,21 @@ impl App {
         self.status = Some((severity, text.into()));
     }
 
+    /// Apply a settings change, reporting a failed save rather than leaving
+    /// the switch showing a value that was never written to disk.
+    fn apply_setting(
+        &mut self,
+        what: &str,
+        change: impl FnOnce(&mut AppController) -> Result<(), String>,
+    ) {
+        match self.with_controller(change) {
+            Ok(()) => {}
+            Err(error) => {
+                self.set_status(Severity::Error, format!("Could not save {what}: {error}"))
+            }
+        }
+    }
+
     fn selected(&self) -> Option<&InstalledApp> {
         let detail = self.detail.as_ref()?;
         self.library.iter().find(|a| a.uuid == detail.uuid)
@@ -653,6 +668,9 @@ impl Application for App {
             .to_string_lossy()
             .into_owned();
         let autostart_present = controller.autostart_desktop_path().exists();
+        // A settings file that could not be read used to reset everything to
+        // defaults in silence, and the next change overwrote it.
+        let load_error = controller.settings().load_error().map(str::to_string);
         let mut app = App {
             core,
             nav_model,
@@ -674,7 +692,7 @@ impl Application for App {
             managed_folder_input,
             source_manager_input: String::new(),
             source_config_input: String::new(),
-            status: None,
+            status: load_error.map(|error| (Severity::Error, error)),
         };
 
         // Positional files open straight into Inspect. All of them: taking
@@ -1139,7 +1157,9 @@ impl Application for App {
                     }
                     self.autostart_present = false;
                 }
-                self.with_controller(|c| c.settings_mut().set_background_update_checks(enabled));
+                self.apply_setting("background update checks", |c| {
+                    c.settings_mut().set_background_update_checks(enabled)
+                });
                 self.set_status(
                     Severity::Success,
                     if enabled {
@@ -1151,26 +1171,34 @@ impl Application for App {
                 Command::none()
             }
             Message::MoveSourceToggled(enabled) => {
-                self.with_controller(|c| c.settings_mut().set_move_source(enabled));
+                self.apply_setting("the copy/move preference", |c| {
+                    c.settings_mut().set_move_source(enabled)
+                });
                 Command::none()
             }
             Message::ManageOutsideToggled(enabled) => {
-                self.with_controller(|c| c.settings_mut().set_manage_outside_folder(enabled));
+                self.apply_setting("outside-folder discovery", |c| {
+                    c.settings_mut().set_manage_outside_folder(enabled)
+                });
                 self.load_library()
             }
             Message::TerminalSuffixToggled(enabled) => {
-                self.with_controller(|c| c.settings_mut().set_terminal_omit_suffix(enabled));
+                self.apply_setting("the terminal-suffix preference", |c| {
+                    c.settings_mut().set_terminal_omit_suffix(enabled)
+                });
                 Command::none()
             }
             Message::DebugLoggingToggled(enabled) => {
-                self.with_controller(|c| c.settings_mut().set_debug_logging(enabled));
+                self.apply_setting("the diagnostics preference", |c| {
+                    c.settings_mut().set_debug_logging(enabled)
+                });
                 Command::none()
             }
             Message::UnsafeFallbackToggled(enabled) => {
                 if enabled {
                     self.dialog = Some(PendingDialog::UnsafeExtract);
                 } else {
-                    self.with_controller(|c| {
+                    self.apply_setting("the extraction fallback", |c| {
                         c.settings_mut().set_unsafe_extraction_fallback(false)
                     });
                 }
@@ -1178,7 +1206,9 @@ impl Application for App {
             }
             Message::UnsafeFallbackConfirm => {
                 self.dialog = None;
-                self.with_controller(|c| c.settings_mut().set_unsafe_extraction_fallback(true));
+                self.apply_setting("the extraction fallback", |c| {
+                    c.settings_mut().set_unsafe_extraction_fallback(true)
+                });
                 self.set_status(
                     Severity::Info,
                     "Unsafe extraction fallback on; each file still needs confirming",
@@ -1187,7 +1217,9 @@ impl Application for App {
             }
             Message::AppearanceSelected(appearance) => {
                 self.appearance = appearance;
-                self.with_controller(|c| c.settings_mut().set_appearance(appearance));
+                self.apply_setting("the appearance preference", |c| {
+                    c.settings_mut().set_appearance(appearance)
+                });
                 self.apply_appearance()
             }
             Message::ManagedFolderChanged(path) => {
@@ -1204,8 +1236,12 @@ impl Application for App {
                     self.set_status(Severity::Error, "Managed folder must be an absolute path");
                     return Command::none();
                 }
-                self.with_controller(|c| c.settings_mut().set_managed_folder(path));
-                self.set_status(Severity::Success, "Managed folder updated");
+                self.apply_setting("the managed folder", |c| {
+                    c.settings_mut().set_managed_folder(path)
+                });
+                if self.status.is_none() {
+                    self.set_status(Severity::Success, "Managed folder updated");
+                }
                 self.load_library()
             }
             Message::UpdateSourceManagerChanged(manager) => {
