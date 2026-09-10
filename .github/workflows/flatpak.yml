@@ -1,6 +1,12 @@
 # Autobuild the Flatpak for x86_64 and aarch64.
-# aarch64 builds run under QEMU emulation (see flatpak-builder action docs),
-# so they are slower; fail-fast is off so one arch never cancels the other.
+#
+# The build needs ~15 GB for the 23.08 SDK plus several GB of Rust/Flatpak
+# build cache, far more than the ~10 GB free on a stock GitHub runner
+# (both arches died with "No space left on device"). Everything therefore
+# runs on the host -- not in the flatpak-github-actions container image --
+# so the free-disk-space step actually reclaims host disk. aarch64 builds
+# under qemu-user-static and is much slower; fail-fast is off so one arch
+# never cancels the other.
 on:
   push:
     branches: [main]
@@ -13,9 +19,7 @@ jobs:
   flatpak:
     name: "Flatpak"
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-48
-      options: --privileged
+    timeout-minutes: ${{ matrix.arch == 'aarch64' && 360 || 120 }}
     strategy:
       matrix:
         arch: [x86_64, aarch64]
@@ -23,23 +27,35 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
-      # Docker is required by the docker/setup-qemu-action which enables emulation
-      - name: Install deps
-        if: ${{ matrix.arch != 'x86_64' }}
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+
+      - name: Install flatpak tooling
         run: |
-          # Use the static binaries because it's unable to use a package manager
-          curl https://download.docker.com/linux/static/stable/x86_64/docker-26.0.0.tgz --output ./docker.tgz
-          tar xzvf docker.tgz
-          mv docker/* /usr/bin
-      - name: Set up QEMU
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: Install qemu-user-static
         if: ${{ matrix.arch != 'x86_64' }}
-        id: qemu
-        uses: docker/setup-qemu-action@v3
+        run: sudo apt-get install -y qemu-user-static
+
+      - name: Build Flatpak
+        run: |
+          flatpak-builder --force-clean --disable-rofiles-fuse \
+            --install-deps-from=flathub \
+            build-dir packaging/com.goshapps.AppImageManager.yml \
+            --arch=${{ matrix.arch }}
+
+      - name: Bundle Flatpak
+        run: |
+          flatpak build-bundle repo \
+            gosh-appimage-manager-${{ matrix.arch }}.flatpak \
+            com.goshapps.AppImageManager
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
         with:
-          platforms: arm64
-      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
-        with:
-          bundle: gosh-appimage-manager-${{ matrix.arch }}.flatpak
-          manifest-path: packaging/com.goshapps.AppImageManager.yml
-          arch: ${{ matrix.arch }}
-          artifact-name: gosh-appimage-manager-${{ matrix.arch }}.flatpak
+          name: gosh-appimage-manager-${{ matrix.arch }}.flatpak
+          path: gosh-appimage-manager-${{ matrix.arch }}.flatpak
