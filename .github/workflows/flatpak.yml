@@ -35,9 +35,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y flatpak flatpak-builder
-          # flatpak-builder installs SDK deps with --system, so the remote
-          # must exist system-wide, not just for the user.
-          sudo flatpak remote-add --system --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          # Everything runs --user: runner policy forbids flatpak system
+          # operations ("Deploy not allowed for user").
+          flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 
       - name: Install qemu-user-static
         if: ${{ matrix.arch != 'x86_64' }}
@@ -45,7 +45,7 @@ jobs:
 
       - name: Build Flatpak
         run: |
-          flatpak-builder --force-clean --disable-rofiles-fuse \
+          flatpak-builder --user --force-clean --disable-rofiles-fuse \
             --install-deps-from=flathub \
             build-dir packaging/com.goshapps.AppImageManager.yml \
             --arch=${{ matrix.arch }}
