@@ -110,8 +110,11 @@ fn bulk_removal_is_linear() {
     }
     let elapsed = start.elapsed();
     eprintln!("300 removals from a 300-row library: {elapsed:?}");
+    // Bound covers 300 individually-fsyncing DELETEs on slow disks; a
+    // full-table-rewrite regression would do ~90,000 row writes and blow
+    // far past this. Measures shape, not the box (this box: ~4.4s debug).
     assert!(
-        elapsed.as_millis() < 4000,
+        elapsed.as_millis() < 10000,
         "bulk removal too slow: {elapsed:?}"
     );
     assert!(registry.apps().is_empty());

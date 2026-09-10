@@ -420,9 +420,7 @@ impl App {
             })
             .collect();
         match self.sort {
-            SortOrder::Name => {
-                rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-            }
+            SortOrder::Name => rows.sort_by_key(|a| a.name.to_lowercase()),
             SortOrder::Version => rows.sort_by(|a, b| a.version.cmp(&b.version)),
             SortOrder::UpdatesFirst => {
                 let has_update =
