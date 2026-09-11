@@ -54,9 +54,12 @@ jobs:
 
       - name: Bundle Flatpak
         run: |
+          # build-bundle defaults to --arch=x86_64; the repo from an
+          # aarch64 build only contains the aarch64 ref.
           flatpak build-bundle repo \
             gosh-appimage-manager-${{ matrix.arch }}.flatpak \
-            com.goshapps.AppImageManager
+            com.goshapps.AppImageManager \
+            --arch=${{ matrix.arch }}
 
       - name: Upload bundle
         uses: actions/upload-artifact@v4
