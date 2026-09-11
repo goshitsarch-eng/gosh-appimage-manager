@@ -45,8 +45,10 @@ jobs:
 
       - name: Build Flatpak
         run: |
+          # --repo=repo is explicit: without it this flatpak-builder
+          # leaves no repo behind for build-bundle to consume.
           flatpak-builder --user --force-clean --disable-rofiles-fuse \
-            --install-deps-from=flathub \
+            --repo=repo --install-deps-from=flathub \
             build-dir packaging/com.goshapps.AppImageManager.yml \
             --arch=${{ matrix.arch }}
 
