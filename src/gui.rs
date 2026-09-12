@@ -203,6 +203,8 @@ pub enum Message {
     AppearanceSelected(Appearance),
     ManagedFolderChanged(String),
     ManagedFolderApply,
+    MaxBytesChanged(String),
+    MaxBytesApply,
     UpdateSourceManagerChanged(String),
     UpdateSourceConfigChanged(String),
     UpdateSourceApply(String),
@@ -287,6 +289,7 @@ pub struct App {
     busy: Option<(String, Arc<AtomicBool>)>,
     autostart_present: bool,
     managed_folder_input: String,
+    max_bytes_input: String,
     source_manager_input: String,
     source_config_input: String,
     status: Option<(Severity, String)>,
@@ -670,6 +673,8 @@ impl Application for App {
             .to_string_lossy()
             .into_owned();
         let autostart_present = controller.autostart_desktop_path().exists();
+        let max_bytes_input =
+            crate::limits::max_appimage_mb(controller.settings().max_appimage_bytes()).to_string();
         // A settings file that could not be read used to reset everything to
         // defaults in silence, and the next change overwrote it.
         let load_error = controller.settings().load_error().map(str::to_string);
@@ -692,6 +697,7 @@ impl Application for App {
             busy: None,
             autostart_present,
             managed_folder_input,
+            max_bytes_input,
             source_manager_input: String::new(),
             source_config_input: String::new(),
             status: load_error.map(|error| (Severity::Error, error)),
@@ -1249,6 +1255,30 @@ impl Application for App {
                     self.set_status(Severity::Success, "Managed folder updated");
                 }
                 self.load_library()
+            }
+            Message::MaxBytesChanged(input) => {
+                self.max_bytes_input = input;
+                Command::none()
+            }
+            Message::MaxBytesApply => {
+                let bytes = match crate::limits::parse_max_appimage_mb(&self.max_bytes_input) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        self.set_status(Severity::Error, error);
+                        return Command::none();
+                    }
+                };
+                self.apply_setting("the maximum AppImage size", |c| {
+                    c.settings_mut().set_max_appimage_bytes(bytes)
+                });
+                if self.status.is_none() {
+                    self.max_bytes_input = self.with_controller(|c| {
+                        crate::limits::max_appimage_mb(c.settings().max_appimage_bytes())
+                            .to_string()
+                    });
+                    self.set_status(Severity::Success, "Maximum size updated");
+                }
+                Command::none()
             }
             Message::UpdateSourceManagerChanged(manager) => {
                 self.source_manager_input = manager;
@@ -2221,6 +2251,26 @@ impl App {
                     ])
                     .spacing(8),
                 )
+                .add(
+                    widget::row::with_children(vec![
+                        widget::text_input(
+                            t!("settings.maxbytes.placeholder", "Max size (MB)"),
+                            &self.max_bytes_input,
+                        )
+                        .on_input(Message::MaxBytesChanged)
+                        .on_submit(Message::MaxBytesApply)
+                        .into(),
+                        widget::button::standard(t!("action.apply", "Apply"))
+                            .on_press(Message::MaxBytesApply)
+                            .into(),
+                    ])
+                    .spacing(8),
+                )
+                .add(widget::text::caption(t!(
+                    "settings.maxbytes.caption",
+                    "Largest AppImage to integrate or download, in megabytes \
+                     (1–32768, default 8192). Oversized files are refused."
+                )))
                 .into(),
             widget::settings::section()
                 .title(t!("settings.behaviour", "Behaviour"))

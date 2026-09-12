@@ -48,3 +48,31 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn clamp_max_appimage_bytes(value: i64) -> i64 {
     value.clamp(MIN_MAX_APPIMAGE_BYTES, ABSOLUTE_MAX_APPIMAGE_BYTES)
 }
+
+/// Parse the Settings "max size (MB)" field. Strict (no silent clamp) so a
+/// typo surfaces as an error instead of an unexpected bound.
+pub fn parse_max_appimage_mb(input: &str) -> Result<i64, String> {
+    const MB: i64 = 1024 * 1024;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Maximum size cannot be empty".to_string());
+    }
+    let mb: i64 = trimmed
+        .parse()
+        .map_err(|_| format!("\"{trimmed}\" is not a whole number of megabytes"))?;
+    let min_mb = MIN_MAX_APPIMAGE_BYTES / MB;
+    let max_mb = ABSOLUTE_MAX_APPIMAGE_BYTES / MB;
+    if !(min_mb..=max_mb).contains(&mb) {
+        return Err(format!(
+            "Enter {min_mb}–{max_mb} MB (default {})",
+            DEFAULT_MAX_APPIMAGE_BYTES / MB
+        ));
+    }
+    mb.checked_mul(MB)
+        .ok_or_else(|| "Maximum size is too large".to_string())
+}
+
+/// Whole megabytes for the Settings field (8 GB default renders as "8192").
+pub fn max_appimage_mb(bytes: i64) -> i64 {
+    bytes / (1024 * 1024)
+}
