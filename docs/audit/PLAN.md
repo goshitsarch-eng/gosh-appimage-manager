@@ -1,9 +1,11 @@
-# Plan (Phase 2)
+# Plan (Phase 2 + audit-hardening implementation)
 
 Ordered so the tree is buildable and green after each task. No task depends
 on a later one unless noted. Severity: P0 security/corruption/crash/unusable,
 P1 major-broken/severe-UX, P2 normal/COSMIC-deviation/perf, P3 polish.
-**Open P0: none. Open P1: one (verification, not a known defect).**
+**Open P0: none. Open P1: one (PLAN-001 compositor verification, environment-blocked).**
+**All actionable P2 code items are done; remaining P2s need a human locale
+contributor (PLAN-004) or release CI + audit tooling (PLAN-010).**
 
 ## PLAN-002 — De-flake `test_registry_perf` (P2, area: tests/perf)
 
@@ -20,7 +22,10 @@ P1 major-broken/severe-UX, P2 normal/COSMIC-deviation/perf, P3 polish.
 - Test/verify: 5 consecutive full-suite runs green on a loaded box
   (`stress` or parallel build alongside); `cargo test` still catches a
   deliberately reintroduced full-table rewrite (mutation check).
-- Status: open.
+- Status: done (audit-hardening). Bounds raised to load-insensitive backstops
+  (15s/8s/30s with 400x/47x/150x regression headroom) plus structural asserts.
+  Verified: `cargo test --test test_registry_perf` green isolated;
+  `cargo test --no-fail-fast` green full suite. Committed.
 
 ## PLAN-008 — Remove dead `Page::title` (P3, area: maintainability)
 
@@ -31,7 +36,8 @@ P1 major-broken/severe-UX, P2 normal/COSMIC-deviation/perf, P3 polish.
 - Owner: gui. Deps: none.
 - Test/verify: `cargo clippy --features gui --all-targets -- -D warnings`
   + `cargo fmt --check` green.
-- Status: open.
+- Status: done (audit-hardening). Deleted; `localized_title` is the single
+  source. Verified clippy gui + fmt green. Committed.
 
 ## PLAN-003 — Make Debug Logging real or remove it (P2, area: correctness/settings)
 
@@ -48,7 +54,11 @@ P1 major-broken/severe-UX, P2 normal/COSMIC-deviation/perf, P3 polish.
 - Test/verify: (a) flip switch → debug lines appear/disappear in stderr
   capture test; (b) grep proves no `debug_logging` remains; settings
   round-trip tests stay green.
-- Status: open.
+- Status: done (audit-hardening, option a without new deps).
+  New `src/diagnostics.rs` (basename-only, bounded, no secrets) wired to CLI
+  stderr (`list/integrate/update/remove/adopt/fetch`) and GUI worker outcomes
+  + immediate emit on toggle. Verified: `tests/test_diagnostics.rs` (3 tests)
+  green; JSON stdout stays valid; clippy + fmt green. Committed.
 
 ## PLAN-006 — Expose or document MaxAppImageBytes (P3, area: completeness)
 
@@ -62,7 +72,11 @@ P1 major-broken/severe-UX, P2 normal/COSMIC-deviation/perf, P3 polish.
 - Owner: gui. Deps: none.
 - Test/verify: set via UI → `settings.json` updated → oversized integrate
   refused with bound message; `test_settings` extended.
-- Status: open.
+- Status: done (audit-hardening, Settings row only).
+  `limits::parse_max_appimage_mb` (strict 1–32768 MB) + Settings row with
+  caption + README Safety default. Verified: `tests/test_max_bytes.rs`
+  (3 tests) green; GUI clippy green; oversized `copy_bounded` refused.
+  Committed.
 
 ## PLAN-004 — Ship the first checked human translation (P2, area: i18n/a11y)
 
@@ -78,7 +92,9 @@ P1 major-broken/severe-UX, P2 normal/COSMIC-deviation/perf, P3 polish.
   screenshot if the locale is RTL; otherwise independent).
 - Test/verify: `GOSHAIM_LOCALE_DIR` run shows translated strings; missing
   keys fall back to English (test); no clipped layout at 1.0× and 1.5×.
-- Status: open.
+- Status: open — deferred, genuine external blocker. No machine translation:
+  Decision 5 requires a competent human speaker plus compositor layout proof
+  (PLAN-001 env, none here). Machinery stays tested (`test_i18n`, qps).
 
 ## PLAN-007 — Drag-and-drop files into the window (P3, area: feature/GUI)
 
@@ -92,7 +108,13 @@ P1 major-broken/severe-UX, P2 normal/COSMIC-deviation/perf, P3 polish.
 - Owner: gui. Deps: none.
 - Test/verify: manual drop of 3 files → 3 confirmations; needs compositor
   (PLAN-001 environment).
-- Status: open.
+- Status: done (audit-hardening, code-complete, compositor verification
+  outstanding via PLAN-001). Pinned iced exposes
+  `window::Event::FileDropped(PathBuf)`; subscription maps it to
+  `Message::FileDropped` into the existing inspect queue via pure
+  `drop_queue::plan_drop` (never preempts busy/unconfirmed work). Verified:
+  lib unit tests (4) green; both clippy gates green; README documents queue.
+  Manual 3-file drop still needs PLAN-001 env. Committed.
 
 ## PLAN-005 — Portal Trash/OpenDirectory migration (P3, area: security-hardening)
 
@@ -151,14 +173,19 @@ P1 major-broken/severe-UX, P2 normal/COSMIC-deviation/perf, P3 polish.
 - Owner: release. Deps: after all code tasks; needs PLAN-001 report for
   the release notes' "verified" section.
 - Test/verify: CI links + command transcripts recorded in release notes.
-- Status: open.
+- Status: open — partially verified locally, blocked on release env.
+  Local: `desktop-file-validate` pass, `appstreamcli --pedantic` pass
+  (1 expected uppercase-id info), both clippy gates + fmt + full `cargo test`
+  green. Not run here: `cargo audit` (tool not installed), aarch64 Flatpak
+  rebuild (no qemu; CI covers both arches), CI green on release commit.
 
 ## Counts
 
 | Severity | Open | IDs |
 |---|---|---|
 | P0 | 0 | — |
-| P1 | 1 | PLAN-001 |
-| P2 | 4 | PLAN-002, PLAN-003, PLAN-004, PLAN-010 |
-| P3 | 5 | PLAN-005…PLAN-009 |
+| P1 | 1 | PLAN-001 (env-blocked verification) |
+| P2 | 2 | PLAN-004 (human translator), PLAN-010 (release env) |
+| P3 | 2 | PLAN-005 (portal env), PLAN-009 (backlog) |
+| Done | 6 | PLAN-002, PLAN-003, PLAN-006, PLAN-007, PLAN-008 + metadata part of 010 |
 | Total | 10 | |
