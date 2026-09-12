@@ -45,3 +45,22 @@ COSMIC > perf > maintainability > cosmetic.**
     P2 or lower: no known crash, corruption, or security hole remains open.
 15. **aarch64 trust = CI, not local rebuild.** No qemu here; the release
     gate is green CI on both arches (PLAN-010), not a local aarch64 build.
+
+## Decisions taken in audit-hardening
+
+16. **Diagnostics without new dependencies.** std-only `diagnostics.rs`
+    (basename-only, bounded) beats `log`/`env_logger`: no vendoring churn,
+    no Flatpak source regen, testable via writer injection. Security >
+    maintainability.
+17. **Wall-time perf asserts are backstops with headroom math.** 15s/8s/30s
+    ceilings document the rewrite ratio they still catch (400x/47x/150x);
+    structural asserts are the real gates. A bound that flakes is a test bug.
+18. **Drops never preempt.** `drop_queue::plan_drop` is pure and tested:
+    busy or unconfirmed work queues drops; idle starts the first. Empirical
+    queue rule over ad-hoc handler logic.
+19. **No machine translation ships.** Decision 5 holds against AI-generated
+    catalogs: PLAN-004 needs a human speaker + compositor layout proof.
+    Correctness > completeness.
+20. **No dependency changes without a security/correctness reason.** All fixes
+    used std + existing crates; `Cargo.lock` untouched. Maintenance >
+    novelty.

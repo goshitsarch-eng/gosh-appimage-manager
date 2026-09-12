@@ -42,10 +42,10 @@ Status values: `done` (wired + tested), `partial`, `missing`, `gap`
 | Unsafe-extract fallback (opt-in) | GUI toggle + per-file confirm | off default; runs only when safe found nothing | `inspector.rs`, `settings.rs` | done | gated-execution test | `cargo test` |
 | i18n catalog + pseudolocale | all GUI strings via `t!` (80 calls) | localizable, qps-proven | `i18n.rs`, `i18n/qps.json` | done (machinery) | `test_i18n` (9) | `LC_ALL=qps` run |
 | Human translations | — | non-English catalogs | — | missing | — | PLAN-004 |
-| Drag/drop files into window | — | upstream lists drag/drop open | — | missing | — | PLAN-007 |
+| Drag/drop files into window | GUI window drop | N files queue N sequential confirmations | `gui.rs:FileDropped`, `drop_queue.rs`, existing inspect queue | done (code-complete; manual drop needs PLAN-001 compositor) | `drop_queue` unit tests (4) | `cargo test --lib` + PLAN-001 manual |
 | Zsync delta update | — | binary delta instead of full file | `updates_service.rs` (full only) | missing (documented) | — | accepted limitation |
-| Debug-logging toggle effect | GUI switch persists | setting changes log output | `settings.rs:88`, `gui.rs:1206` | gap: nothing reads it, no log backend | none | PLAN-003 |
-| MaxAppImageBytes control | — | user-adjustable bound | `settings.rs` (persisted+clamped) | gap: enforced, no UI/CLI | none | PLAN-006 |
+| Debug-logging toggle effect | GUI switch + CLI stderr | setting changes diagnostic output | `diagnostics.rs`, `cli.rs`, `gui.rs` worker outcomes | done | `test_diagnostics` (3) | `cargo test` + JSON-validity assert |
+| MaxAppImageBytes control | GUI Settings → Integration folder | user-adjustable MB bound, strict parse | `limits.rs:parse_max_appimage_mb`, `gui.rs:MaxBytes*`, `settings.rs` | done | `test_max_bytes` (3) | `cargo test` + oversized-refused assert |
 | JSON list output schema v1 | CLI `--json` | installed/updates/discovered arrays | `cli.rs:137-155` | done | schema tests | `cargo test` |
 | Exit 8 on failed update checks | CLI | distinguish "none" from "unchecked" | `cli.rs` | done | `test_cli` | `cargo test` |
 | `--self-test` readiness | CLI | real checks incl. readiness | `cli.rs:run_self_test` | done | binary run → SELF_TEST_OK | observed this session |

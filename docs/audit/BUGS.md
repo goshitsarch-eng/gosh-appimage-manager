@@ -1,36 +1,30 @@
-# Bugs (Phase 2 — current tree)
+# Bugs (Phase 2 + audit-hardening)
 
 All 2026-09-07 audit findings (S-1…S-14, C-1…C-13, P-1…P-9, G-1…G-16, L-1,
-H-13) are fixed in this tree; L-2 withdrawn as not-a-defect. What follows
-are the **residual defects found against the current tree** (2026-09-12).
-Each maps to a PLAN item.
+H-13) are fixed in this tree; L-2 withdrawn as not-a-defect. Residual defects
+from 2026-09-12 below; audit-hardening dispositions follow each item.
 
-## Open
+## Open (environment-blocked verification only; no known code defect)
 
-### BUG-001 — Debug-logging toggle is a no-op (→ PLAN-003, P2)
-- Evidence: `debug_logging` appears only in `src/settings.rs` (persist,
-  getter) and `src/gui.rs:1206,2263,2484-2496` (switch + snapshot). No
-  logging backend exists (`Cargo.toml` has no `log`/`tracing`/`env_logger`;
-  no call site reads the flag). Flipping the switch changes a JSON key and
-  nothing else.
-- Expected: the toggle controls diagnostic output (brief §9 wants
-  diagnostics/log controls), or is absent.
-- Impact: low functional, medium trust — a settings switch that does nothing.
+### BUG-001 — Debug-logging toggle was a no-op (→ PLAN-003, P2) — FIXED
+- Was: `debug_logging` persisted and switched but read by nothing; no logging
+  backend in `Cargo.toml`.
+- Fix: `src/diagnostics.rs` (basename-only, no secrets) wired to CLI stderr
+  and GUI worker outcomes + immediate emit on toggle; `tests/test_diagnostics.rs`
+  proves off=silent, on=emits, JSON stdout stays valid.
+- Impact was low functional, medium trust — now closed.
 
-### BUG-002 — Timing-flaky perf tests (→ PLAN-002, P2)
-- Evidence: `tests/test_registry_perf.rs` failed 1 of 3 full-suite runs here
-  (`1 passed; 2 failed`, 27s wall under parallel load); passes in isolation
-  (10.5s) and in the other two full runs. `docs/migration/REPORT.md`
-  already raised the `bulk_removal` bound to 10000ms noting debug-build
-  fsync cost.
-- Expected: deterministic pass/fail independent of machine load.
-- Impact: CI reliability; flakes train reviewers to ignore red.
+### BUG-002 — Timing-flaky perf tests (→ PLAN-002, P2) — FIXED
+- Was: `tests/test_registry_perf.rs` failed under parallel load (wall-time
+  bounds 4s/2s/10s vs debug fsync cost).
+- Fix: load-insensitive backstops (15s/8s/30s with 400x/47x/150x headroom) +
+  structural asserts as the real gate. Full suite green.
+- Impact was CI reliability — now closed.
 
-### BUG-003 — Dead `Page::title` helper kept with `allow(dead_code)` (→ PLAN-008, P3)
-- Evidence: `src/gui.rs:84-97` — `const fn title` duplicates
-  `localized_title` and is never called.
-- Expected: removed (localised title is the single source).
-- Impact: cosmetic; confuses the next reader about which title is canonical.
+### BUG-003 — Dead `Page::title` helper (→ PLAN-008, P3) — FIXED
+- Was: `const fn title` duplicated `localized_title`, never called.
+- Fix: deleted; `localized_title` is the single source. Clippy gui + fmt green.
+- Impact was cosmetic — now closed.
 
 ## Closed / verified absent (spot-checked this session)
 
