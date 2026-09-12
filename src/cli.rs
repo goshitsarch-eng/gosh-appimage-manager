@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::sync::atomic::AtomicBool;
 
 use crate::controller::AppController;
+use crate::diagnostics;
 use crate::elf;
 use crate::inspector::AppImageInspector;
 use crate::limits;
@@ -169,6 +170,7 @@ pub fn run_cli(
     let replace = has_arg(args, "--replace");
     let del = has_arg(args, "--delete");
     let cancel = AtomicBool::new(false);
+    let verbose = controller.settings().debug_logging();
 
     if has_arg(args, "--list-update-managers") {
         for name in UpdateSourceFactory::names() {
@@ -180,6 +182,12 @@ pub fn run_cli(
     if has_arg(args, "--list-installed") {
         let mut items = Vec::new();
         let apps = controller.registry().apps();
+        diagnostics::write_if(
+            stderr,
+            verbose,
+            "cli",
+            &format!("list-installed count={}", apps.len()),
+        );
         let running = controller.running_uuids(&apps);
         for mut app in apps {
             app.running = running.contains(&app.uuid);
@@ -202,6 +210,16 @@ pub fn run_cli(
 
     if has_arg(args, "--list-updates") {
         let scan = controller.scan_updates(&cancel);
+        diagnostics::write_if(
+            stderr,
+            verbose,
+            "update",
+            &format!(
+                "check offers={} failures={}",
+                scan.offers.len(),
+                scan.failures.len()
+            ),
+        );
         let offers = &scan.offers;
         for failure in &scan.failures {
             let _ = writeln!(
@@ -351,6 +369,12 @@ pub fn run_cli(
         return match controller.adopt_external(&path) {
             Ok(app) => {
                 let _ = writeln!(stderr, "Adopted {} as {}", app.managed_path, app.uuid);
+                diagnostics::write_if(
+                    stderr,
+                    verbose,
+                    "adopt",
+                    &format!("file={} ok=true", diagnostics::file_label(&path)),
+                );
                 ExitCode::Ok
             }
             Err(error) => {
@@ -453,6 +477,12 @@ pub fn run_cli(
             req.conflict = ConflictPolicy::Unspecified;
         }
         let result = controller.integrate(&req, &cancel);
+        diagnostics::write_if(
+            stderr,
+            verbose,
+            "integrate",
+            &format!("file={} ok={}", diagnostics::file_label(&path), result.ok),
+        );
         if !result.ok {
             let _ = writeln!(stderr, "{}", result.error);
             if result.error.contains("keep-both") || result.error.contains("replace") {
@@ -498,6 +528,12 @@ pub fn run_cli(
                     "{skipped_running} update(s) skipped because applications are running; pass --force to override"
                 );
             }
+            diagnostics::write_if(
+                stderr,
+                verbose,
+                "update",
+                &format!("batch applied={applied} failed={failures} skipped={skipped_running}"),
+            );
             if failures > 0 {
                 return ExitCode::Failure;
             }
@@ -525,6 +561,16 @@ pub fn run_cli(
             return ExitCode::NeedsConfirmation;
         }
         let result = controller.apply_update(&app, force, &cancel);
+        diagnostics::write_if(
+            stderr,
+            verbose,
+            "update",
+            &format!(
+                "file={} ok={}",
+                diagnostics::file_label(&app.managed_path),
+                result.ok
+            ),
+        );
         if !result.ok {
             let _ = writeln!(stderr, "{}", result.error);
             if result.error.contains("running") {
@@ -624,6 +670,17 @@ pub fn run_cli(
             assume_yes: yes,
         };
         let outcome = controller.remove_app(&req);
+        diagnostics::write_if(
+            stderr,
+            verbose,
+            "remove",
+            &format!(
+                "file={} mode={} ok={}",
+                diagnostics::file_label(&req.path_or_uuid),
+                if del { "delete" } else { "trash" },
+                outcome.ok
+            ),
+        );
         if !outcome.ok {
             let _ = writeln!(stderr, "{}", outcome.error);
             return ExitCode::Failure;
@@ -678,6 +735,16 @@ pub fn run_cli(
 
     if has_arg(args, "--fetch-updates") {
         let scan = controller.scan_updates(&cancel);
+        diagnostics::write_if(
+            stderr,
+            verbose,
+            "update",
+            &format!(
+                "fetch offers={} failures={}",
+                scan.offers.len(),
+                scan.failures.len()
+            ),
+        );
         let _ = writeln!(stderr, "{} update(s) available", scan.offers.len());
         for offer in &scan.offers {
             let _ = writeln!(

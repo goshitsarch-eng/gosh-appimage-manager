@@ -21,6 +21,7 @@ use cosmic::widget::{self, nav_bar};
 use cosmic::{executor, Application, ApplicationExt, Element};
 
 use crate::controller::AppController;
+use crate::diagnostics;
 use crate::library::{DiscoveredApp, Origin};
 use crate::limits;
 use crate::t;
@@ -1193,6 +1194,10 @@ impl Application for App {
                 self.apply_setting("the diagnostics preference", |c| {
                     c.settings_mut().set_debug_logging(enabled)
                 });
+                // The switch is real: enabling immediately emits one line so
+                // the preference is observably wired, and every worker outcome
+                // below emits when the saved flag is on.
+                diagnostics::emit_if(enabled, "settings", "verbose diagnostics on");
                 Command::none()
             }
             Message::UnsafeFallbackToggled(enabled) => {
@@ -1392,6 +1397,11 @@ impl App {
             .map(|(_, flag)| flag.load(Ordering::Relaxed))
             .unwrap_or(false);
         self.busy = None;
+        let verbose = self
+            .controller
+            .lock()
+            .map(|c| c.settings().debug_logging())
+            .unwrap_or(false);
 
         let mut follow_up = Vec::new();
         let task_result: Result<(), String> = match outcome {
@@ -1536,6 +1546,11 @@ impl App {
             },
         };
 
+        diagnostics::emit_if(
+            verbose,
+            "gui",
+            &format!("task finished ok={}", task_result.is_ok()),
+        );
         self.with_controller(|c| c.tasks_mut().finish(&id, task_result, cancelled));
         self.refresh_tasks();
         Command::batch(follow_up)
