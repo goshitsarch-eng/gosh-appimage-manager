@@ -9,7 +9,7 @@ performance, security/robustness, architecture, packaging/QA, red-team.
 The tree entered audit-hardening in strong shape: prior rounds had closed all
 2026-09-07 findings, gates were green, and the remaining PLAN held 10 items
 with zero P0. Audit-hardening fixed all actionable code items (5), documented
-the rest as environment-blocked with exact justification, added 10 regression
+the rest as environment-blocked with exact justification, added 12 regression
 tests, and left the suite at 160 passed / 0 failed with both clippy gates,
 fmt, self-test, and desktop/AppStream validation green.
 
@@ -106,6 +106,8 @@ unchanged and minimal. Residual SEC-01 host-spawn grant stays constrained
 
 ## Tests added
 
+- `src/diagnostics.rs` unit tests (2): disabled writes nothing, labels hide
+  directories and truncate.
 - `tests/test_diagnostics.rs` (3): silent-when-off, emits-when-on, JSON
   stdout stays valid.
 - `tests/test_max_bytes.rs` (3): strict MB parse, persist + reload + clamp,
@@ -185,8 +187,9 @@ Manifest is freedesktop 23.08, single file, both arches, no
 - GUI smoke: skipped loudly (no Xvfb/xdotool here); GUI compile covered by
   gui clippy.
 - `cargo audit`: not run (tool not installed here).
-- Flatpak rebuild: not rerun here (prior x86_64 build verified in-tree;
-  aarch64 via CI).
+- `scripts/verify.sh`: **9 passed, 1 skipped** (skip = GUI smoke, no
+  Xvfb/xdotool). Includes a fresh Flatpak x86_64 build: PASS.
+  aarch64 via CI.
 - Red-team: corrupt settings / missing files refuse gracefully without crash
   or overwrite; no production unwraps; no shell strings; no secret logging;
   no stray TODO/stub markers in `src/`.
@@ -200,4 +203,4 @@ Manifest is freedesktop 23.08, single file, both arches, no
 | Normal bugs / completeness / perf (P2) | 4 (002, 003, 004, 010) | 2 (002, 003) | 2 external-blocker (004 translator, 010 release env) |
 | Polish / hardening (P3) | 5 (005–009) | 3 (006, 007, 008) | 2 (005 portal env, 009 backlog) |
 | Docs accuracy | 3 gaps (max-size, dnd, plan status) | 3 | 0 |
-| Tests | 0 missing gates for fixed behavior | 10 added | 0 |
+| Tests | 0 missing gates for fixed behavior | 12 added | 0 |

@@ -181,8 +181,10 @@ contributor (PLAN-004) or release CI + audit tooling (PLAN-010).**
 - Status: open — partially verified locally, blocked on release env.
   Local: `desktop-file-validate` pass, `appstreamcli --pedantic` pass
   (1 expected uppercase-id info), both clippy gates + fmt + full `cargo test`
-  green. Not run here: `cargo audit` (tool not installed), aarch64 Flatpak
-  rebuild (no qemu; CI covers both arches), CI green on release commit.
+  green, fresh Flatpak x86_64 build via `scripts/verify.sh` PASS (9 passed,
+  1 skipped = GUI smoke, no Xvfb/xdotool). Not run here: `cargo audit`
+  (tool not installed), aarch64 Flatpak rebuild (no qemu; CI covers both
+  arches), CI green on release commit.
 
 ## Counts
 
