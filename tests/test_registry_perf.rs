@@ -50,10 +50,13 @@ fn single_row_update_does_not_scale_with_library_size() {
     let elapsed = start.elapsed();
     eprintln!("400-row library, 100 single-row updates: {elapsed:?}");
 
-    // A full-table rewrite per call would be ~40,000 inserts. Targeted writes
-    // are 100. The bound is generous so this measures the shape, not the box.
+    // A full-table rewrite per call would be ~40,000 inserts vs 100 targeted
+    // writes (400x). Observed targeted cost is ~1.7s in debug (fsync per
+    // write); a rewrite regression would exceed ten minutes, so this 15s
+    // ceiling is a load-insensitive backstop, not a box benchmark. The
+    // structural asserts below (version + row count) are the real gate.
     assert!(
-        elapsed.as_millis() < 4000,
+        elapsed.as_millis() < 15_000,
         "single-row updates look like full-table rewrites: {elapsed:?}"
     );
     assert_eq!(registry.by_uuid("uuid-7").unwrap().version, "v99");
@@ -78,8 +81,11 @@ fn repeated_path_lookups_are_not_quadratic() {
     }
     let exact = start.elapsed();
     eprintln!("300 exact-path lookups over a 300-row library: {exact:?}");
+    // Quadratic stat-per-row history was ~47ms vs ~1ms targeted (47x); 8s is a
+    // backstop that survives loaded CI boxes while still catching a
+    // per-row-syscall regression at larger libraries.
     assert!(
-        exact.as_millis() < 2000,
+        exact.as_millis() < 8000,
         "exact lookups too slow: {exact:?}"
     );
 
@@ -110,11 +116,13 @@ fn bulk_removal_is_linear() {
     }
     let elapsed = start.elapsed();
     eprintln!("300 removals from a 300-row library: {elapsed:?}");
-    // Bound covers 300 individually-fsyncing DELETEs on slow disks; a
-    // full-table-rewrite regression would do ~90,000 row writes and blow
-    // far past this. Measures shape, not the box (this box: ~4.4s debug).
+    // 300 individually-fsyncing DELETEs cost ~4.4s in debug on this box and
+    // more under parallel load; a full-table-rewrite regression would do
+    // ~45,000 row writes (150x) and exceed ten minutes, so 30s is a
+    // load-insensitive backstop. Empty-table + reopen asserts below are the
+    // structural gate.
     assert!(
-        elapsed.as_millis() < 10000,
+        elapsed.as_millis() < 30_000,
         "bulk removal too slow: {elapsed:?}"
     );
     assert!(registry.apps().is_empty());
