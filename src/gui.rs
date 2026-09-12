@@ -167,6 +167,7 @@ pub enum Message {
     InspectBrowse,
     InspectDialog(Result<Vec<url::Url>, String>),
     InspectRun,
+    FileDropped(String),
     IntegrateRun,
     IntegrateKeepBoth(String),
     IntegrateReplace(String, String),
@@ -740,19 +741,34 @@ impl Application for App {
 
     /// Keyboard shortcuts, following the platform's usual assignments.
     fn subscription(&self) -> Subscription<Self::Message> {
-        cosmic::iced::keyboard::on_key_press(|key, modifiers| {
-            let ctrl = modifiers.contains(Modifiers::CTRL);
-            match key.as_ref() {
-                Key::Character("o") if ctrl => Some(Message::InspectBrowse),
-                Key::Character("r") if ctrl => Some(Message::LibraryRefresh),
-                Key::Character("f") if ctrl => Some(Message::UpdatesRefresh),
-                Key::Named(cosmic::iced::keyboard::key::Named::F5) => Some(Message::LibraryRefresh),
-                Key::Named(cosmic::iced::keyboard::key::Named::Escape) => {
-                    Some(Message::DialogDismiss)
+        Subscription::batch(vec![
+            cosmic::iced::keyboard::on_key_press(|key, modifiers| {
+                let ctrl = modifiers.contains(Modifiers::CTRL);
+                match key.as_ref() {
+                    Key::Character("o") if ctrl => Some(Message::InspectBrowse),
+                    Key::Character("r") if ctrl => Some(Message::LibraryRefresh),
+                    Key::Character("f") if ctrl => Some(Message::UpdatesRefresh),
+                    Key::Named(cosmic::iced::keyboard::key::Named::F5) => {
+                        Some(Message::LibraryRefresh)
+                    }
+                    Key::Named(cosmic::iced::keyboard::key::Named::Escape) => {
+                        Some(Message::DialogDismiss)
+                    }
+                    _ => None,
                 }
-                _ => None,
-            }
-        })
+            }),
+            cosmic::iced::event::listen_with(|event, _status| {
+                if let cosmic::iced::Event::Window(
+                    _,
+                    cosmic::iced::window::Event::FileDropped(path),
+                ) = event
+                {
+                    Some(Message::FileDropped(path.to_string_lossy().into_owned()))
+                } else {
+                    None
+                }
+            }),
+        ])
     }
 
     fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
@@ -827,6 +843,31 @@ impl Application for App {
                 } else {
                     self.start_inspect(normalise_open_target(&path))
                 }
+            }
+            Message::FileDropped(raw) => {
+                let path = normalise_open_target(&raw);
+                if path.trim().is_empty() {
+                    return Command::none();
+                }
+                // Drops queue behind current work exactly like multi-file
+                // opens: never discard a running worker or an unconfirmed
+                // inspection. Show the Inspect page so the queue is visible.
+                let (to_start, queued) = crate::drop_queue::plan_drop(
+                    &self.inspect.queued,
+                    self.busy.is_some(),
+                    self.inspect.result.is_some(),
+                    std::slice::from_ref(&path),
+                );
+                self.inspect.queued = queued;
+                let inspect_page = self.nav_model.iter().nth(1);
+                if let Some(inspect_page) = inspect_page {
+                    self.nav_model.activate(inspect_page);
+                }
+                let mut commands = vec![self.update_title()];
+                if let Some(first) = to_start {
+                    commands.push(self.start_inspect(first));
+                }
+                Command::batch(commands)
             }
             Message::NextQueuedFile => {
                 if self.inspect.queued.is_empty() {

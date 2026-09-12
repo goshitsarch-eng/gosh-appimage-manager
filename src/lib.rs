@@ -4,6 +4,7 @@
 pub mod controller;
 pub mod desktop;
 pub mod diagnostics;
+pub mod drop_queue;
 pub mod elf;
 pub mod i18n;
 pub mod inspector;
