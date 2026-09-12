@@ -52,9 +52,11 @@ COSMIC > perf > maintainability > cosmetic.**
     (basename-only, bounded) beats `log`/`env_logger`: no vendoring churn,
     no Flatpak source regen, testable via writer injection. Security >
     maintainability.
-17. **Wall-time perf asserts are backstops with headroom math.** 15s/8s/30s
-    ceilings document the rewrite ratio they still catch (400x/47x/150x);
-    structural asserts are the real gates. A bound that flakes is a test bug.
+17. **Structural perf gates; wall time is backstop-only.** After measuring
+    ~20x parallel-fsync inflation (1.7s → 33s), wall-time ceilings alone cannot
+    be deterministic. `ManagedRegistry` counts SQL writes; the tests assert
+    statement counts (rewrite = 400x/150x) and serialise with a std `Mutex`.
+    A bound that flakes is a test bug.
 18. **Drops never preempt.** `drop_queue::plan_drop` is pure and tested:
     busy or unconfirmed work queues drops; idle starts the first. Empirical
     queue rule over ad-hoc handler logic.

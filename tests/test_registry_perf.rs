@@ -14,7 +14,14 @@ mod common;
 use common::Harness;
 use goshaim_core::registry::ManagedRegistry;
 use goshaim_core::types::InstalledApp;
+use std::sync::Mutex;
 use std::time::Instant;
+
+/// Serialises the fsync-heavy perf tests against each other. Each test owns a
+/// private tempdir + SQLite file, but parallel fsync storms on one disk inflate
+/// every test's wall clock ~20x (observed 1.7s → 33s); the mutex keeps the
+/// disk to one storm at a time. Std-only: no new harness dependency.
+static PERF_LOCK: Mutex<()> = Mutex::new(());
 
 fn seed(registry: &mut ManagedRegistry, dir: &std::path::Path, count: usize) {
     for i in 0..count {
@@ -31,6 +38,7 @@ fn seed(registry: &mut ManagedRegistry, dir: &std::path::Path, count: usize) {
 /// A single-row update must not scale with the size of the library.
 #[test]
 fn single_row_update_does_not_scale_with_library_size() {
+    let _guard = PERF_LOCK.lock().unwrap();
     let h = Harness::new();
     let c = h.controller();
     let dir = h.tmp.path().join("apps");
@@ -39,8 +47,9 @@ fn single_row_update_does_not_scale_with_library_size() {
 
     seed(&mut registry, &dir, 400);
     assert_eq!(registry.apps().len(), 400);
+    registry.reset_write_count();
 
-    // Time 100 single-field updates against the full library.
+    // 100 single-field updates against the full library.
     let mut app = registry.by_uuid("uuid-7").unwrap();
     let start = Instant::now();
     for i in 0..100 {
@@ -48,16 +57,22 @@ fn single_row_update_does_not_scale_with_library_size() {
         registry.upsert(app.clone()).unwrap();
     }
     let elapsed = start.elapsed();
-    eprintln!("400-row library, 100 single-row updates: {elapsed:?}");
+    let writes = registry.write_statements();
+    eprintln!("400-row library, 100 single-row updates: {elapsed:?} ({writes} SQL writes)");
 
-    // A full-table rewrite per call would be ~40,000 inserts vs 100 targeted
-    // writes (400x). Observed targeted cost is ~1.7s in debug (fsync per
-    // write); a rewrite regression would exceed ten minutes, so this 15s
-    // ceiling is a load-insensitive backstop, not a box benchmark. The
-    // structural asserts below (version + row count) are the real gate.
+    // STRUCTURAL gate (deterministic, load-independent): one SQL write per
+    // upsert. A full-table-rewrite regression would execute ~40,000 writes
+    // (DELETE all + re-INSERT 400 per call). This fires even on a fast box
+    // where wall time would pass.
     assert!(
-        elapsed.as_millis() < 15_000,
-        "single-row updates look like full-table rewrites: {elapsed:?}"
+        writes <= 120,
+        "single-row updates issued {writes} SQL writes for 100 upserts: full-table rewrite?"
+    );
+    // Wall-time backstop only: generous enough to survive a loaded debug box
+    // (observed up to ~40s under fsync storms); a rewrite would take hours.
+    assert!(
+        elapsed.as_secs() < 240,
+        "single-row updates too slow even as a backstop: {elapsed:?}"
     );
     assert_eq!(registry.by_uuid("uuid-7").unwrap().version, "v99");
     assert_eq!(registry.apps().len(), 400, "no rows lost or duplicated");
@@ -66,12 +81,14 @@ fn single_row_update_does_not_scale_with_library_size() {
 /// Repeated path lookups must not re-stat every row each time.
 #[test]
 fn repeated_path_lookups_are_not_quadratic() {
+    let _guard = PERF_LOCK.lock().unwrap();
     let h = Harness::new();
     let c = h.controller();
     let dir = h.tmp.path().join("apps");
     std::fs::create_dir_all(&dir).unwrap();
     let mut registry = ManagedRegistry::open(&c.settings().registry_path()).unwrap();
     seed(&mut registry, &dir, 300);
+    registry.reset_write_count();
 
     // Exact-path lookups: the common case, and now a plain string match.
     let start = Instant::now();
@@ -81,13 +98,16 @@ fn repeated_path_lookups_are_not_quadratic() {
     }
     let exact = start.elapsed();
     eprintln!("300 exact-path lookups over a 300-row library: {exact:?}");
-    // Quadratic stat-per-row history was ~47ms vs ~1ms targeted (47x); 8s is a
-    // backstop that survives loaded CI boxes while still catching a
-    // per-row-syscall regression at larger libraries.
-    assert!(
-        exact.as_millis() < 8000,
-        "exact lookups too slow: {exact:?}"
+    // STRUCTURAL gate: lookups are reads and must issue zero SQL writes.
+    assert_eq!(
+        registry.write_statements(),
+        0,
+        "path lookups must not write to the registry"
     );
+    // Quadratic stat-per-row history was ~47ms vs ~1ms targeted (47x); 60s is
+    // a backstop that survives loaded CI boxes while still catching a
+    // per-row-syscall regression at larger libraries.
+    assert!(exact.as_secs() < 60, "exact lookups too slow: {exact:?}");
 
     // A miss still resolves correctly, and a symlinked path still matches the
     // row it points at.
@@ -103,27 +123,32 @@ fn repeated_path_lookups_are_not_quadratic() {
 /// Removing every app must not rewrite the table once per removal.
 #[test]
 fn bulk_removal_is_linear() {
+    let _guard = PERF_LOCK.lock().unwrap();
     let h = Harness::new();
     let c = h.controller();
     let dir = h.tmp.path().join("apps");
     std::fs::create_dir_all(&dir).unwrap();
     let mut registry = ManagedRegistry::open(&c.settings().registry_path()).unwrap();
     seed(&mut registry, &dir, 300);
+    registry.reset_write_count();
 
     let start = Instant::now();
     for i in 0..300 {
         registry.remove_uuid(&format!("uuid-{i}")).unwrap();
     }
     let elapsed = start.elapsed();
-    eprintln!("300 removals from a 300-row library: {elapsed:?}");
-    // 300 individually-fsyncing DELETEs cost ~4.4s in debug on this box and
-    // more under parallel load; a full-table-rewrite regression would do
-    // ~45,000 row writes (150x) and exceed ten minutes, so 30s is a
-    // load-insensitive backstop. Empty-table + reopen asserts below are the
-    // structural gate.
+    let writes = registry.write_statements();
+    eprintln!("300 removals from a 300-row library: {elapsed:?} ({writes} SQL writes)");
+    // STRUCTURAL gate (deterministic): one SQL DELETE per removal. A
+    // full-table-rewrite regression would issue ~45,000 writes (150x).
     assert!(
-        elapsed.as_millis() < 30_000,
-        "bulk removal too slow: {elapsed:?}"
+        writes <= 330,
+        "bulk removal issued {writes} SQL writes for 300 removals: full-table rewrite?"
+    );
+    // Wall-time backstop only (observed up to ~40s under fsync storms).
+    assert!(
+        elapsed.as_secs() < 300,
+        "bulk removal too slow even as a backstop: {elapsed:?}"
     );
     assert!(registry.apps().is_empty());
 

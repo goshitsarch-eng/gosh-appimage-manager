@@ -257,6 +257,10 @@ pub struct ManagedRegistry {
     path_index: std::cell::RefCell<Option<Vec<(String, PathBuf)>>>,
     /// Held open across calls; see `connect`.
     conn: std::cell::RefCell<Option<Connection>>,
+    /// Count of SQL write statements executed (upsert/remove/save). Test seam
+    /// for the perf regression gates: a full-table rewrite per mutation would
+    /// execute O(library) statements per call instead of one.
+    sql_writes: std::cell::Cell<u64>,
 }
 
 impl ManagedRegistry {
@@ -276,6 +280,7 @@ impl ManagedRegistry {
             apps: Vec::new(),
             path_index: std::cell::RefCell::new(None),
             conn: std::cell::RefCell::new(None),
+            sql_writes: std::cell::Cell::new(0),
         };
         if fresh {
             // One-time upgrade from the v2 (Qt) registry.json beside us.
@@ -437,12 +442,14 @@ impl ManagedRegistry {
             .map_err(|e| format!("Cannot save registry: {e}"))?;
         tx.execute("DELETE FROM apps", [])
             .map_err(|e| format!("Cannot save registry: {e}"))?;
+        self.note_write();
         {
             let mut stmt = tx
                 .prepare(INSERT_SQL)
                 .map_err(|e| format!("Cannot save registry: {e}"))?;
             for app in &self.apps {
                 bind_app(&mut stmt, app)?;
+                self.note_write();
             }
         }
         tx.commit()
@@ -472,6 +479,20 @@ impl ManagedRegistry {
         }
         #[cfg(not(unix))]
         let _ = path;
+    }
+
+    /// SQL write statements executed so far (test seam for perf gates).
+    pub fn write_statements(&self) -> u64 {
+        self.sql_writes.get()
+    }
+
+    /// Reset the write counter (test seam; call after seeding).
+    pub fn reset_write_count(&self) {
+        self.sql_writes.set(0);
+    }
+
+    fn note_write(&self) {
+        self.sql_writes.set(self.sql_writes.get().saturating_add(1));
     }
 
     pub fn apps(&self) -> Vec<InstalledApp> {
@@ -553,6 +574,7 @@ impl ManagedRegistry {
                 .prepare(INSERT_SQL)
                 .map_err(|e| format!("Cannot save registry: {e}"))?;
             bind_app(&mut stmt, &app)?;
+            self.note_write();
         }
         match self.apps.iter_mut().find(|a| a.uuid == app.uuid) {
             Some(slot) => *slot = app,
@@ -567,6 +589,7 @@ impl ManagedRegistry {
             let conn = self.connect()?;
             conn.execute("DELETE FROM apps WHERE uuid = ?", params![uuid])
                 .map_err(|e| format!("Cannot save registry: {e}"))?;
+            self.note_write();
         }
         self.apps.retain(|a| a.uuid != uuid);
         self.invalidate_path_index();

@@ -22,10 +22,15 @@ contributor (PLAN-004) or release CI + audit tooling (PLAN-010).**
 - Test/verify: 5 consecutive full-suite runs green on a loaded box
   (`stress` or parallel build alongside); `cargo test` still catches a
   deliberately reintroduced full-table rewrite (mutation check).
-- Status: done (audit-hardening). Bounds raised to load-insensitive backstops
-  (15s/8s/30s with 400x/47x/150x regression headroom) plus structural asserts.
-  Verified: `cargo test --test test_registry_perf` green isolated;
-  `cargo test --no-fail-fast` green full suite. Committed.
+- Status: done (audit-hardening). STRUCTURAL gates + serialization:
+  `ManagedRegistry` counts SQL write statements (`write_statements` /
+  `reset_write_count`); 100 upserts must issue <=120 writes (rewrite would be
+  ~40,000), 300 removals <=330 (rewrite ~45,000), lookups exactly 0 writes.
+  Perf tests serialised via a std `Mutex` (parallel fsync storms inflated wall
+  clocks ~20x: 1.7s → 33s observed). Wall time kept only as a generous
+  backstop (240s/60s/300s). Mutation probe proved the counter distinguishes
+  targeted writes (3) from full saves (33). Verified green serialized +
+  full suite. Committed.
 
 ## PLAN-008 — Remove dead `Page::title` (P3, area: maintainability)
 

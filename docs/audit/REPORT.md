@@ -27,7 +27,9 @@ fmt, self-test, and desktop/AppStream validation green.
 ## Bugs found (residual, 2026-09-12)
 
 - BUG-001 debug-logging no-op (P2) — fixed.
-- BUG-002 flaky perf tests (P2) — fixed.
+- BUG-002 flaky perf tests (P2) — fixed structurally (write-statement
+  counter + serialization; wall time is backstop-only after 20x fsync-storm
+  variance was measured: 1.7s → 33s).
 - BUG-003 dead `Page::title` (P3) — fixed.
 
 ## Broken / unwired features found
@@ -64,10 +66,13 @@ unchanged and minimal. Residual SEC-01 host-spawn grant stays constrained
 
 ## Performance problems found and fixed
 
-- Flaky wall-time gates → 15s/8s/30s backstops with 400x/47x/150x regression
-  headroom; structural asserts (row counts, versions, reopened-empty) are the
-  real gates. Isolated perf suite ~10–22s (debug fsync variance); full suite
-  green.
+- Flaky wall-time gates → STRUCTURAL SQL-write counters as the deterministic
+  gate (100 upserts ≤120 writes vs ~40,000 on rewrite; 300 removals ≤330 vs
+  ~45,000; lookups 0 writes) plus std-`Mutex` serialization of the fsync-heavy
+  tests. Wall time kept only as a generous backstop (240s/60s/300s) after
+  measuring ~20x parallel-fsync inflation (1.7s → 33s). Mutation probe proved
+  the counter fires on rewrite-like saves. Serialized perf suite ~75s on a
+  slow debug disk; full suite green.
 
 ## Architecture improvements
 
