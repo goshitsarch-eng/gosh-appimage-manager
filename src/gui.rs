@@ -79,18 +79,6 @@ impl Page {
             Page::About => t!("nav.about", "About"),
         }
     }
-
-    #[allow(dead_code)]
-    const fn title(self) -> &'static str {
-        match self {
-            Page::Library => "Library",
-            Page::Inspect => "Inspect",
-            Page::Updates => "Updates",
-            Page::Tasks => "Tasks",
-            Page::Settings => "Settings",
-            Page::About => "About",
-        }
-    }
 }
 
 /// A modal question. Every destructive choice appears as one of these.
