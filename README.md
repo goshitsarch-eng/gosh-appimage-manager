@@ -129,7 +129,8 @@ Flatpak SDK).
 Settings > Appearance offers System / Light / Dark, applied live with no
 restart and restored at startup. System follows the COSMIC theme mode.
 Positional file arguments open straight into the Inspect page; several files
-are inspected and confirmed one at a time.
+are inspected and confirmed one at a time. Dropping files into the window
+queues them the same way.
 
 ## Flatpak
 
@@ -180,6 +181,9 @@ desktop entries, and icons are reused in place.
 
 - Candidates must be regular files with ELF and AppImage magic. MIME/extension is not enough.
 - Size, extraction, process output, JSON, and download bodies are bounded.
+  The largest AppImage to integrate or download defaults to 8 GiB, adjustable
+  in Settings → Integration folder from 1 MB to 32 GB; oversized files are
+  refused without buffering them.
 - Archive paths with `..`, absolute names, or escaping symlinks are rejected.
 - Desktop `Exec` is built from program plus argument tokens. No shell strings.
 - Trash failure never becomes delete. Permanent delete requires an extra confirmation and refuses protected paths.
