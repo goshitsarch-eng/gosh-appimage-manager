@@ -26,8 +26,10 @@ The locale comes from `LC_ALL`, `LC_MESSAGES`, then `LANG`, in POSIX order.
 
 ## Checking a translation
 
-`qps.json` is a pseudolocale, not a language. Running with it accents every
-letter and pads each string by about a third:
+`qps` is a pseudolocale, not a language — the transform lives in
+`src/i18n.rs`, keyed on the locale name; `i18n/qps.json` is an empty marker
+file so the catalog lookup finds it. Running with it accents every letter
+and pads each string by about a third:
 
 ```sh
 GOSHAIM_LOCALE_DIR=./i18n LC_ALL=qps cargo run --features gui

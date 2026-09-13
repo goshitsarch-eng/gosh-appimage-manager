@@ -309,7 +309,7 @@ pub fn pseudolocalize(source: &str) -> String {
     }
     // ~30% expansion, roughly what German and Finnish need over English.
     let padding = (source.chars().count() / 3).max(1);
-    out.extend(std::iter::repeat('·').take(padding));
+    out.extend(std::iter::repeat_n('·', padding));
     out.push(']');
     out
 }

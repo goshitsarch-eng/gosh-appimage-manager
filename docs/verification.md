@@ -1,55 +1,36 @@
 # Verification record (Rust 3.0.0)
 
-Every command below was executed in this worktree. Output is summarised from
-real transcripts; nothing here is fabricated, and claims that could not be
-verified are marked as such rather than asserted.
-
-Toolchain: rustc/cargo 1.94.1. The crate declares `rust-version = "1.75"`;
-`cargo clippy` enforces that MSRV and passes.
+Latest pass: 2026-09-13, in a Fedora distrobox (`gosh-os-next-dev`) with
+rustc/cargo 1.98.0 and flatpak-builder 1.4.10. Commands were run for real;
+anything not re-verified says so. The crate declares `rust-version = "1.89"`
+— the floor the locked dependency graph actually compiles on.
 
 This is the native Rust + libcosmic implementation. There is no Qt/KDE,
-CMake, QML, CTest, or ECM anywhere in the tree; earlier revisions of this
-record that named them described a retired stack, as does
-`docs/implementation-brief.md`, which is kept as the original mission
-statement and is superseded on stack by `docs/rewrite-3.0.0.md`.
+CMake, QML, CTest, or ECM anywhere in the tree;
+`docs/implementation-brief.md` is the original mission statement and is
+superseded on stack by `docs/rewrite-3.0.0.md`.
 
-No command mutated a real `~/AppImages`, desktop entry, icon, or application
-configuration. Tests use fake process/network/table/trash seams and synthetic
-ELF/AppImage fixtures; they never touch a real home, execute an AppImage, or
-call a live update API. Live CLI probes ran with an isolated `HOME`
-(`GOSHAIM_HOME` is also honoured).
+No command below mutated a real `~/AppImages`, desktop entry, icon, or
+configuration. Tests use fake process/network/table/trash seams and
+synthetic ELF/AppImage fixtures; they never touch a real home, execute an
+AppImage, or call a live update API. Live CLI probes ran with an isolated
+`HOME` (`GOSHAIM_HOME` is also honoured).
 
 ## 1. Full test suite
 
 ```
-cargo test
+cargo test --no-fail-fast
 ```
 
 ```
-134 passed; 0 failed (20 suites, 0 failures)
+160 passed; 0 failed (23 suites + fixture test)
 ```
 
-Suites: `test_cli`, `test_desktop_tasks`, `test_detail`, `test_elf`,
-`test_ftp`, `test_glob`, `test_icon`, `test_inspector`, `test_integration`,
-`test_launch`, `test_library`, `test_network`, `test_probes`,
-`test_registry`, `test_registry_perf`, `test_removal`, `test_rollback`,
-`test_settings`, `test_ssrf`, `test_update`, plus the in-crate fixture test.
-
-Two suites depend on `probe.example.test` resolving to `127.0.0.1`
-(`test_ssrf`, `test_ftp`). Where it does not, they print that they are
-skipping rather than passing vacuously. Add it to `/etc/hosts` to exercise
-them:
-
-```
-127.0.0.1 probe.example.test
-```
-
-Coverage beyond the previous record: transactional rollback at four injected
-failure points (previously untested — the fail-point seam had no caller
-anywhere), FTP protocol conformance against a real RFC 959 server, the
-resolved-address SSRF guard against a real socket, icon extraction end to
-end, external discovery and adoption, settings failure reporting, and
-registry write/lookup performance.
+Two suites (`test_ssrf`, `test_ftp`) exercise hostname→loopback resolution
+through the real resolver; where `probe.example.test` does not resolve they
+report the skip rather than passing vacuously. Adding
+`127.0.0.1 probe.example.test` to `/etc/hosts` exercises them fully — in
+this environment the test passed without the hosts entry.
 
 ## 2. Lint and format gates
 
@@ -59,26 +40,25 @@ cargo clippy --features gui --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-All three pass with zero warnings. The previous record claimed this while it
-was failing on `updates_sources.rs` (`clippy::nonminimal_bool`) on any
-toolchain from 1.83 onward.
+All pass with zero warnings.
 
-## 3. GUI compile
+## 3. GUI build
 
 ```
 cargo check --features gui
+cargo build --features gui
 ```
 
-Clean against the pinned libcosmic v0.12 tag. This needs the Wayland and XKB
-development headers; on Debian/Ubuntu:
+Clean against the pinned libcosmic v0.12 tag (1m51s). Needs the Wayland and
+XKB development headers; on Debian/Ubuntu:
 
 ```
 apt-get install libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev
 ```
 
-The previous record listed those as unavailable and treated the GUI as
-uncompilable here, which is why a line-by-line audit stood in for a build.
-They install without trouble, and the GUI has been type-checked since.
+The GUI binary was also launched on a real X display (`DISPLAY=:1`) with an
+isolated `HOME` and ran without errors until killed — it opens on X11; a
+driven COSMIC/Wayland session remains unverified (§8).
 
 ## 4. Offline self-test through the real binary
 
@@ -88,7 +68,7 @@ HOME=/tmp/gosh-aim-qa-home ./target/debug/gosh-appimage-manager --self-test
 ```
 
 ```
-[self-test] models-ready: ok
+[self-test] readiness: ok
 [self-test] elf-fixture: ok
 [self-test] registry: ok
 [self-test] desktop: ok
@@ -98,51 +78,45 @@ HOME=/tmp/gosh-aim-qa-home ./target/debug/gosh-appimage-manager --self-test
 SELF_TEST_OK
 ```
 
-Exit 0, isolated HOME. Note that `models-ready` returns a constant `true` and
-asserts nothing; it is a placeholder, not a check.
+Exit 0, isolated HOME. `readiness` checks real things (registry path, data
+dir, settings load errors, managed folder, all six managers resolve).
 
-## 5. Non-mutating CLI probes (isolated HOME)
+## 5. Live CLI probes (isolated HOME, all exit 0)
 
 ```
---version              -> 3.0.0
---list-installed --json -> {"installed":[],"schema_version":1}
---list-updates --json   -> {"schema_version":1,"updates":[]}
---list-update-managers  -> static github gitlab codeberg forgejo ftp
---probe-host            -> host_spawn_program=true, in_flatpak=false, HOST_PROBE_OK
---probe-autostart       -> autostart_installed=false, AUTOSTART_OK
+--version                -> 3.0.0
+--list-installed --json  -> {"installed":[],"schema_version":1}
+--list-updates --json    -> {"schema_version":1,"updates":[]}
+--list-update-managers   -> static github gitlab codeberg forgejo ftp
+--probe-host             -> host_spawn_program=true, in_flatpak=false, HOST_PROBE_OK
+--probe-autostart        -> autostart_installed=false, AUTOSTART_OK (renders, never writes)
+--probe-inspect <file>   -> JSON + INSPECT_NO_EXECUTION
 ```
 
-All exit 0. Diagnostics go to stderr so stdout stays valid JSON.
-`--probe-autostart` now renders and verifies the entry without installing it
-or changing any setting; the previous record documents having to delete its
-residue by hand afterwards.
+End-to-end against a synthetic 128-byte ELF+AI\x02 fixture:
+`--integrate --yes` copies to `~/AppImages/` (0700 dir, executable file),
+writes `~/.local/share/applications/gosh-appimage-<uuid>.desktop` with the
+ownership markers, and registers a row; `--list-installed --json` reports
+it `owned:true`; `--remove --yes` trashes the file (freedesktop mount-top
+`.Trash-<uid>`), removes the entry, and deletes the row. `--adopt` on an
+external file registers it `owned:true` with no disk changes; a later
+`--remove` trashes it at its original location. Confirmation refusal
+without a TTY exits 5; `--update` on an unknown path exits 4.
 
-Discovery and adoption verified end to end against an isolated HOME with a
-foreign desktop entry pointing outside the managed folder: `--list-discovered`
-reports it only with the outside-folder setting on, `--adopt` registers it,
-and the foreign entry is byte-identical afterwards.
+## 6. Flatpak build (x86_64)
 
-## 6. Measured performance
+```
+flatpak-builder --user --force-clean --disable-rofiles-fuse \
+  build-dir packaging/com.goshapps.AppImageManager.yml --arch=x86_64
+flatpak-builder --run build-dir packaging/com.goshapps.AppImageManager.yml \
+  gosh-appimage-manager --self-test
+```
 
-Release build, three serialized runs each, on the machine used for this
-record. These measure the shape of the change, not the box:
-
-| Operation | Before | After |
-|---|---|---|
-| 300 exact-path registry lookups over 300 rows | ~47 ms | ~0.24 ms |
-| 100 single-row registry updates over 400 rows | ~320 ms | ~150 ms |
-| 300 registry removals from 300 rows | ~756 ms | ~470 ms |
-
-Asset-name glob matching, release build, against a 50-character asset name —
-the previous implementation, showing the blow-up that made a hostile
-`.upd_info` able to wedge the background update checker:
-
-| Pattern length | 5 | 9 | 11 | 13 | 15 |
-|---|---|---|---|---|---|
-| Time | 0.13 ms | 6.7 ms | 57 ms | 507 ms | 3.15 s |
-
-The replacement is linear and answers the 49-character case that used to run
-past three minutes in well under a second.
+Full build passed: pinned Rust 1.90.0 toolchain, unsquashfs from source,
+per-arch 7zz/dwarfs binaries, vendored cargo deps offline, in-builder
+`--self-test` ran during the build, appstreamcli compose succeeded, exports
+clean. The packaged `--self-test` re-printed `SELF_TEST_OK` under
+`flatpak-builder --run`. aarch64 is covered by CI (qemu-user).
 
 ## 7. Localizability
 
@@ -150,38 +124,33 @@ past three minutes in well under a second.
 GOSHAIM_LOCALE_DIR=./i18n LC_ALL=qps cargo run --features gui
 ```
 
-`qps` is a pseudolocale, not a language: every letter is accented and each
-string padded by about a third, so anything still in plain ASCII was never
-routed through the catalog and anything clipped is a layout that only fits
-English.
-
-Run against a rendered frame, it found four batches of strings that were
-still hard-coded -- the sort buttons, every `settings::item` label, the
-Inspect page's safety caption, and the About page's version line -- which
-reading the code had not. All are routed now. What remains in plain ASCII is
-what should: the product name, and file paths and versions, which are data.
+`qps` is a pseudolocale: `i18n.rs` accents every letter and pads each
+string by about a third, so anything still in plain ASCII was never routed
+through the catalog and anything clipped is a layout that only fits
+English. `i18n/qps.json` is an empty marker file — the transform lives in
+code, keyed on the locale name.
 
 ## 8. Not verified
 
 Stated plainly rather than implied:
 
-- **No pass on a real compositor.** The GUI now renders, is driven, and is
-  measured on a headless X server (`tools/gui-smoke.sh`), but no one has used
-  it on a COSMIC/Wayland session. Window-manager behaviour — the minimum-size
-  hint, tiling, fractional scaling — is enforced by the compositor and there
-  is none here, so those remain unverified.
-- **No Flatpak build.** `flatpak-builder` is not installed here, so neither
-  architecture was built and the packaged probes were not re-run. The manifest
-  is unchanged by this work apart from what is noted in
-  `docs/rewrite-3.0.0.md`.
-- **No AppStream/desktop validation.** `desktop-file-validate` and
-  `appstreamcli` are not installed here, so `just validate` was not re-run.
-  `data/com.goshapps.AppImageManager.desktop` changed (`%U` → `%F`) and
-  should be re-validated where those tools exist.
-- **No real AppImage was executed or integrated.** All fixtures are synthetic
-  ELF files; the extraction tools are driven through the process seam.
+- **No driven pass on a real compositor.** The GUI launches and renders on
+  real X11 (§3) and is driven/measured on a headless X server by
+  `tools/gui-smoke.sh`, but no one has used it through a COSMIC or Wayland
+  session. Window-manager behaviour — minimum size, tiling, fractional
+  scaling — is the compositor's and remains unverified.
+- **No aarch64 local build.** Covered by CI (qemu-user) only.
+- **No real AppImage was executed or integrated.** All fixtures are
+  synthetic ELF files; extraction tools are driven through the process
+  seam in tests (the real `unsquashfs`/`7zz` paths are exercised only in
+  the packaged build).
+- **GUI smoke test not run here** — Xvfb/xdotool/ImageMagick are absent;
+  `scripts/verify.sh` skips that stage loudly.
 
-## 9. Findings
+## 9. Findings history
 
-`AUDIT.md` records the end-to-end audit this work came out of: what was
-found, what was fixed, and what was deliberately not.
+`AUDIT.md` records the 2026-09-07 end-to-end audit and its fixes;
+`docs/audit/` the 2026-09-12 hardening round; `docs/migration/` the parity
+round. `docs/documentation/` holds the 2026-09-13 documentation audit
+(`APP-INVENTORY.md`, `AUDIT.md`, `PLAN.md`) this record was refreshed
+alongside.

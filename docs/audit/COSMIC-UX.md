@@ -1,5 +1,9 @@
 # COSMIC UX review (Phase 2)
 
+> **Point-in-time snapshot** (2026-09-12). Several "current"/"problems"
+> entries describe the pre-hardening state and are corrected inline; treat
+> open items as the audit's findings, not the present UI.
+
 Standard order: libcosmic component guidance → freedesktop specs →
 WAI-ARIA APG for semantics libcosmic leaves unspecified. No compositor was
 available in this session, so layout/render claims below are code-derived
@@ -44,9 +48,8 @@ Per-area: current | pattern | problems | planned change | verify.
 - Current: portal picker + file args queued (`gui.rs:713`), confirmed one
   at a time; safety caption present and translated.
 - Pattern: single-confirmation sequential flow (brief §2).
-- Problems: no drag-and-drop (upstream lists it) → PLAN-007 (P3).
-- Planned change: add dnd target if libcosmic/iced supports it on the
-  pinned stack; else keep picker+args and document.
+- Problems: none — drag-and-drop is implemented via `window::Event::FileDropped`
+  + `drop_queue.rs` (PLAN-007 done).
 - Verify: drop 3 files → 3 sequential confirmations.
 
 ## Updates
@@ -73,9 +76,9 @@ Per-area: current | pattern | problems | planned change | verify.
   managed folder, terminal-suffix, unsafe fallback, debug logging.
 - Pattern: `settings::section` + labelled togglers (G-4 fixed: no bare
   `toggler(None)`).
-- Problems: (1) debug-logging switch does nothing (BUG-001);
-  (2) autostart-vs-background-checks relationship worth one caption line.
-- Planned change: BUG-001 fix; caption copy in the same pass.
+- Problems: none known — the debug-logging switch now emits stderr
+  diagnostics via `diagnostics.rs` (BUG-001 fixed), and the
+  background/autostart relationship carries a caption.
 - Verify: PLAN-003 acceptance.
 
 ## Status/errors
@@ -103,8 +106,9 @@ Per-area: current | pattern | problems | planned change | verify.
 
 ## Localization/RTL
 
-- Current: 80 `t!()` lookups, JSON catalogs, `qps` pseudolocale proof;
-  English fallback; product name + data stay untranslated by design.
+- Current: ~143 `t!()` call sites in `gui.rs`, JSON catalogs, `qps`
+  pseudolocale proof; English fallback; product name + data stay
+  untranslated by design.
 - Pattern: catalog lookup with source-English default.
 - Problems: no human-language catalog ships (PLAN-004); no explicit RTL
   pass (libcosmic/iced handles base direction; unverified visually).

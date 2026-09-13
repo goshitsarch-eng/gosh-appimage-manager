@@ -22,14 +22,13 @@ Prior-round fixes (P-1…P-9) verified present; figures from `docs/verification.
 
 ## Open
 
-### PERF-01 — Registry perf tests are load-sensitive (→ PLAN-002, P2)
+### PERF-01 — Registry perf tests are load-sensitive (→ PLAN-002, P2) — DONE
 - Evidence: `test_registry_perf` 2 failures in 1 of 3 full-suite runs here
   (27s wall, parallel); green in isolation (10.5s). Migration report notes
   300 individually-fsyncing DELETEs in debug builds (~4.4s vs old 4s bound).
-- Impact: flakes erode CI signal; could mask a P-4 regression.
-- Fix: run the suite `serial`/`--test-threads=1`, raise bounds with
-  machine-normalized rationale, or assert operation counts (fsync/SQL
-  statements) instead of wall time.
+- Resolution: structural SQL-write gates (`write_statements` counters in
+  `registry.rs`) plus suite serialization; wall time kept only as a
+  generous backstop. Green serialized and under full-suite load.
 - Before→after: flaky wall-time assert → deterministic structural assert.
 
 ### PERF-02 — Debug-build fsync cost dominates bulk removal (accepted)

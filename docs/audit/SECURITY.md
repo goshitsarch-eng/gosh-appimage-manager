@@ -26,8 +26,8 @@ fixes S-1…S-14 verified present in this tree by inspection + green suites
 | Update arch compat | foreign-arch payload refused | `updates_service.rs`, dedicated test |
 | Streaming download | to 0600 temp, bounded, cancellable; oversized refused without buffering | `network.rs:stream_to_file`, tests |
 | Atomic replace + rollback | validate-then-rename; rollback material kept till success | `updates_service.rs`, `test_rollback` |
-| Running-app guard | Flatpak-safe via host-spawn probe; probe failure = "cannot tell", never "not running" | `proctable.rs` + host lookup, fail-safe test |
-| Unsafe fallback | off by default; per-file confirm; never in tests/background | `inspector.rs`, `settings.rs` |
+| Running-app guard | Flatpak-safe via host-spawn probe; a failed probe falls back to the sandbox's (empty) `/proc` view, which effectively reads as "not running" — degraded, not fail-closed | `proctable.rs` + host lookup |
+| Unsafe fallback | off by default; implemented but unreachable — the per-file confirmation gate has no UI (`confirm_unsafe_extract` is never set in production) | `inspector.rs`, `settings.rs`, `gui.rs` |
 | Registry perms | `registry.sqlite` 0600 enforced incl. pre-existing files | `registry.rs`, S-14 test |
 | Bounded everything | size/extraction/output/JSON/download/redirect/timeout caps | `limits.rs`, `safe_fs.rs`, `network.rs` |
 | Forge pinning | forge assets must come from the serving forge | `updates_sources.rs`, `forge_assets_must_come_from_the_forge…` |

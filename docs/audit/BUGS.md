@@ -28,13 +28,16 @@ from 2026-09-12 below; audit-hardening dispositions follow each item.
 
 ## Closed / verified absent (spot-checked this session)
 
-- No `expect/unwrap/panic/todo` in `src/` (searched — zero hits).
+- No *unguarded* `expect`/`unwrap`/`panic` in production paths. The handful
+  that exist are guarded invariants (`registry.rs:368` is preceded by an
+  `is_none()` check) or live in test-only fake seams (`trash.rs`,
+  `proctable.rs`, `network.rs`, `process.rs`).
 - `models-ready` placeholder closed: `--self-test` prints
   `[self-test] readiness: ok` and exits 0 (observed).
 - `TaskQueue` live: GUI drives `begin/mark_cancelling/finish`
   (`gui.rs:328,1128,1135,1551`); Tasks page renders from it.
 - `MaxAppImageBytes` enforced (`integration.rs:64,187`,
-  `updates_service.rs:284`) — but user-unsettable; tracked as gap
-  (→ PLAN-006) rather than bug.
+  `updates_service.rs:284`) and user-settable via the Settings "Max size
+  (MB)" row (`gui.rs` settings view; strict 1–32768 parse in `limits.rs`).
 - `debug_logging`/`MaxAppImageBytes` persistence round-trips
   (`test_settings` green); the defect is effect/exposure, not storage.

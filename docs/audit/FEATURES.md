@@ -22,7 +22,7 @@ Status values: `done` (wired + tested), `partial`, `missing`, `gap`
 | Set/reset update source | GUI detail, `--set-update-source` | per-app manager config | `updates_sources.rs`, `cli.rs` | done | `test_update` roundtrip | `cargo test` |
 | Per-item update | GUI, `--update <path>` | check→download→verify→replace | `updates_service.rs` | done | `test_update` (18) | `cargo test` |
 | Batch update + cancel | GUI Updates, `--update --all` | serial apply, working cancel | `gui.rs`, `tasks.rs`, `cli.rs` | done | `test_update`, `test_desktop_tasks` | `cargo test` |
-| Running-app guard + `--force` | both | block unless explicit force; fail-safe "cannot tell" | `proctable.rs`, host-spawn probe | done | `test_update` running-block | `cargo test` |
+| Running-app guard + `--force` | both | block unless explicit force; Flatpak asks the host via `flatpak-spawn`, with sandbox-local `/proc` fallback if the probe fails | `proctable.rs`, host-spawn probe | done | `test_update` running-block | `cargo test` |
 | Digest verification (sha256:/bare) | both | refuse uninterpretable/mismatch | `updates_service.rs` | done | `test_update` digest cases | `cargo test` |
 | Arch-compat check on update | both | refuse foreign-arch payload | `updates_service.rs` | done | `foreign_architecture_update_is_refused` | `cargo test` |
 | Reduced-verification flag | GUI/CLI offer display | shown when no published checksum | `types.rs`, sources | done | `test_update` | `cargo test` |

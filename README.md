@@ -1,72 +1,127 @@
-# Gosh AppImage Manager 3.0.0
+# Gosh AppImage Manager
 
-Gosh AppImage Manager is a native application for inspecting, integrating,
-launching, organizing, updating, and removing AppImages. Version 3.0.0 is
-written in Rust with libcosmic (COSMIC Epoch, iced-based). Made by Gosh.
+Inspect, integrate, launch, update, and remove AppImages. Written in Rust
+with libcosmic (COSMIC Epoch); one `gosh-appimage-manager` binary provides
+both the desktop app and a scriptable CLI.
 
-Application ID: `com.goshapps.AppImageManager`
-Executable: `gosh-appimage-manager`
-Licence: GPL-3.0-or-later
-Public identity: Gosh-Its-Arch
+- Application ID: `com.goshapps.AppImageManager`
+- Version 3.0.0 · GPL-3.0-or-later · by Gosh Apps / Gosh-Its-Arch
 
-Opening an AppImage never integrates or executes it. Integration is
-transactional. Metadata extraction does not execute the AppImage unless the
-user enables the unsafe fallback in Settings and confirms that file.
+## AI-assisted development
 
-Gear Lever by Lorenzo Paderi is a GPLv3 behavioural reference only. This is
-an independent original implementation and is not endorsed by Gear Lever's
-authors. Gear Lever source, templates, CSS, icons, screenshots, application
-ID, and branding were not copied.
+AI tools are used during development to speed up implementation and assist
+with coding. The maintainer works architecture-first: the design is defined
+by a human, and AI output is reviewed, tested, and refactored rather than
+trusted. AI is treated as a junior developer — useful for implementation
+and exploration, never the authority. The maintainer accepts responsibility
+for the architecture, technical decisions, and code quality.
 
-Zero telemetry: the app makes network requests only to update metadata
-endpoints you configured, and only when you check for or apply updates.
+This notice is here so you can make an informed choice about whether
+AI-assisted software is something you're comfortable using.
 
-## Build
+## Features
 
-Requires a Rust toolchain (see `rust-version` in `Cargo.toml`).
+- **Inspect without side effects.** Opening an AppImage shows its type,
+  architecture, SHA-256, embedded desktop metadata, icon, and update
+  source. Nothing is executed or installed.
+- **Integrate.** Copies the file into the managed folder (`~/AppImages` by
+  default), writes a menu entry, and installs the extracted icon. Name
+  conflicts offer keep-both or replace.
+- **Manage.** Launch, reveal in the file manager, refresh metadata, edit
+  launch arguments and environment variables, trash or permanently delete.
+- **Update.** Per-app or batch updates from GitHub, GitLab, Codeberg,
+  Forgejo, static URLs (including zsync metadata), or FTP. Embedded
+  `.upd_info` in the AppImage is picked up automatically. Downloads are
+  staged, verified, and applied atomically with rollback.
+- **Discover and adopt.** AppImages dropped into the managed folder — or
+  referenced by desktop entries elsewhere when discovery is enabled — are
+  listed for adoption.
+- **CLI** with JSON output, non-mutating probes, and an offline self-test.
+- **Localizable.** The interface is fully routed through JSON message
+  catalogs; only English ships today.
 
-```sh
-cargo build
-```
+## Install
 
-With the libcosmic GUI (needs network once for the pinned libcosmic
-checkout; needs system Wayland/XKB dev files — present in the Flatpak SDK):
+### Flatpak
 
-```sh
-cargo build --features gui
-cargo run --features gui
-```
-
-Without `--features gui`, `cargo run` serves the CLI (same binary, no GUI,
-no Qt/KDE runtime anywhere in the tree).
-
-## Test
-
-```sh
-cargo test
-```
-
-Tests use fake process/network/table/trash seams and synthetic ELF/AppImage
-fixtures. They do not touch a real home directory, execute an AppImage,
-launch a user app, or call live update APIs. Lint and format gates:
+CI builds `gosh-appimage-manager-<arch>.flatpak` bundles for x86_64 and
+aarch64 on every push and pull request — grab one from the workflow's
+artifacts and install it:
 
 ```sh
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+flatpak install gosh-appimage-manager-x86_64.flatpak
 ```
 
-`tools/gui-smoke.sh` runs the GUI on a headless X server, captures each page
-and measures text contrast against the rendered pixels; it needs `xvfb`,
-`xdotool` and ImageMagick.
+The app is not published to Flathub; the bundle is the distribution format.
+To build the bundle yourself, see the [Flatpak](#flatpak-1) section below.
 
-`just` wraps the common flows: `just build`, `just build-gui`, `just test`,
-`just lint`, `just validate`, `just vendor <fbtools>`, `just flatpak-x86_64`,
-`just flatpak-aarch64`.
+### Build from source
+
+Native build needs Rust 1.89 or newer — that is what the locked dependency
+graph requires (`rust-version` in `Cargo.toml`). The GUI additionally needs
+Wayland and XKB development headers:
+
+```sh
+# Debian/Ubuntu
+sudo apt-get install libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev
+# Fedora
+sudo dnf install wayland-devel libxkbcommon-devel
+```
+
+```sh
+cargo build --features gui          # needs network once, for the pinned libcosmic checkout
+cargo run --features gui            # run the app
+cargo build                         # CLI-only build (no GUI deps)
+```
+
+Without `--features gui` the same binary serves the CLI and prints a hint
+when run with no command.
+
+## Using the app
+
+Six pages in the sidebar: **Library, Inspect, Updates, Tasks, Settings,
+About.**
+
+**Add an AppImage.** Open it from your file manager (the app registers the
+AppImage MIME types), drop it onto the window, or use Inspect → Browse.
+The Inspect page shows what the file is before you commit. Press
+**Integrate** to add it.
+
+**Work with the library.** Search by name, version, or path; sort by name,
+version, or updates-first. A row offers Launch / Details / Trash. Details
+shows the full record — path, desktop ID, SHA-256, type, architecture,
+size, update manager, provenance — plus argument and environment editors,
+the update-source editor, and permanent delete.
+
+**Update.** Updates → Check now lists offers; Update per row or Update all.
+An app needs an update source: either one embedded in the AppImage or one
+set on its Details page. A source with no published checksum is marked
+"reduced verification". A running app blocks its update unless you confirm
+the override.
+
+**Keyboard shortcuts.** Ctrl+O browse a file · Ctrl+R or F5 refresh the
+library · Ctrl+F check for updates · Esc dismiss a dialog.
+
+**Settings** (all optional, all off unless noted):
+
+- Appearance — System / Light / Dark, applied live and restored at startup.
+- Integration folder — where integrated AppImages live, plus a max file
+  size (1–32768 MB, default 8192).
+- Move the original into the library instead of copying — after a verified
+  integration the source goes to the Trash, never a hard delete.
+- Discover AppImages outside the managed folder — lists desktop-entry
+  AppImages from elsewhere for adoption.
+- Terminal apps: drop the .AppImage suffix from the name.
+- Verbose diagnostics — per-operation lines on stderr.
+- Check for updates in the background (notify only), and Run those checks
+  at login via an autostart entry.
+- Unsafe extraction fallback — see Safety below; today it cannot actually
+  run.
 
 ## CLI
 
-The same executable provides GUI and CLI modes. CLI commands do not start the
-GUI. `--version` prints `3.0.0`.
+The same executable doubles as a CLI; commands never start the GUI.
+`--version` prints `3.0.0`. `--help` (or `-h`) prints usage.
 
 ```
 gosh-appimage-manager --integrate <path> [--keep-both|--replace] [--replace-uuid UUID|--target PATH] [--yes]
@@ -87,147 +142,183 @@ gosh-appimage-manager --probe-inspect <path>
 gosh-appimage-manager --probe-autostart
 ```
 
-JSON list output uses `schema_version: 1` with an `installed`, `updates`, or
-`discovered` array. `--fetch-updates` is non-mutating (check metadata only)
-and prints a notice on stderr. Diagnostics go to stderr so stdout remains
-valid JSON. `--list-updates` and `--fetch-updates` exit `8` when an app's
-update check failed, so a script can tell "nothing to update" apart from
-"nothing could be checked"; the JSON document on stdout is still complete.
+`-y` is a short alias for `--yes`. Destructive commands ask for
+confirmation on a terminal; without one they refuse (exit 5) unless `--yes`
+is passed.
+
+`--list-update-managers` prints the six source types: `static`, `github`,
+`gitlab`, `codeberg`, `forgejo`, `ftp`. Source config is `key=value` pairs
+after `--manager <name>` — for example:
+
+```sh
+gosh-appimage-manager --set-update-source ~/AppImages/foo.AppImage \
+  --manager github username=me repo=app filename=app-x86_64.AppImage
+```
+
+Required keys: `github` needs `username`, `repo`, `filename`; `gitlab`
+needs `project` (`host` defaults to gitlab.com); `codeberg` needs `owner`,
+`repo`; `forgejo` needs `host`, `owner`, `repo`; `static` and `ftp` need
+`url` (a `version` key is recommended — without one the source reports
+"no version information"). `allow_local_network=true` opts a source into
+private/loopback endpoints; embedded metadata can never set it. The GUI's
+update-source field accepts a single `key=value` line, so multi-key
+managers are configured from the CLI.
 
 `--list-discovered` reports AppImages in the managed folder and, when
-"discover AppImages outside the managed folder" is on, ones referenced by
-desktop entries elsewhere. `--adopt` registers such a file so it can be
-updated and removed here; nothing on disk is changed and its existing desktop
-entry is left alone.
+discovery is enabled, ones referenced by desktop entries elsewhere.
+`--adopt` registers such a file so it can be updated and removed here;
+nothing on disk changes, and its existing desktop entry is left alone —
+but removing an adopted app later trashes the file at its original
+location.
 
-All three probes are non-mutating: `--probe-autostart` renders and verifies
-the autostart entry it *would* install without writing it or changing any
-setting.
+Machine output goes to stdout; prompts and diagnostics to stderr, so
+`--json` output stays parseable. List documents use `schema_version: 1`
+with an `installed`, `updates`, or `discovered` array. `--list-updates` and
+`--fetch-updates` exit 8 when any app's check failed — the JSON is still
+complete, so a script can tell "nothing to update" from "nothing could be
+checked". Other exit codes: 0 ok · 1 failure · 2 usage · 4 not integrated ·
+5 confirmation declined · 6 validation · 7 app is running. (3 is reserved.)
 
-## GUI
+`--fetch-updates` only checks and notifies — it never downloads or applies
+anything; the login autostart entry runs exactly this command.
 
-`cargo run --features gui` (or the Flatpak) opens the libcosmic shell:
-Library / Inspect / Updates / Tasks / Settings / About.
+`--probe-inspect <path>` prints a JSON description of a file followed by
+`INSPECT_NO_EXECUTION` — proof it was never executed. `--probe-host` and
+`--probe-autostart` verify host spawning and render the autostart entry
+without writing it. `--self-test` exercises the stack against synthetic
+fixtures and prints `SELF_TEST_OK`.
 
-Every operation that touches disk, spawns a process, hashes, or uses the
-network runs on a worker thread, so the window keeps repainting and Cancel
-takes effect. The Tasks page shows running and recent work with progress and
-errors. Selecting a library entry opens a detail page: launch, reveal in the
-file manager, check and update, refresh metadata, edit the argument list and
-environment pairs, set or reset the update source, and the file's path,
-desktop id, hash, type, architecture, size, manager and provenance.
+## Where things live
 
-Library has search and sorting. AppImages found outside the managed folder
-are listed for explicit adoption. Destructive choices — replace or keep both,
-Trash versus permanent delete, enabling the unsafe extraction fallback,
-updating a running app — go through a modal dialog that names the exact file.
+| What | Path |
+|---|---|
+| Managed AppImages | `~/AppImages` (configurable in Settings) |
+| Registry | `~/.local/share/gosh-appimage-manager/registry.sqlite` (mode 0600) |
+| Settings | `~/.config/gosh-appimage-manager/settings.json` (mode 0600) |
+| Generated desktop entries | `~/.local/share/applications/gosh-appimage-<uuid>.desktop` |
+| Installed icons | `~/.local/share/icons/hicolor/256x256/apps/` |
+| Login checks entry | `~/.config/autostart/com.goshapps.AppImageManager-updates.desktop` |
 
-Building the GUI needs the Wayland and XKB development headers
-(`libwayland-dev`, `libxkbcommon-dev` on Debian/Ubuntu; present in the
-Flatpak SDK).
+`HOME`, `GOSHAIM_HOME`, and `GOSHAIM_XDG_{DATA,CONFIG,CACHE}_HOME` relocate
+these roots (the last are mostly for tests). The standard `XDG_*_HOME`
+variables are not read — inside the Flatpak these are the sandbox's
+`~/.var/app/com.goshapps.AppImageManager/` tree anyway.
 
-Settings > Appearance offers System / Light / Dark, applied live with no
-restart and restored at startup. System follows the COSMIC theme mode.
-Positional file arguments open straight into the Inspect page; several files
-are inspected and confirmed one at a time. Dropping files into the window
-queues them the same way.
+## Development
+
+```sh
+cargo test                        # full suite: fake seams + synthetic fixtures, no network
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+./scripts/verify.sh               # everything above + self-test + validators + optional GUI smoke/Flatpak
+```
+
+`just` wraps the common flows (`just build`, `build-gui`, `release`,
+`test`, `lint`, `validate`, `vendor`, `flatpak-x86_64`,
+`flatpak-aarch64`). See [CONTRIBUTING.md](CONTRIBUTING.md) for the full
+workflow and `docs/documentation/APP-INVENTORY.md` for a feature-level map
+of the code.
 
 ## Flatpak
 
-Manifest: `packaging/com.goshapps.AppImageManager.yml`
-(freedesktop 23.08 + Rust). One manifest builds **both** `x86_64` and
-`aarch64` — no hardcoded architecture, no x86_64-only binaries. Cargo
-dependencies are vendored in `packaging/cargo-sources.json`, generated with
-the official flatpak-builder-tools generator:
+Manifest: `packaging/com.goshapps.AppImageManager.yml` (freedesktop 23.08 +
+a pinned Rust 1.90.0 toolchain — the SDK extension's 1.81 predates the
+dependency graph). One manifest builds both x86_64 and aarch64; Cargo deps
+are vendored in `packaging/cargo-sources.json` (`just vendor
+/path/to/flatpak-builder-tools` regenerates it).
 
 ```sh
-just vendor /path/to/flatpak-builder-tools
-flatpak-builder --force-clean build-dir packaging/com.goshapps.AppImageManager.yml --arch=x86_64
-flatpak-builder --force-clean build-dir packaging/com.goshapps.AppImageManager.yml --arch=aarch64
-flatpak-builder --run build-dir packaging/com.goshapps.AppImageManager.yml \
-  gosh-appimage-manager --self-test
+flatpak-builder --user --force-clean build-dir packaging/com.goshapps.AppImageManager.yml --arch=x86_64
+flatpak-builder --user --install build-dir packaging/com.goshapps.AppImageManager.yml   # install the result
+flatpak-builder --run build-dir packaging/com.goshapps.AppImageManager.yml gosh-appimage-manager --self-test
 ```
 
-The manifest does not use `--filesystem=host:rw`. It grants the managed
-folder, user applications, and icon directories, session autostart
-(`xdg-config/autostart:create`), plus portals and
-argument-safe `flatpak-spawn --host`. Extraction tools (unsquashfs, 7zz,
-dwarfsextract) are pinned by SHA-256 with per-arch binaries. Corresponding
-source tarballs and license texts are installed beside the binaries.
-Because the 23.08 Rust SDK extension (1.81) predates this dependency graph,
-the manifest installs a pinned Rust 1.90.0 toolchain per architecture
-(SHA-256 pinned, cleaned from the final app) with top-level
-`no-debuginfo: true` (the 23.08 debuginfo splitter corrupts rustc 1.90's
-libLLVM).
+Sandbox grants: Wayland/fallback-X11, IPC, dri, network, notifications,
+portals, the managed folder, `~/.local/share/{applications,icons}`,
+`xdg-config/autostart:create`, and the app data dir. Two worth knowing:
 
-Validate the metadata:
+- `--talk-name=org.freedesktop.Flatpak` grants `flatpak-spawn --host`,
+  which is how the app launches AppImages and checks running processes
+  outside the sandbox. It is restricted to named helpers and managed
+  AppImage paths in code — but it means the sandbox is not a hard security
+  boundary for this app.
+- The manifest does **not** grant `--filesystem=host:rw`. Pointing the
+  managed folder outside `~/AppImages` may need an extra filesystem grant
+  or a portal-granted path.
 
-```sh
-desktop-file-validate data/com.goshapps.AppImageManager.desktop
-appstreamcli validate --pedantic --no-net data/com.goshapps.AppImageManager.metainfo.xml
-```
+Bundled extraction tools are pinned by SHA-256 per architecture
+(`unsquashfs` built from source; 7-Zip 26.00 and DwarFS 0.15.3 binaries)
+with license texts and corresponding source installed under
+`/app/share/gosh-appimage-manager/`. Validate the metadata with
+`just validate` (`desktop-file-validate` + `appstreamcli`).
 
 ## Upgrading from 2.x
 
-Version 3.0.0 stores the installed registry in SQLite
-(`~/.local/share/gosh-appimage-manager/registry.sqlite`, mode 0600) instead
-of `registry.json`. On first run, an adjacent v2 `registry.json`
-(`schema_version: 1`) is imported once — rows without a UUID or managed path
-are skipped, and the legacy file is left untouched. Settings move from
-KConfig to `~/.config/gosh-appimage-manager/settings.json`; managed files,
-desktop entries, and icons are reused in place.
+The registry moved from `registry.json` to SQLite. On first run an adjacent
+v2 `registry.json` is imported once — rows without a UUID or managed path
+are skipped, and the old file is left in place. Settings moved from KConfig
+to `settings.json`; managed files, desktop entries, and icons are reused
+where they are.
 
 ## Safety
 
-- Candidates must be regular files with ELF and AppImage magic. MIME/extension is not enough.
-- Size, extraction, process output, JSON, and download bodies are bounded.
-  The largest AppImage to integrate or download defaults to 8 GiB, adjustable
-  in Settings → Integration folder from 1 MB to 32 GB; oversized files are
-  refused without buffering them.
-- Archive paths with `..`, absolute names, or escaping symlinks are rejected.
-- Desktop `Exec` is built from program plus argument tokens. No shell strings.
-- Trash failure never becomes delete. Permanent delete requires an extra confirmation and refuses protected paths.
-- Update sources are checked against the address DNS actually returns, not
-  just the hostname, and every redirect hop is checked before it is followed.
-  Reaching a loopback or private-network endpoint needs an explicit
-  `allow_local_network=true` on a source the user created; embedded metadata
-  in an AppImage can never set it.
-- Updates verify an advertised SHA-256 (GitHub's `sha256:` form and GitLab's
-  bare hex), refuse a digest they cannot interpret, and refuse a payload whose
-  architecture differs from the installed one. An update with no published
-  checksum is shown as "reduced verification".
-- Running-app detection works inside the Flatpak sandbox, where `/proc` shows
-  only the sandbox itself, by asking the host through `flatpak-spawn`. A probe
-  that fails means "cannot tell", never "not running".
-- Launch is start-only detached. The manager never waits five seconds and kills the app.
-- Updates download to staging, validate as an AppImage, then atomically replace with rollback material retained until success.
-- Running apps block updates unless `--force` is explicit.
-- The unsafe `--appimage-extract` fallback is off by default. It runs only when
-  safe extraction found nothing, the setting is on, *and* that exact file was
-  confirmed; it is never reached by tests or background checks.
-- A failed integration removes everything it created and restores everything
-  it replaced. Nothing is left in the managed folder or the applications
-  directory.
+- A file is only a candidate if it is a regular file with ELF and AppImage
+  magic — MIME type and extension are never enough.
+- Everything untrusted is bounded: file size, extraction output, archive
+  listings, process output, JSON bodies, downloads, redirects, timeouts.
+- Archive members with `..`, absolute paths, or option-like names are
+  rejected; extraction lands in private mode-0700 temp dirs.
+- Desktop `Exec` lines are built from argument tokens — no shell strings.
+- Removal is Trash-first; a failed Trash never becomes a delete. Permanent
+  delete asks again and refuses protected paths.
+- Update URLs are checked against the address DNS actually returns, and
+  every redirect hop is re-checked. Private/loopback endpoints need an
+  explicit `allow_local_network=true` on a source you created.
+- Downloads are staged, validated as AppImages, checked against an
+  advertised SHA-256 when one exists, refused on architecture mismatch,
+  then swapped in atomically. Rollback material is kept until success.
+- Running apps block updates unless `--force` / "Update anyway" is
+  confirmed. Inside the Flatpak, running-detection asks the host through
+  `flatpak-spawn`; if that probe fails it falls back to the sandbox's own
+  (empty) process view — a failed probe effectively reads as "not running".
+- Launch is start-only and detached; the manager never waits then kills.
+- A failed integration removes what it created and restores what it
+  replaced.
+- The unsafe `--appimage-extract` fallback exists in code but is
+  unreachable: it needs a per-file confirmation no UI offers. Enabling it
+  in Settings only adds a warning after failed safe extraction. Treat it
+  as disabled regardless of the switch.
+- No telemetry. Network requests go only to update endpoints you configured
+  or that an AppImage's embedded metadata named, and only when checking or
+  applying updates.
 
 ## Limitations
 
-- Zsync metadata is understood, but updates download the full file rather than applying a binary delta.
-- The GUI has not been used on a real compositor. It renders, is driven and is
-  measured on a headless X server (`tools/gui-smoke.sh`), but window-manager
-  behaviour — minimum size, tiling, fractional scaling — is the compositor's
-  and there is none in that harness. See `docs/verification.md`.
-- Only English is shipped. The interface is fully localizable (see
-  `i18n/README.md`); no translations have been contributed yet.
-- A static/ftp source without version information reports "no version information" instead of guessing.
-- FTP is a legacy explicit option with an insecure-transport warning. Credentials in URLs are rejected.
-- Changing the managed folder away from `~/AppImages` in the Flatpak may require portal/document access for that path.
-- Background update checks notify only; they never download or apply updates.
-- Type 1 ISO and DwarFS extraction depend on the bundled 7zz and dwarfsextract tools.
+- **DwarFS AppImages are detected but their metadata cannot be read.** The
+  extractor dispatch selects `dwarfsextract` but no lister/extractor arm is
+  implemented, so safe extraction always fails for them — the bundled
+  `dwarfsextract`/`dwarfsck` binaries are currently unused. Such files
+  still integrate, named after the file.
+- zsync metadata is parsed, but updates always download the full file —
+  no binary deltas.
+- The GUI has been rendered and driven on a headless X server
+  (`tools/gui-smoke.sh`), not exercised under a real COSMIC/Wayland
+  compositor — window-manager behavior (tiling, fractional scaling,
+  minimum size) is the compositor's. See `docs/verification.md`.
+- Only English ships. The interface is localizable — see `i18n/README.md`.
+- The GUI's update-source field takes a single `key=value` pair; configure
+  multi-key managers via `--set-update-source`.
+- FTP is a legacy explicit option with an insecure-transport warning; URLs
+  with credentials are rejected.
+- Static and FTP sources without a `version` key report "no version
+  information" rather than guessing.
 
 ## Attribution
 
-Copyright Gosh Apps / Gosh-Its-Arch.
+Gear Lever (https://github.com/mijorus/gearlever) by Lorenzo Paderi at
+commit `a2917f2adafc78e0478e47d5843de9ede6c1aa3f` was the GPL-3.0-or-later
+behavioural reference. This is an independent implementation — no Gear
+Lever code, UI, assets, or branding — and is not endorsed by its authors.
 
-Inspired by the workflows of Gear Lever (https://github.com/mijorus/gearlever)
-at commit a2917f2adafc78e0478e47d5843de9ede6c1aa3f. Gear Lever is copyright
-Lorenzo Paderi and licensed under GPL-3.0-or-later.
+Copyright Gosh Apps / Gosh-Its-Arch. Licensed GPL-3.0-or-later; see
+`COPYING`. Bundled tool licenses are in `third_party/licenses/`.

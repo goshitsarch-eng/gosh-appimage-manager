@@ -4,6 +4,13 @@ Audit date: 2026-09-07. Branch: `claude/repo-end-to-end-audit-mplc6u`.
 Every finding below was reached by reading the file, and the ones marked
 **measured** were reproduced with a throwaway test in this worktree.
 
+> **Point-in-time record.** This audit documents the state on 2026-09-07 and
+> the fixes that closed it. The Phase-3 "partially wired" and "stub, dead,
+> or unreachable" tables describe the **pre-fix** state — most of those
+> items were resolved by the commits listed in "Fixes applied" and the
+> later audit-hardening round (`docs/audit/`). For the current state see
+> `docs/documentation/APP-INVENTORY.md`.
+
 ---
 
 ## Phase 0 — Ground truth

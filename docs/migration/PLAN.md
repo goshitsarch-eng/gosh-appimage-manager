@@ -1,5 +1,9 @@
 # Gosh AppImage Manager — Gear Lever parity + hardening plan
 
+> **Completed work plan** (2026-09-10 round). Every checklist item below is
+> done — see `REPORT.md` in this directory for the evidence. The unchecked
+> boxes are how the plan was written, not pending work.
+
 ## Goal
 
 Make the existing Rust + libcosmic app work as well as Gear Lever for the

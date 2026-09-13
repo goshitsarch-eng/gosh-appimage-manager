@@ -36,8 +36,9 @@ directly. No daemon, IPC service, or plugin system.
   updates are now actually exercised (`test_rollback`).
 - Error style is `Result<_, String>` with stderr diagnostics; CLI keeps
   stdout valid JSON.
-- Zero `unwrap/expect/panic` in `src/`; clippy `-D warnings` clean on
-  rustc 1.98.
+- No unguarded panics in production paths; the remaining `unwrap`/`expect`
+  calls are guarded invariants (`registry.rs` UUID presence checked
+  beforehand) or test seams. Clippy `-D warnings` clean on rustc 1.98.
 - Persistence split is sane: SQLite for the relational registry, JSON for
   flat settings, XDG paths with test overrides.
 
@@ -56,13 +57,12 @@ Callers needing structured recovery (CLI exit codes, GUI retryability)
 re-derive semantics from text. Migration to typed errors would touch every
 module; not justified now. No PLAN item.
 
-### ARCH-03 — Debug-logging has no backend (→ PLAN-003)
-A setting exists with no consumer and no logging crate in the graph. Either
-wire a backend or remove the surface. See BUG-001.
+### ARCH-03 — Debug-logging has no backend (→ PLAN-003) — RESOLVED
+`src/diagnostics.rs` is now the consumer: the setting gates stderr
+diagnostic lines in the CLI and on GUI worker completion.
 
-### ARCH-04 — Dead code residue (→ PLAN-008)
-`Page::title` (`gui.rs:84-97`, `allow(dead_code)`) duplicates
-`localized_title`. Trivial removal.
+### ARCH-04 — Dead code residue (→ PLAN-008) — RESOLVED
+`Page::title` was deleted; `localized_title` is the single source.
 
 ## Data flows
 

@@ -1,5 +1,9 @@
 # Gosh AppImage Manager 3.0.0 — Baseline (Phase 1)
 
+> **Point-in-time snapshot.** Audit date: 2026-09-12, tree `d11deaf`.
+> Some "current state" rows below were already stale when the
+> audit-hardening round finished — corrections are marked inline.
+
 Audit date: 2026-09-12. Tree: commit `d11deaf`, clean worktree.
 Prior rounds consumed: 8/8 child reports (all claims stand after skeptic round),
 plus the committed `AUDIT.md` (2026-09-07, all findings fixed) and
@@ -7,7 +11,8 @@ plus the committed `AUDIT.md` (2026-09-07, all findings fixed) and
 
 ## Structure
 
-Rust 2021 workspace-root crate, `rust-version = "1.75"`, edition 2021:
+Rust 2021 workspace-root crate, `rust-version = "1.89"`, edition 2021
+(the manifest's 1.75 predated the real dependency-graph floor):
 
 - `src/lib.rs` — library `goshaim_core` (26 modules + `cli`, + `gui` under feature).
 - `src/main.rs` — single binary `gosh-appimage-manager`; CLI dispatch vs GUI shell.
@@ -112,10 +117,11 @@ bound to 10000ms with rationale. Recorded as PLAN-002 (P2, CI reliability).
 | Running-app guard incl. Flatpak | implemented via host spawn probe |
 | Tasks page, detail page, search/sort | visible in GUI (`gui.rs` views) |
 | Localizable UI | machinery + `qps` proof; **no human translations ship** |
-| Drag/drop open | **absent** (upstream lists it; only file args + picker exist) |
+| Drag/drop open | **implemented** (drop queue + `FileDropped` handling; PLAN-007) |
 | Zsync delta updates | **full-file download only** (documented limitation) |
-| Debug-logging toggle | persisted + GUI switch, but **nothing consumes it** (no logging backend; see PLAN-003) |
-| MaxAppImageBytes | enforced bound, but **no UI/CLI control** (see PLAN-006) |
+| Debug-logging toggle | wired to `diagnostics.rs` stderr output (PLAN-003) |
+| MaxAppImageBytes | enforced bound + Settings "Max size (MB)" row (PLAN-006) |
+| DwarFS metadata extraction | detected, but `dwarfsextract` has no lister/extractor arm — always fails |
 
 ## Runtime observations (this session)
 
@@ -124,7 +130,9 @@ bound to 10000ms with rationale. Recorded as PLAN-002 (P2, CI reliability).
 - `--list-installed/--list-updates --json`, `--list-update-managers`,
   `--probe-host`, `--probe-autostart` all exit 0 (verified in migration
   report; self-test re-verified here).
-- No `expect/unwrap/panic/todo` in `src/` (searched).
+- No *unguarded* `expect`/`unwrap`/`panic` in production paths; remaining
+  ones are guarded invariants or test seams. (The original "zero hits"
+  claim was wrong.)
 - GUI not launched on a compositor in this session (none available);
   headless-smoke design exists (`tools/gui-smoke.sh`) but Xvfb/xdotool are
   absent here, so that stage would skip loudly per `verify.sh`.

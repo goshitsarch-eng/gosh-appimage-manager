@@ -6,7 +6,7 @@ Observed version: `4.6.2`
 License: GNU GPL version 3 or later.
 Architecture: Python, GTK 4, Libadwaita, Meson, Flatpak GNOME runtime.
 
-This project uses Gear Lever as a feature and workflow reference only. Gosh AppImage Manager is a new native C++20/Qt 6/Kirigami implementation. Do not copy upstream Python, GTK templates, CSS, icons, screenshots, or branding.
+This project uses Gear Lever as a feature and workflow reference only. Gosh AppImage Manager is a Rust + libcosmic implementation (3.0.0; this file predates the rewrite, which began as C++20/Qt 6). Do not copy upstream Python, GTK templates, CSS, icons, screenshots, or branding.
 
 ## Behavior inventory
 

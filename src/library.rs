@@ -129,7 +129,7 @@ impl<'a> AppImageLibrary<'a> {
         let mut out = Vec::new();
         for entry in entries.flatten().take(limits::MAX_ARCHIVE_LISTING_ENTRIES) {
             let path = entry.path();
-            if path.extension().map_or(true, |e| e != "desktop") {
+            if path.extension().is_none_or(|e| e != "desktop") {
                 continue;
             }
             if desktop::verify_ownership(&path).owned {
@@ -196,7 +196,7 @@ impl<'a> AppImageLibrary<'a> {
 fn is_appimage_file(path: &Path) -> bool {
     if path
         .extension()
-        .map_or(true, |e| !e.eq_ignore_ascii_case("appimage"))
+        .is_none_or(|e| !e.eq_ignore_ascii_case("appimage"))
     {
         return false;
     }
