@@ -30,9 +30,13 @@ Date: 2026-09-13. Repo: `goshitsarch-eng/gosh-appimage-manager` (private).
 | 34781621931 | push main | success 19m37s | First native aarch64 flatpak on `ubuntu-24.04-arm` (was ~4h under qemu); arch check + packaged self-test green both arches |
 | 34781621958 | push main | success 9m53s | `ci.yml` fmt/clippy/test/self-test |
 | 34783086836 | tag `v3.0.0-rc.1` | success 19m45s | Full release pipeline; created pre-release with 5 assets |
-| 34784367432 | dispatch `v3.0.0-rc.1` | success | Idempotent re-run: existing release → `upload --clobber`, no duplicate |
+| 34784367432 | dispatch `v3.0.0-rc.1` | success 17m27s | Idempotent re-run: existing release → `upload --clobber`, no duplicate; checkout confirmed `ref: v3.0.0-rc.1` |
+| 34785254369 | tag `v3.0.0` | success | Real release: `Gosh AppImage Manager 3.0.0`, 5 assets, all verified |
 
-## Verified on the produced release (`v3.0.0-rc.1`)
+The rc test release and its tag were removed after the real release
+landed; only `v3.0.0` remains.
+
+## Verified on the produced releases (`v3.0.0-rc.1`, then `v3.0.0`)
 
 - Release `Gosh AppImage Manager 3.0.0-rc.1`, prerelease=true, draft=false,
   exactly 5 assets, none zero-byte.
