@@ -1,0 +1,155 @@
+# Release pipeline. Triggered by version tags (vX.Y.Z, optionally with a
+# -rc.N suffix) or manually for an existing tag. Builds both architectures
+# natively, packages tar.gz + Flatpak for each, verifies the complete set,
+# then creates/updates the GitHub Release.
+#
+#   git tag v3.0.1 && git push origin v3.0.1
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)release"
+        required: true
+        type: string
+
+name: Release
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  validate:
+    name: "Version check"
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Tag must match Cargo.toml + metainfo
+        run: ./scripts/check-version.sh "$TAG"
+      - id: v
+        run: |
+          version="${TAG#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          case "$version" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  tarball:
+    name: "tar.gz ${{ matrix.arch }}"
+    needs: validate
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Rust toolchain
+        run: rustup update stable && rustup default stable
+
+      - name: GUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            build-essential pkg-config
+
+      - name: Cache cargo registry/git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-release-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Release build
+        run: cargo build --release --features gui
+
+      - name: Package tarball
+        run: |
+          ./scripts/package-release.sh \
+            "${{ needs.validate.outputs.version }}" "${{ matrix.arch }}"
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: gosh-appimage-manager-${{ needs.validate.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+          path: gosh-appimage-manager-${{ needs.validate.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+
+  flatpak:
+    name: "Flatpak (both arches)"
+    needs: validate
+    uses: ./.github/workflows/flatpak.yml
+    with:
+      version: ${{ needs.validate.outputs.version }}
+
+  release:
+    name: "Publish GitHub Release"
+    needs: [validate, tarball, flatpak]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gosh-appimage-manager-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify complete artifact set + write SHA256SUMS
+        run: ./scripts/verify-release.sh dist "${{ needs.validate.outputs.version }}"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+        run: |
+          title="Gosh AppImage Manager ${{ needs.validate.outputs.version }}"
+          args=()
+          [ "$PRERELEASE" = "true" ] && args+=(--prerelease)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "$title" --generate-notes "${args[@]}"
+          fi
+
+      - name: Verify release contents
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$TAG" --json assets \
+            -q '.assets[] | "\(.name)\t\(.size)"' | tee assets.txt
+          version="${{ needs.validate.outputs.version }}"
+          for want in \
+            "gosh-appimage-manager-$version-linux-x86_64.tar.gz" \
+            "gosh-appimage-manager-$version-linux-aarch64.tar.gz" \
+            "gosh-appimage-manager-$version-linux-x86_64.flatpak" \
+            "gosh-appimage-manager-$version-linux-aarch64.flatpak" \
+            "SHA256SUMS"; do
+            grep -q "^$want"$'\t' assets.txt \
+              || { echo "MISSING ASSET: $want" >&2; exit 1; }
+          done
+          [ "$(wc -l < assets.txt)" -eq 5 ] \
+            || { echo "unexpected extra assets" >&2; exit 1; }
+          awk '$2 == 0 {print "ZERO-BYTE ASSET: " $1; bad=1} END {exit bad}' assets.txt
+          echo "release $TAG verified: 5 assets present"

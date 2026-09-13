@@ -44,16 +44,23 @@ AI-assisted software is something you're comfortable using.
 
 ### Flatpak
 
-CI builds `gosh-appimage-manager-<arch>.flatpak` bundles for x86_64 and
-aarch64 on every push and pull request — grab one from the workflow's
-artifacts and install it:
+Releases attach `gosh-appimage-manager-<ver>-linux-<arch>.flatpak` for
+x86_64 and aarch64 — install the one matching your machine:
 
 ```sh
-flatpak install gosh-appimage-manager-x86_64.flatpak
+flatpak install gosh-appimage-manager-*-linux-x86_64.flatpak
 ```
 
-The app is not published to Flathub; the bundle is the distribution format.
-To build the bundle yourself, see the [Flatpak](#flatpak-1) section below.
+CI also builds unversioned bundles on every push if you want a
+development build. The app is not published to Flathub; the bundle is the
+distribution format. To build it yourself, see the [Flatpak](#flatpak-1)
+section below.
+
+### Tarball
+
+Each release also carries `…-linux-<arch>.tar.gz` containing the binary,
+desktop integration files, icons, licenses, and an `install.sh` that
+installs under `/usr/local` (or `PREFIX=~/.local`).
 
 ### Build from source
 
@@ -216,8 +223,9 @@ cargo fmt --check
 `just` wraps the common flows (`just build`, `build-gui`, `release`,
 `test`, `lint`, `validate`, `vendor`, `flatpak-x86_64`,
 `flatpak-aarch64`). See [CONTRIBUTING.md](CONTRIBUTING.md) for the full
-workflow and `docs/documentation/APP-INVENTORY.md` for a feature-level map
-of the code.
+workflow, `docs/RELEASING.md` for how releases are cut, and
+`docs/documentation/APP-INVENTORY.md` for a feature-level map of the
+code.
 
 ## Flatpak
 

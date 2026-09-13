@@ -1,0 +1,46 @@
+# Fast correctness gates on every push and PR. The heavy packaging lives
+# in flatpak.yml; release publication lives in release.yml and only runs
+# on version tags.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+name: CI
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: "fmt · clippy · test"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: rustup update stable && rustup default stable && rustup component add clippy rustfmt
+
+      - name: GUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            build-essential pkg-config
+
+      - name: Cache cargo registry/git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-ci-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --features gui --all-targets -- -D warnings
+      - run: cargo build --features gui
+      - run: cargo test
+      - run: ./target/debug/gosh-appimage-manager --self-test

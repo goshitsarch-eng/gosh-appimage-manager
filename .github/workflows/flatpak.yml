@@ -1,29 +1,40 @@
-# Autobuild the Flatpak for x86_64 and aarch64.
+# Build the Flatpak for x86_64 and aarch64.
 #
-# The build needs ~15 GB for the 23.08 SDK plus several GB of Rust/Flatpak
-# build cache, far more than the ~10 GB free on a stock GitHub runner
-# (both arches died with "No space left on device"). Everything therefore
-# runs on the host -- not in the flatpak-github-actions container image --
-# so the free-disk-space step actually reclaims host disk. aarch64 builds
-# under qemu-user-static and is much slower; fail-fast is off so one arch
-# never cancels the other.
+# Runs standalone on push/PR/dispatch, and as a reusable workflow from
+# release.yml (which passes `version` so bundles get versioned names).
+#
+# Both arches build natively: aarch64 on the ubuntu-24.04-arm runner, not
+# under qemu. The build needs ~15 GB for the 23.08 SDK plus several GB of
+# Rust/Flatpak build cache, more than the ~14 GB free on a stock runner,
+# so every job first reclaims disk. aarch64 native builds are far faster
+# than the old qemu-user run; fail-fast is off so one arch never cancels
+# the other.
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: "Release version for bundle filenames (empty = CI naming)"
+        type: string
+        required: false
+        default: ""
 
 name: Flatpak
 
+permissions:
+  contents: read
+
 jobs:
   flatpak:
-    name: "Flatpak"
-    runs-on: ubuntu-latest
-    timeout-minutes: ${{ matrix.arch == 'aarch64' && 360 || 120 }}
+    name: "Flatpak ${{ matrix.arch }}"
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 120
     strategy:
       matrix:
         arch: [x86_64, aarch64]
-      # Don't fail the whole workflow if one architecture fails
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
@@ -39,9 +50,17 @@ jobs:
           # operations ("Deploy not allowed for user").
           flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 
-      - name: Install qemu-user-static
-        if: ${{ matrix.arch != 'x86_64' }}
-        run: sudo apt-get install -y qemu-user-static
+      - name: Resolve bundle filename
+        id: name
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$VERSION" ]; then
+            base="gosh-appimage-manager-$VERSION-linux-${{ matrix.arch }}"
+          else
+            base="gosh-appimage-manager-${{ matrix.arch }}"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
 
       - name: Build Flatpak
         run: |
@@ -52,17 +71,32 @@ jobs:
             build-dir packaging/com.goshapps.AppImageManager.yml \
             --arch=${{ matrix.arch }}
 
+      - name: Verify packaged binary architecture
+        run: |
+          file build-dir/files/bin/gosh-appimage-manager | tee binary.txt
+          case '${{ matrix.arch }}' in
+            x86_64)  grep -q 'x86-64' binary.txt ;;
+            aarch64) grep -q 'ARM aarch64' binary.txt ;;
+          esac
+
+      - name: Packaged self-test
+        run: |
+          flatpak-builder --run build-dir \
+            packaging/com.goshapps.AppImageManager.yml \
+            gosh-appimage-manager --self-test | tee selftest.txt
+          grep -q 'SELF_TEST_OK' selftest.txt
+
       - name: Bundle Flatpak
         run: |
           # build-bundle defaults to --arch=x86_64; the repo from an
           # aarch64 build only contains the aarch64 ref.
           flatpak build-bundle repo \
-            gosh-appimage-manager-${{ matrix.arch }}.flatpak \
+            "${{ steps.name.outputs.base }}.flatpak" \
             com.goshapps.AppImageManager \
             --arch=${{ matrix.arch }}
 
       - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:
-          name: gosh-appimage-manager-${{ matrix.arch }}.flatpak
-          path: gosh-appimage-manager-${{ matrix.arch }}.flatpak
+          name: ${{ steps.name.outputs.base }}.flatpak
+          path: ${{ steps.name.outputs.base }}.flatpak
