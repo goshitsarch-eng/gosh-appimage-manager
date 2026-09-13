@@ -13,6 +13,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 tag="${1:?usage: check-version.sh <tag>}"
+# Strict shape: vX.Y.Z with optional -rc.N. Besides keeping odd tags out of
+# filenames, this keeps the tag safe to interpolate into CI run scripts
+# (quotes and semicolons are legal git refnames).
+if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+  echo "MISMATCH: tag '$tag' is not vX.Y.Z[-rc.N]" >&2
+  exit 1
+fi
 version="${tag#v}"
 base="${version%%-*}"
 

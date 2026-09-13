@@ -48,7 +48,7 @@ jobs:
     name: "tar.gz ${{ matrix.arch }}"
     needs: validate
     runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     strategy:
       matrix:
         arch: [x86_64, aarch64]
@@ -80,15 +80,17 @@ jobs:
         run: cargo build --release --features gui
 
       - name: Package tarball
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          ./scripts/package-release.sh \
-            "${{ needs.validate.outputs.version }}" "${{ matrix.arch }}"
+          ./scripts/package-release.sh "$VERSION" "${{ matrix.arch }}"
 
       - name: Upload tarball
         uses: actions/upload-artifact@v4
         with:
           name: gosh-appimage-manager-${{ needs.validate.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
           path: gosh-appimage-manager-${{ needs.validate.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+          overwrite: true
 
   flatpak:
     name: "Flatpak (both arches)"
@@ -96,6 +98,8 @@ jobs:
     uses: ./.github/workflows/flatpak.yml
     with:
       version: ${{ needs.validate.outputs.version }}
+      # env is not allowed in jobs.<id>.with for `uses:` jobs.
+      ref: ${{ inputs.tag || github.ref_name }}
 
   release:
     name: "Publish GitHub Release"
@@ -116,30 +120,36 @@ jobs:
           merge-multiple: true
 
       - name: Verify complete artifact set + write SHA256SUMS
-        run: ./scripts/verify-release.sh dist "${{ needs.validate.outputs.version }}"
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: ./scripts/verify-release.sh dist "$VERSION"
 
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+          VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          title="Gosh AppImage Manager ${{ needs.validate.outputs.version }}"
-          args=()
-          [ "$PRERELEASE" = "true" ] && args+=(--prerelease)
+          title="Gosh AppImage Manager $VERSION"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
+            args=(--title "$title")
+            [ "$PRERELEASE" = "true" ] && args+=(--prerelease)
+            gh release edit "$TAG" "${args[@]}"
           else
-            gh release create "$TAG" dist/* \
-              --title "$title" --generate-notes "${args[@]}"
+            args=(--title "$title" --generate-notes)
+            [ "$PRERELEASE" = "true" ] && args+=(--prerelease)
+            gh release create "$TAG" dist/* "${args[@]}"
           fi
 
       - name: Verify release contents
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.validate.outputs.version }}
         run: |
           gh release view "$TAG" --json assets \
             -q '.assets[] | "\(.name)\t\(.size)"' | tee assets.txt
-          version="${{ needs.validate.outputs.version }}"
+          version="$VERSION"
           for want in \
             "gosh-appimage-manager-$version-linux-x86_64.tar.gz" \
             "gosh-appimage-manager-$version-linux-aarch64.tar.gz" \

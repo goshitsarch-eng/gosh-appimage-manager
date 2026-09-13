@@ -25,6 +25,8 @@ mkdir -p "$PREFIX/share/gosh-appimage-manager/i18n"
 cp -a "$src/share/gosh-appimage-manager/i18n/." "$PREFIX/share/gosh-appimage-manager/i18n/"
 install -Dm644 "$src/share/gosh-appimage-manager/COPYING" \
   "$PREFIX/share/gosh-appimage-manager/COPYING"
-cp -a "$src/share/gosh-appimage-manager/licenses" "$PREFIX/share/gosh-appimage-manager/"
+mkdir -p "$PREFIX/share/gosh-appimage-manager/licenses"
+cp -a "$src/share/gosh-appimage-manager/licenses/." \
+  "$PREFIX/share/gosh-appimage-manager/licenses/"
 
 echo "Installed to $PREFIX"

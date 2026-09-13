@@ -21,6 +21,11 @@ on:
         type: string
         required: false
         default: ""
+      ref:
+        description: "Git ref to build (empty = caller's sha)"
+        type: string
+        required: false
+        default: ""
 
 name: Flatpak
 
@@ -38,6 +43,10 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Empty on standalone triggers -> caller/pushed ref. Set by
+          # release.yml so dispatch builds the tag, not main's HEAD.
+          ref: ${{ inputs.ref }}
 
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
@@ -100,3 +109,4 @@ jobs:
         with:
           name: ${{ steps.name.outputs.base }}.flatpak
           path: ${{ steps.name.outputs.base }}.flatpak
+          overwrite: true
