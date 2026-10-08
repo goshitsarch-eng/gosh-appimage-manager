@@ -8,6 +8,9 @@ use std::path::Path;
 use crate::limits;
 use crate::types::{AppImageType, Architecture};
 
+/// `sh_type` of a section that occupies no bytes in the file.
+const SHT_NOBITS: u64 = 8;
+
 #[derive(Debug, Clone, Default)]
 pub struct ElfInfo {
     pub valid: bool,
@@ -24,7 +27,7 @@ pub struct ElfInfo {
 }
 
 fn u16_at(data: &[u8], off: usize, le: bool) -> Option<u16> {
-    let b: [u8; 2] = data.get(off..off + 2)?.try_into().ok()?;
+    let b: [u8; 2] = data.get(off..off.checked_add(2)?)?.try_into().ok()?;
     Some(if le {
         u16::from_le_bytes(b)
     } else {
@@ -33,7 +36,7 @@ fn u16_at(data: &[u8], off: usize, le: bool) -> Option<u16> {
 }
 
 fn u32_at(data: &[u8], off: usize, le: bool) -> Option<u32> {
-    let b: [u8; 4] = data.get(off..off + 4)?.try_into().ok()?;
+    let b: [u8; 4] = data.get(off..off.checked_add(4)?)?.try_into().ok()?;
     Some(if le {
         u32::from_le_bytes(b)
     } else {
@@ -42,7 +45,7 @@ fn u32_at(data: &[u8], off: usize, le: bool) -> Option<u32> {
 }
 
 fn u64_at(data: &[u8], off: usize, le: bool) -> Option<u64> {
-    let b: [u8; 8] = data.get(off..off + 8)?.try_into().ok()?;
+    let b: [u8; 8] = data.get(off..off.checked_add(8)?)?.try_into().ok()?;
     Some(if le {
         u64::from_le_bytes(b)
     } else {
@@ -201,7 +204,11 @@ pub fn parse(data: &[u8]) -> ElfInfo {
                 }
             }
         }
-        payload = payload.max(s_offset.saturating_add(s_size));
+        // A NOBITS section (.bss, .tbss) takes no bytes in the file, so its
+        // size says nothing about where the file's contents end.
+        if seg_val(data, base, 4, false, le) != Some(SHT_NOBITS) {
+            payload = payload.max(s_offset.saturating_add(s_size));
+        }
         payload = payload.max(shoff.saturating_add(shnum.saturating_mul(shentsize.max(1))));
     }
     if shnum > max_sh {
@@ -210,8 +217,52 @@ pub fn parse(data: &[u8]) -> ElfInfo {
     finish(info, payload)
 }
 
+/// Largest span of program and section header tables that `parse_file` will
+/// read to see past its header window. Real runtimes keep these tables at the
+/// end of the ELF, which can lie beyond the window.
+const MAX_HEADER_TABLE_SPAN: u64 = 16 * 1024 * 1024;
+
+/// End of the program and section header tables, read from the ELF header
+/// alone. `None` when the header is too short to say.
+fn header_tables_end(data: &[u8]) -> Option<u64> {
+    if data.len() < 16 || data[..4] != *b"\x7fELF" {
+        return None;
+    }
+    let le = data[5] == 1;
+    let (phoff, phentsize, phnum, shoff, shentsize, shnum) = if data[4] == 2 {
+        (
+            u64_at(data, 32, le)?,
+            u16_at(data, 54, le)? as u64,
+            u16_at(data, 56, le)? as u64,
+            u64_at(data, 40, le)?,
+            u16_at(data, 58, le)? as u64,
+            u16_at(data, 60, le)? as u64,
+        )
+    } else {
+        (
+            u32_at(data, 28, le)? as u64,
+            u16_at(data, 42, le)? as u64,
+            u16_at(data, 44, le)? as u64,
+            u32_at(data, 32, le)? as u64,
+            u16_at(data, 46, le)? as u64,
+            u16_at(data, 48, le)? as u64,
+        )
+    };
+    let ph_end = if phnum > 0 {
+        phoff.saturating_add(phnum.saturating_mul(phentsize))
+    } else {
+        0
+    };
+    let sh_end = if shnum > 0 {
+        shoff.saturating_add(shnum.saturating_mul(shentsize))
+    } else {
+        0
+    };
+    Some(ph_end.max(sh_end))
+}
+
 fn seg_val(data: &[u8], base: u64, field: u64, is64: bool, le: bool) -> Option<u64> {
-    let off = base.checked_add(field)? as usize;
+    let off = usize::try_from(base.checked_add(field)?).ok()?;
     if is64 {
         u64_at(data, off, le)
     } else {
@@ -254,6 +305,21 @@ fn finish(mut info: ElfInfo, payload: u64) -> ElfInfo {
     info
 }
 
+/// Read up to `len` bytes from the start of `file`; `None` on a read error.
+fn read_prefix(file: &mut File, len: u64) -> Option<Vec<u8>> {
+    let mut data = vec![0u8; len as usize];
+    let mut filled = 0;
+    while filled < data.len() {
+        match file.read(&mut data[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(_) => return None,
+        }
+    }
+    data.truncate(filled);
+    Some(data)
+}
+
 /// Bounded file reader: reads at most `max_header_bytes`, then sniffs the
 /// payload offset for squashfs/DwarFS magic.
 pub fn parse_file(path: &Path, max_header_bytes: u64) -> ElfInfo {
@@ -268,21 +334,23 @@ pub fn parse_file(path: &Path, max_header_bytes: u64) -> ElfInfo {
     };
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
     let to_read = size.min(max_header_bytes).min(16 * 1024 * 1024);
-    let mut data = vec![0u8; to_read as usize];
-    let mut filled = 0;
-    while filled < data.len() {
-        match file.read(&mut data[filled..]) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(_) => {
-                return ElfInfo {
-                    error: "Cannot read ELF header".to_string(),
-                    ..Default::default()
-                };
+    let Some(mut data) = read_prefix(&mut file, to_read) else {
+        return ElfInfo {
+            error: "Cannot read ELF header".to_string(),
+            ..Default::default()
+        };
+    };
+    // The header tables usually sit at the end of the runtime, which can be
+    // larger than the window. Read through them, bounded, so the payload offset
+    // is computed from the real tables and not from whatever the window held.
+    if let Some(end) = header_tables_end(&data) {
+        let wanted = end > data.len() as u64 && end <= size.min(MAX_HEADER_TABLE_SPAN);
+        if wanted && file.seek(SeekFrom::Start(0)).is_ok() {
+            if let Some(wider) = read_prefix(&mut file, end) {
+                data = wider;
             }
         }
     }
-    data.truncate(filled);
     let mut info = parse(&data);
     if size < 64 {
         info.truncated = true;

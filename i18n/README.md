@@ -28,16 +28,19 @@ The locale comes from `LC_ALL`, `LC_MESSAGES`, then `LANG`, in POSIX order.
 
 `qps` is a pseudolocale, not a language — the transform lives in
 `src/i18n.rs`, keyed on the locale name; `i18n/qps.json` is an empty marker
-file so the catalog lookup finds it. Running with it accents every letter
-and pads each string by about a third:
+file so the catalog lookup finds it. Running an interface with it accents
+every letter and pads each string by about a third:
 
 ```sh
-GOSHAIM_LOCALE_DIR=./i18n LC_ALL=qps cargo run --features gui
+GOSHAIM_LOCALE_DIR=./i18n LC_ALL=qps <interface command>
 ```
 
-Anything still in plain unaccented ASCII was never routed through the catalog
-and cannot be translated. Anything clipped or overlapping is a layout that
-only fits English — real translations of this interface run 20–35% longer.
+No interface uses this catalog today: the earlier GUI that did was removed,
+and the Flutter GUI does not read it. There is nothing to run it against until
+an interface loads its strings through the catalog. Then, anything still in
+plain unaccented ASCII was never routed through the catalog and cannot be
+translated, and anything clipped or overlapping is a layout that only fits
+English. Real translations run 20–35% longer.
 
 ## What is not translated
 
@@ -51,4 +54,4 @@ The product name, "Gosh AppImage Manager", is not translated either.
 
 Arabic, Hebrew, Persian, Urdu and the other right-to-left languages are
 detected from the locale and reported by `i18n::active().is_rtl()`, so layout
-can respond to direction. Mirroring itself is the toolkit's to apply.
+can respond to direction. Mirroring itself is the interface's to apply.

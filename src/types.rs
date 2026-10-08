@@ -209,6 +209,10 @@ pub struct InspectionResult {
     /// Private directory holding the staged icon, when one was extracted.
     /// The caller owns it; `discard_staging` removes it.
     pub icon_staging_dir: String,
+    /// The fallback is needed but not confirmed for this file. Nothing was run.
+    pub fallback_pending: bool,
+    /// The fallback executed the AppImage, whether or not metadata came out of it.
+    pub unsafe_fallback_ran: bool,
 }
 
 impl InspectionResult {
@@ -230,8 +234,13 @@ impl InspectionResult {
 pub struct InspectOptions {
     pub extract_metadata: bool,
     pub compute_hash: bool,
+    /// Whether the unsafe fallback may run. `gated_options` sets it from the stored
+    /// setting for every inspection; a caller's value is overwritten, never used.
     pub allow_unsafe_extract: bool,
-    pub confirm_unsafe_extract: bool,
+    /// The user confirmed the unsafe fallback for this file. Callers set it.
+    pub confirm_unsafe: bool,
+    /// The stored setting, as the gate read it. The gate sets it.
+    pub unsafe_setting_on: bool,
     pub max_bytes: i64,
 }
 
@@ -241,7 +250,8 @@ impl Default for InspectOptions {
             extract_metadata: true,
             compute_hash: true,
             allow_unsafe_extract: false,
-            confirm_unsafe_extract: false,
+            confirm_unsafe: false,
+            unsafe_setting_on: false,
             max_bytes: crate::limits::DEFAULT_MAX_APPIMAGE_BYTES,
         }
     }
@@ -288,6 +298,15 @@ pub struct InstalledApp {
     pub mime_types: Vec<String>,
     #[serde(default)]
     pub startup_wm_class: String,
+    /// Unix seconds when the app was first integrated or adopted. Zero for a
+    /// row written before the column existed; it is never invented.
+    #[serde(default)]
+    pub integrated_at: i64,
+    /// The folder the AppImage was in when it was first integrated: the parent
+    /// of the source path. Empty for a row written before the column existed,
+    /// and for an adoption, which records no source folder.
+    #[serde(default)]
+    pub integrated_folder: String,
 }
 
 impl InstalledApp {
@@ -306,6 +325,8 @@ pub struct IntegrateRequest {
     pub replace_uuid: String,
     pub copy_mode: CopyMode,
     pub assume_yes: bool,
+    /// The user confirmed the unsafe fallback for this file.
+    pub confirm_unsafe: bool,
 }
 
 impl Default for IntegrateRequest {
@@ -316,6 +337,7 @@ impl Default for IntegrateRequest {
             replace_uuid: String::new(),
             copy_mode: CopyMode::Copy,
             assume_yes: false,
+            confirm_unsafe: false,
         }
     }
 }
@@ -328,6 +350,12 @@ pub struct IntegrateResult {
     pub app: InstalledApp,
     pub rolled_back: Vec<String>,
     pub source_removed: bool,
+    /// Non-fatal problems met while reading the AppImage (for example its
+    /// metadata could not be extracted). The app is integrated regardless.
+    pub warnings: Vec<String>,
+    /// The file needs the unsafe fallback, which the user has not confirmed for
+    /// it. Nothing was run and nothing was installed.
+    pub fallback_pending: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -372,7 +400,7 @@ pub struct UpdateOffer {
     pub running: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskItem {
     pub id: String,
     pub kind: TaskKind,
@@ -383,6 +411,68 @@ pub struct TaskItem {
     pub status_text: String,
     pub error: String,
     pub retryable: bool,
+    /// Unix seconds when the task began and when it ended (0 while running).
+    pub started_at: i64,
+    pub finished_at: i64,
+    /// The versions an update moves between (or the version an integration or
+    /// removal concerns, in `to_version` / `from_version`). Empty when unknown.
+    pub from_version: String,
+    pub to_version: String,
+    /// The stage an update is in (1 Download, 2 Verify, 3 Swap in), or 0.
+    pub phase_index: i32,
+    pub phase: String,
+    /// Bytes moved so far in the current stage, and the total (0 when unknown).
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    /// True for a removal that deletes the AppImage for good rather than moving
+    /// it to the Trash. False for a Trash removal and for every other task. A
+    /// record written before this field existed reads as false.
+    #[serde(default)]
+    pub permanent: bool,
+}
+
+/// The stages of applying an update, in the order they run. The numbers are
+/// what the Tasks page shows ("1 Download", "2 Verify", "3 Swap in").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdatePhase {
+    Download,
+    Verify,
+    SwapIn,
+}
+
+impl UpdatePhase {
+    pub fn index(self) -> i32 {
+        match self {
+            UpdatePhase::Download => 1,
+            UpdatePhase::Verify => 2,
+            UpdatePhase::SwapIn => 3,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            UpdatePhase::Download => "Download",
+            UpdatePhase::Verify => "Verify",
+            UpdatePhase::SwapIn => "Swap in",
+        }
+    }
+}
+
+/// What an update reports while it runs. `Planned` comes once the source has
+/// been checked; `Phase` comes as each stage starts and as download bytes
+/// arrive (`total` is 0 when the size is not known).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyEvent {
+    Planned {
+        from_version: String,
+        to_version: String,
+        download_size: u64,
+    },
+    Phase {
+        phase: UpdatePhase,
+        done: u64,
+        total: u64,
+    },
 }
 
 pub fn app_image_type_name(t: AppImageType) -> &'static str {

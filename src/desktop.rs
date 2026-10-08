@@ -114,6 +114,25 @@ pub fn sanitize_file_base(name: &str) -> String {
     out
 }
 
+/// The name a user sees for an AppImage, from its file name: the words and
+/// spaces stay, and only the `.AppImage` suffix goes. The managed copy's file
+/// name is sanitised by `sanitize_file_base`, which must not reach this name.
+pub fn display_name_from_file(file_name: &str) -> String {
+    // The suffix is ASCII, so once the lowercased name ends with it, the same
+    // byte count from the end is a character boundary in the original.
+    let stem = if file_name.to_ascii_lowercase().ends_with(".appimage") {
+        &file_name[..file_name.len() - ".appimage".len()]
+    } else {
+        file_name
+    };
+    let name: String = stem.trim().chars().take(limits::MAX_NAME_LENGTH).collect();
+    if name.is_empty() {
+        "AppImage".to_string()
+    } else {
+        name
+    }
+}
+
 pub fn desktop_file_name(uuid: &str) -> String {
     format!("{}{}.desktop", limits::DESKTOP_PREFIX, uuid)
 }

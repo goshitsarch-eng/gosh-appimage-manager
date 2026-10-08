@@ -1,9 +1,11 @@
 id: com.goshapps.AppImageManager
 runtime: org.freedesktop.Platform
-runtime-version: '23.08'
+runtime-version: '26.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
+  # clang for `flutter build linux`, which configures CMake with CC=clang.
+  - org.freedesktop.Sdk.Extension.llvm22
 command: gosh-appimage-manager
 finish-args:
   - --share=ipc
@@ -22,10 +24,11 @@ finish-args:
   - --filesystem=xdg-config/autostart:create
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
-  # The 23.08 dwz/debugedit predate rustc 1.90's DWARF and corrupt libLLVM
-  # while splitting debuginfo (zeroed program headers). The pinned toolchain
-  # in /app/rust must never go through post-processing; release binaries
-  # carry no debuginfo anyway.
+  # On the 23.08 SDK, dwz/debugedit corrupted libLLVM while splitting rustc
+  # 1.90's DWARF (zeroed program headers). The 26.08 SDK has not been checked
+  # for this, so post-processing stays off. The pinned toolchain in /app/rust
+  # must never go through post-processing; release binaries carry no debuginfo
+  # anyway.
   no-debuginfo: true
   # qemu-user aarch64 compilation is memory-hungry; cap cargo parallelism
   # on that arch so the build survives on desktop machines.
@@ -40,9 +43,10 @@ cleanup:
   - /share/man
   - /rust
 modules:
-  # Pinned Rust 1.90.0: the 23.08 SDK extension ships Rust 1.81, which is
-  # older than this dependency graph needs (up to 1.89). The toolchain is
-  # removed from the final app by the top-level /rust cleanup above.
+  # Pinned Rust 1.90.0, so the build does not depend on whichever rustc the SDK
+  # extension ships. 23.08 shipped Rust 1.81, older than this dependency graph
+  # needs (up to 1.89). The toolchain is removed from the final app by the
+  # top-level /rust cleanup above.
   - name: rust-gosh
     buildsystem: simple
     build-commands:
@@ -147,7 +151,7 @@ modules:
         RUSTC: /app/rust/bin/rustc
     build-commands:
       - /app/rust/bin/cargo --offline fetch --manifest-path Cargo.toml
-      - /app/rust/bin/cargo --offline build --release --features gui
+      - /app/rust/bin/cargo --offline build --release
       - install -Dm755 target/release/gosh-appimage-manager -t ${FLATPAK_DEST}/bin/
       - install -Dm644 data/com.goshapps.AppImageManager.desktop -t ${FLATPAK_DEST}/share/applications/
       - install -Dm644 data/com.goshapps.AppImageManager.metainfo.xml -t ${FLATPAK_DEST}/share/metainfo/
@@ -171,4 +175,79 @@ modules:
           - .git
           - .grok
           - screenshots
+          # The core does not use the bridge or the Flutter tree.
+          - bridge
+          - flutter
       - cargo-sources.json
+  # Flutter GUI, built the way .github/workflows/flutter.yml builds it. Only the
+  # build steps run here; the binding-codegen check, analyze, and tests stay in
+  # flutter.yml. The Rust binary's launcher runs the bundle from
+  # /app/libexec/gosh-appimage-manager.
+  - name: gosh-appimage-manager-gui
+    buildsystem: simple
+    build-options:
+      # Unlike the offline Rust core, this module uses the network during the
+      # build, as the CI job does: Flutter precaches its engine, pub fetches
+      # packages, and rustup fetches the stable toolchain that cargokit drives
+      # to build the bridge. Vendoring those inputs is still open.
+      build-args:
+        - --share=network
+      env:
+        HOME: /run/build/gosh-appimage-manager-gui/home
+        PUB_CACHE: /run/build/gosh-appimage-manager-gui/pub-cache
+        CARGO_HOME: /run/build/gosh-appimage-manager-gui/cargo
+        RUSTUP_HOME: /run/build/gosh-appimage-manager-gui/rustup
+        FLUTTER_SUPPRESS_ANALYTICS: 'true'
+        DART_SUPPRESS_ANALYTICS: 'true'
+      prepend-path: /run/build/gosh-appimage-manager-gui/cargo/bin:/run/build/gosh-appimage-manager-gui/flutter-sdk/bin
+      # The llvm22 extension provides clang and clang++ (see sdk-extensions).
+      append-path: /usr/lib/sdk/llvm22/bin
+    build-commands:
+      - mkdir -p "$HOME" "$PUB_CACHE"
+      # cargokit runs `rustup run stable cargo build` for the bridge crate, so
+      # rustup needs the stable channel (the same as dtolnay/rust-toolchain in
+      # flutter.yml). The pinned 1.90.0 toolchain stays with the Rust core.
+      # flatpak-builder downloads rustup-init without its execute bit.
+      - chmod +x rustup-init
+      - ./rustup-init -y --profile minimal --default-toolchain stable --no-modify-path
+      - flutter --version
+      - flutter precache --linux
+      - cd flutter && flutter pub get
+      - cd flutter && flutter build linux --release
+      - install -d ${FLATPAK_DEST}/libexec/gosh-appimage-manager
+      - cp -a flutter/build/linux/*/release/bundle/. ${FLATPAK_DEST}/libexec/gosh-appimage-manager/
+      - test -x ${FLATPAK_DEST}/libexec/gosh-appimage-manager/gosh-appimage-manager-gui
+    sources:
+      - type: git
+        url: https://github.com/flutter/flutter.git
+        tag: 3.47.6
+        commit: 5fc346839b5d0eef006ed8404392afb4dfae428d
+        dest: flutter-sdk
+      - type: dir
+        path: ..
+        skip:
+          - target
+          - build-dir
+          - .flatpak-builder
+          - repo
+          - .git
+          - .grok
+          - screenshots
+          - bridge/target
+          - flutter/build
+          - flutter/.dart_tool
+          - flutter/.flutter-plugins-dependencies
+          - flutter/linux/flutter/ephemeral
+          - flutter/rust_builder/cargokit/build_tool/.dart_tool
+      - type: file
+        url: https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+        sha256: dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+        dest-filename: rustup-init
+        only-arches:
+          - x86_64
+      - type: file
+        url: https://static.rust-lang.org/rustup/dist/aarch64-unknown-linux-gnu/rustup-init
+        sha256: 15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
+        dest-filename: rustup-init
+        only-arches:
+          - aarch64

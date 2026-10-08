@@ -1,0 +1,15 @@
+[package]
+name = "goshaim_bridge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+flutter_rust_bridge = "=2.13.0"
+# The Rust core. Its package name is gosh-appimage-manager; the library target is goshaim_core.
+goshaim_core = { package = "gosh-appimage-manager", path = ".." }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

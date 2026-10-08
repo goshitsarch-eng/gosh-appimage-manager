@@ -91,7 +91,18 @@ pub trait UpdateSource: Send + Sync {
     fn handles_embedded(&self, hint: &str) -> bool;
     /// Derive a config from embedded update fields when none is stored.
     fn config_from_embedded(&self, fields: &BTreeMap<String, String>) -> Config;
+    /// Bring what the user typed into the stored form, before validation. The
+    /// Library takes one key=value pair, so a source can arrive in a shorter
+    /// form than it is stored in. `embedded` is the app's own update string.
+    fn normalize_config(&self, config: Config, _embedded: &str) -> Config {
+        config
+    }
     fn validate_config(&self, config: &Config) -> Result<(), String>;
+    /// As `validate_config`, for a config on a known app. A source that can name
+    /// the fix in a terminal command uses the app's path to name it.
+    fn validate_for_app(&self, _app_path: &str, config: &Config) -> Result<(), String> {
+        self.validate_config(config)
+    }
     fn check(
         &self,
         app: &InstalledApp,
@@ -248,6 +259,82 @@ fn parse_zsync_control(body: &[u8]) -> BTreeMap<String, String> {
 
 // ---- github releases --------------------------------------------------------
 
+/// What is wrong with a GitHub source config, as far as the user can act on it.
+#[derive(Debug, PartialEq, Eq)]
+enum GithubProblem {
+    /// No owner/name: the repo is missing, or bare.
+    NoRepo,
+    /// The named key holds a value that is not a safe repository component.
+    BadComponent(&'static str),
+    /// No asset name to match, which only the user can supply.
+    NoFilename,
+}
+
+fn github_problem(config: &Config) -> Option<GithubProblem> {
+    if get_str(config, "username").is_empty() {
+        return Some(GithubProblem::NoRepo);
+    }
+    for key in ["username", "repo"] {
+        if !url_guard::is_safe_repo_component(&get_str(config, key)) {
+            return Some(GithubProblem::BadComponent(key));
+        }
+    }
+    if get_str(config, "filename").is_empty() {
+        return Some(GithubProblem::NoFilename);
+    }
+    None
+}
+
+impl GithubProblem {
+    /// The message for the user. A refusal the user can fix from the terminal
+    /// carries the exact command that supplies what is missing, built from what
+    /// the app and the user gave. The app's path is a placeholder when it is not
+    /// known. The asset name is a placeholder unless the user gave one.
+    fn message(&self, config: &Config, app_path: Option<&str>) -> String {
+        match self {
+            GithubProblem::NoRepo => format!(
+                "GitHub needs repo=owner/name, the owner and the repository joined by a slash, for example repo=<owner>/<name>. {}",
+                run_command(config, app_path)
+            ),
+            GithubProblem::BadComponent(key) => format!("GitHub {key} is not valid"),
+            GithubProblem::NoFilename => {
+                let base = "GitHub needs filename=<release asset name, * and ? allowed>, for \
+                            example filename=<app>-x86_64.AppImage";
+                match app_path {
+                    None => base.to_string(),
+                    Some(_) => format!("{base}. {}", run_command(config, app_path)),
+                }
+            }
+        }
+    }
+}
+
+/// The command that supplies the missing GitHub settings. A value the user gave
+/// is shown as given, and a missing one is a placeholder. The app's path is quoted
+/// so the command can be pasted.
+fn run_command(config: &Config, app_path: Option<&str>) -> String {
+    let path = match app_path {
+        Some(path) => crate::safe_fs::copyable_path(path),
+        None => "<path>".to_string(),
+    };
+    let owner = value_or(config, "username", "<owner>");
+    let name = value_or(config, "repo", "<name>");
+    let filename = value_or(config, "filename", "<asset name>");
+    format!(
+        "Run: gosh-appimage-manager --set-update-source {path} --manager github repo={owner}/{name} filename={filename}"
+    )
+}
+
+/// The value under `key`, or `placeholder` when the user gave none.
+fn value_or(config: &Config, key: &str, placeholder: &str) -> String {
+    let value = get_str(config, key);
+    if value.is_empty() {
+        placeholder.to_string()
+    } else {
+        value
+    }
+}
+
 impl UpdateSource for GithubSource {
     fn name(&self) -> &'static str {
         "github"
@@ -267,25 +354,52 @@ impl UpdateSource for GithubSource {
         }
         config
     }
-    fn validate_config(&self, config: &Config) -> Result<(), String> {
-        for key in ["username", "repo"] {
-            let value = get_str(config, key);
-            if !url_guard::is_safe_repo_component(&value) {
-                return Err(format!("GitHub {key} is not valid"));
+    fn normalize_config(&self, mut config: Config, embedded: &str) -> Config {
+        // `repo=owner/name` is the one pair the Library takes, so the owner can
+        // arrive inside repo. Split it into the two keys the source stores.
+        if !config.contains_key("username") {
+            let repo = get_str(&config, "repo");
+            if let Some((owner, name)) = repo.split_once('/') {
+                if !name.contains('/') {
+                    let (owner, name) = (owner.to_string(), name.to_string());
+                    config.insert("username".to_string(), owner);
+                    config.insert("repo".to_string(), name);
+                }
             }
         }
-        if get_str(config, "filename").is_empty() {
-            return Err("GitHub source needs a filename".to_string());
+        // A missing filename may come from the AppImage's own update information,
+        // but only when that information is for the same repository.
+        if get_str(&config, "filename").is_empty() {
+            let fields = crate::inspector::parse_upd_info(embedded.as_bytes()).fields;
+            let same_repo = fields.get("username") == config.get("username")
+                && fields.get("repo") == config.get("repo");
+            if let (true, Some(pattern)) = (same_repo, fields.get("filename")) {
+                if !pattern.is_empty() {
+                    config.insert("filename".to_string(), pattern.clone());
+                }
+            }
         }
-        Ok(())
+        config
+    }
+    fn validate_config(&self, config: &Config) -> Result<(), String> {
+        match github_problem(config) {
+            Some(problem) => Err(problem.message(config, None)),
+            None => Ok(()),
+        }
+    }
+    fn validate_for_app(&self, app_path: &str, config: &Config) -> Result<(), String> {
+        match github_problem(config) {
+            Some(problem) => Err(problem.message(config, Some(app_path))),
+            None => Ok(()),
+        }
     }
     fn check(
         &self,
-        _app: &InstalledApp,
+        app: &InstalledApp,
         config: &Config,
         network: &dyn NetworkClient,
     ) -> UpdateCheckResult {
-        if let Err(e) = self.validate_config(config) {
+        if let Err(e) = self.validate_for_app(&app.managed_path, config) {
             return UpdateCheckResult::fail(self.name(), e);
         }
         let user = get_str(config, "username");

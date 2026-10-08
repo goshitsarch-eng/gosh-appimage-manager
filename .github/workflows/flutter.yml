@@ -1,0 +1,125 @@
+# Flutter front end on the Rust core (bridge spike). Builds and tests the
+# Flutter Linux app and the Rust bridge natively on both Linux architectures:
+# x86-64 on the hosted runner and aarch64 on the arm64 runner. The steps match
+# the local verification on an aarch64 host.
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+  workflow_dispatch:
+
+name: Flutter
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: "3.47.6"
+  FRB_VERSION: "2.13.0"
+
+jobs:
+  linux:
+    name: "Flutter Linux (${{ matrix.arch }})"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            expected: "x86-64"
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            expected: "ARM aarch64"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-dev git curl unzip xz-utils file
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge
+
+      - name: Flutter SDK (pinned tag)
+        run: |
+          git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+
+      - name: Flutter tooling and Linux engine
+        run: |
+          flutter --version
+          flutter precache --linux
+          # The doctor report is informational here; Android and Chrome are not used.
+          flutter doctor -v || true
+
+      - name: Bridge code generator cache
+        id: frb-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/flutter_rust_bridge_codegen
+          key: frb-codegen-${{ env.FRB_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Bridge code generator (pinned)
+        if: steps.frb-cache.outputs.cache-hit != 'true'
+        run: cargo install flutter_rust_bridge_codegen --version "$FRB_VERSION" --locked
+
+      - name: Dart packages
+        working-directory: flutter
+        run: flutter pub get
+
+      - name: Bindings are up to date
+        working-directory: flutter
+        run: |
+          flutter_rust_bridge_codegen generate
+          git diff --exit-code -- lib/src/rust ../bridge/src/frb_generated.rs
+
+      - name: Rust checks
+        working-directory: bridge
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo build
+          cargo test
+
+      - name: Dart checks
+        working-directory: flutter
+        env:
+          # The bridge tests drive the real core. They only run against a
+          # scratch home, so the core never writes to a real one.
+          GOSHAIM_HOME: ${{ runner.temp }}/gosh-home
+        run: |
+          mkdir -p "$GOSHAIM_HOME"
+          dart format --output=none --set-exit-if-changed lib test
+          flutter analyze
+          flutter test
+
+      - name: Release bundle
+        working-directory: flutter
+        run: flutter build linux --release
+
+      - name: Bundle architecture matches the runner
+        run: |
+          binary="$(find flutter/build/linux -path '*/release/bundle/gosh-appimage-manager-gui' | head -1)"
+          test -n "$binary"
+          file "$binary"
+          file "$binary" | grep -q "${{ matrix.expected }}"
+          bridge="$(find flutter/build/linux -path '*/release/bundle/lib/libgoshaim_bridge.so' | head -1)"
+          test -n "$bridge"
+          file "$bridge" | grep -q "${{ matrix.expected }}"
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: gosh-flutter-linux-${{ matrix.arch }}
+          path: flutter/build/linux/**/release/bundle
+          if-no-files-found: error

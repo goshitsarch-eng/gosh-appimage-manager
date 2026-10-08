@@ -4,9 +4,18 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::limits;
-use crate::types::{task_kind_name, TaskItem, TaskKind, TaskState};
+use crate::types::{task_kind_name, TaskItem, TaskKind, TaskState, UpdatePhase};
+
+/// Unix seconds now. Zero if the clock is before the epoch.
+pub fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 pub struct TaskQueue {
     history: VecDeque<TaskItem>,
@@ -66,9 +75,55 @@ impl TaskQueue {
             status_text: task_kind_name(kind).to_string(),
             error: String::new(),
             retryable,
+            started_at: now_unix(),
+            finished_at: 0,
+            from_version: String::new(),
+            to_version: String::new(),
+            phase_index: 0,
+            phase: String::new(),
+            bytes_done: 0,
+            bytes_total: 0,
+            permanent: false,
         };
         self.push(item);
         id
+    }
+
+    /// Name the thing a task concerns. Used once its outcome is known, so a
+    /// finished integration can say which app it installed.
+    pub fn set_target(&mut self, id: &str, target: &str) {
+        if let Some(item) = self.history.iter_mut().find(|t| t.id == id) {
+            item.target = target.to_string();
+        }
+    }
+
+    /// Record the versions a task moves between. An integration or a removal
+    /// sets only `to_version` or `from_version` respectively.
+    pub fn set_versions(&mut self, id: &str, from_version: &str, to_version: &str) {
+        if let Some(item) = self.history.iter_mut().find(|t| t.id == id) {
+            item.from_version = from_version.to_string();
+            item.to_version = to_version.to_string();
+        }
+    }
+
+    /// Record whether a removal task deletes permanently (true) or moves the
+    /// AppImage to the Trash (false). Other tasks keep the default, false.
+    pub fn set_permanent(&mut self, id: &str, permanent: bool) {
+        if let Some(item) = self.history.iter_mut().find(|t| t.id == id) {
+            item.permanent = permanent;
+        }
+    }
+
+    /// Record the stage a running update is in and the bytes moved in it.
+    pub fn set_phase(&mut self, id: &str, phase: UpdatePhase, done: u64, total: u64) {
+        if let Some(item) = self.history.iter_mut().find(|t| t.id == id) {
+            if matches!(item.state, TaskState::Running | TaskState::Queued) {
+                item.phase_index = phase.index();
+                item.phase = phase.label().to_string();
+                item.bytes_done = done;
+                item.bytes_total = total;
+            }
+        }
     }
 
     /// Update a running task's progress and status line.
@@ -95,6 +150,7 @@ impl TaskQueue {
     /// Record the outcome of a task started with `begin`.
     pub fn finish(&mut self, id: &str, outcome: Result<(), String>, cancelled: bool) {
         if let Some(item) = self.history.iter_mut().find(|t| t.id == id) {
+            item.finished_at = now_unix();
             match outcome {
                 Ok(()) => {
                     item.state = TaskState::Succeeded;

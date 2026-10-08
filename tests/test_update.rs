@@ -133,6 +133,7 @@ fn apply_downloads_validates_and_replaces() {
         &IntegrateRequest {
             source_path: incoming.to_str().unwrap().to_string(),
             assume_yes: true,
+            confirm_unsafe: false,
             ..Default::default()
         },
         &cancel,
@@ -175,6 +176,7 @@ fn running_app_blocks_update_unless_forced() {
         &IntegrateRequest {
             source_path: incoming.to_str().unwrap().to_string(),
             assume_yes: true,
+            confirm_unsafe: false,
             ..Default::default()
         },
         &cancel,
@@ -220,6 +222,7 @@ fn digest_mismatch_fails_update() {
         &IntegrateRequest {
             source_path: incoming.to_str().unwrap().to_string(),
             assume_yes: true,
+            confirm_unsafe: false,
             ..Default::default()
         },
         &cancel,
@@ -647,19 +650,231 @@ fn forge_assets_must_come_from_the_forge_that_served_the_release() {
 #[test]
 fn readiness_checks_something_real() {
     let h = Harness::new();
-    let mut c = h.controller();
+    let c = h.controller();
     assert!(c.readiness().is_ok(), "a fresh controller should be ready");
 
-    // A managed folder that is not an absolute path cannot work.
-    c.settings_mut()
-        .set_managed_folder(std::path::PathBuf::from("relative/path"))
-        .unwrap();
-    let error = c.readiness().unwrap_err();
+    // The setter refuses a managed folder that cannot work, so such a value can
+    // only reach the core from a settings file written by hand or by an older
+    // build. Readiness must still name the problem.
+    write_managed_folder_setting(&h, "relative/path");
+    let error = h.controller().readiness().unwrap_err();
     assert!(error.contains("absolute"), "got: {error}");
 
     // A file where the managed folder should be is also not workable.
     let blocker = h.tmp.path().join("blocker");
     std::fs::write(&blocker, b"x").unwrap();
-    c.settings_mut().set_managed_folder(blocker).unwrap();
-    assert!(c.readiness().unwrap_err().contains("not a directory"));
+    write_managed_folder_setting(&h, &blocker.to_string_lossy());
+    assert!(h
+        .controller()
+        .readiness()
+        .unwrap_err()
+        .contains("not a directory"));
+}
+
+/// Write the managed folder straight into the settings file, as a hand edit would.
+fn write_managed_folder_setting(h: &Harness, folder: &str) {
+    let config = h.tmp.path().join(".config/gosh-appimage-manager");
+    std::fs::create_dir_all(&config).unwrap();
+    let body = serde_json::json!({ "ManagedFolder": folder });
+    std::fs::write(config.join("settings.json"), body.to_string()).unwrap();
+}
+
+/// The Library field takes one key=value pair. For GitHub that pair is
+/// `repo=owner/name`, and the owner is stored beside the repository.
+#[test]
+fn github_accepts_repo_as_owner_slash_name() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let path = write_fixture(h.tmp.path(), "Demo.AppImage");
+    let app = seed_app_with_github(&mut c, "1.0", path.to_str().unwrap());
+
+    let mut config = std::collections::BTreeMap::new();
+    config.insert("repo".to_string(), "example-org/quill-notes".to_string());
+    config.insert("filename".to_string(), "Quill-Notes-*.AppImage".to_string());
+    let mut error = String::new();
+    assert!(
+        c.set_update_source(app.clone(), "github", config, &mut error),
+        "error: {error}"
+    );
+    let stored = c.registry().by_uuid(&app.uuid).unwrap();
+    assert_eq!(
+        stored.update_config.get("username").map(String::as_str),
+        Some("example-org")
+    );
+    assert_eq!(
+        stored.update_config.get("repo").map(String::as_str),
+        Some("quill-notes")
+    );
+}
+
+#[test]
+fn github_refuses_a_bare_repo_name_and_names_the_form() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let path = write_fixture(h.tmp.path(), "Demo.AppImage");
+    let app = seed_app_with_github(&mut c, "1.0", path.to_str().unwrap());
+
+    let mut config = std::collections::BTreeMap::new();
+    config.insert("repo".to_string(), "quill-notes".to_string());
+    config.insert("filename".to_string(), "Quill-Notes-*.AppImage".to_string());
+    let mut error = String::new();
+    assert!(!c.set_update_source(app, "github", config, &mut error));
+    assert!(error.contains("owner/name"), "error: {error}");
+}
+
+/// The AppImage's own update information names the asset for the same
+/// repository, so the filename can come from there.
+#[test]
+fn github_filename_comes_from_the_appimages_update_information_for_the_same_repo() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let path = write_fixture(h.tmp.path(), "Demo.AppImage");
+    let mut app = seed_app_with_github(&mut c, "1.0", path.to_str().unwrap());
+    app.embedded_update =
+        "gh-releases-zsync|example-org|quill-notes|latest|Quill-Notes-*.AppImage".to_string();
+    c.registry_mut().upsert(app.clone()).unwrap();
+
+    let mut config = std::collections::BTreeMap::new();
+    config.insert("repo".to_string(), "example-org/quill-notes".to_string());
+    let mut error = String::new();
+    assert!(
+        c.set_update_source(app.clone(), "github", config, &mut error),
+        "error: {error}"
+    );
+    let stored = c.registry().by_uuid(&app.uuid).unwrap();
+    assert_eq!(
+        stored.update_config.get("filename").map(String::as_str),
+        Some("Quill-Notes-*.AppImage")
+    );
+}
+
+/// Another repository's pattern is not borrowed: the filename must be given.
+#[test]
+fn github_filename_is_not_borrowed_from_another_repository() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let path = write_fixture(h.tmp.path(), "Demo.AppImage");
+    let mut app = seed_app_with_github(&mut c, "1.0", path.to_str().unwrap());
+    app.embedded_update =
+        "gh-releases-zsync|someone-else|other-app|latest|Other-*.AppImage".to_string();
+    c.registry_mut().upsert(app.clone()).unwrap();
+
+    let mut config = std::collections::BTreeMap::new();
+    config.insert("repo".to_string(), "example-org/quill-notes".to_string());
+    let mut error = String::new();
+    assert!(!c.set_update_source(app, "github", config, &mut error));
+    assert!(error.contains("filename"), "error: {error}");
+}
+
+/// A missing filename is the one GitHub problem the user can fix from the
+/// terminal. The error gives the exact command, with the app's own path and the
+/// owner/name the user typed. The asset name stays a placeholder: it is not known.
+#[test]
+fn github_missing_filename_error_gives_the_exact_cli_command() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let path = write_fixture(h.tmp.path(), "Demo.AppImage");
+    let app = seed_app_with_github(&mut c, "1.0", path.to_str().unwrap());
+
+    let mut config = std::collections::BTreeMap::new();
+    config.insert("repo".to_string(), "example-org/quill-notes".to_string());
+    let mut error = String::new();
+    assert!(!c.set_update_source(app, "github", config, &mut error));
+    let command = format!(
+        "gosh-appimage-manager --set-update-source {} --manager github repo=example-org/quill-notes filename=<asset name>",
+        path.display()
+    );
+    assert!(error.contains(&command), "error: {error}");
+}
+
+/// A GitHub source with no owner is refused with the command that supplies the
+/// owner and the repository. The app's own path is filled in, and the bare name
+/// the user gave is kept.
+#[test]
+fn github_missing_repo_error_gives_the_command_to_run() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let path = write_fixture(h.tmp.path(), "Demo.AppImage");
+    let app = seed_app_with_github(&mut c, "1.0", path.to_str().unwrap());
+
+    let mut config = std::collections::BTreeMap::new();
+    config.insert("repo".to_string(), "quill-notes".to_string());
+    let mut error = String::new();
+    assert!(!c.set_update_source(app, "github", config, &mut error));
+    assert!(
+        error.starts_with("GitHub needs repo=owner/name, the owner and the repository joined by a slash, for example repo=<owner>/<name>"),
+        "the existing message is kept: {error}"
+    );
+    let command = format!(
+        "Run: gosh-appimage-manager --set-update-source {} --manager github repo=<owner>/quill-notes filename=<asset name>",
+        path.display()
+    );
+    assert!(
+        error.contains(&command),
+        "the command to run is given: {error}"
+    );
+}
+
+/// Without the app's path (a check of the source alone), the command still comes,
+/// with the path as a placeholder.
+#[test]
+fn github_missing_repo_without_an_app_path_gives_a_placeholder_command() {
+    use goshaim_core::updates_sources::UpdateSourceFactory;
+    let source = UpdateSourceFactory::by_name("github").expect("the github source");
+    let mut config = std::collections::BTreeMap::new();
+    config.insert("repo".to_string(), "quill-notes".to_string());
+    let error = source
+        .validate_config(&config)
+        .expect_err("a repo without an owner is refused");
+    assert!(
+        error.contains(
+            "Run: gosh-appimage-manager --set-update-source <path> --manager github repo=<owner>/quill-notes filename=<asset name>"
+        ),
+        "the placeholder command is given: {error}"
+    );
+}
+
+/// A path with spaces is quoted in the command, so the command can be pasted.
+#[test]
+fn the_cli_command_quotes_a_path_with_spaces() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let spaced = h.tmp.path().join("My Apps").join("Quill Notes.AppImage");
+    let app = seed_app_with_github(&mut c, "1.0", spaced.to_str().unwrap());
+
+    let mut config = std::collections::BTreeMap::new();
+    config.insert("repo".to_string(), "example-org/quill-notes".to_string());
+    let mut error = String::new();
+    assert!(!c.set_update_source(app, "github", config, &mut error));
+    let quoted = format!("'{}'", spaced.display());
+    assert!(error.contains(&quoted), "error: {error}");
+}
+
+/// The GitHub hints name no sample app. Their examples are placeholders, so a
+/// user never reads another app's name as their own.
+#[test]
+fn github_hints_name_no_sample_app() {
+    use goshaim_core::updates_sources::UpdateSourceFactory;
+    let source = UpdateSourceFactory::by_name("github").expect("github is a source");
+    let mut bare = std::collections::BTreeMap::new();
+    bare.insert("repo".to_string(), "bare".to_string());
+    let mut typed = std::collections::BTreeMap::new();
+    typed.insert("username".to_string(), "owner".to_string());
+    typed.insert("repo".to_string(), "name".to_string());
+    let messages = [
+        source.validate_config(&bare).unwrap_err(),
+        source.validate_config(&typed).unwrap_err(),
+        source
+            .validate_for_app("/apps/Demo.AppImage", &typed)
+            .unwrap_err(),
+    ];
+    for message in messages {
+        let lower = message.to_lowercase();
+        for sample in ["quill", "example-org"] {
+            assert!(
+                !lower.contains(sample),
+                "the hint names a sample app: {message}"
+            );
+        }
+    }
 }

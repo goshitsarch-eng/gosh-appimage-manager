@@ -187,11 +187,20 @@ impl NetworkClient for SharedNetwork {
         max_bytes: u64,
         cancel: &AtomicBool,
         local: Local,
+        progress: &mut dyn FnMut(u64, u64),
     ) -> Result<u64, String> {
         // Exercise the real streaming writer so the tests cover the same code
         // path the production client uses to land bytes on disk.
         let body = self.download_bounded(url, max_bytes, local)?;
-        goshaim_core::network::stream_to_file(body.as_slice(), dest, max_bytes, cancel)
+        let expected = body.len() as u64;
+        goshaim_core::network::stream_to_file_reporting(
+            body.as_slice(),
+            dest,
+            max_bytes,
+            cancel,
+            expected,
+            progress,
+        )
     }
 }
 
@@ -307,4 +316,99 @@ pub fn write_fixture_arch(
 
 pub fn args(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()
+}
+
+/// A real squashfs image (made with mksquashfs 4.6.1) holding `quill-notes.desktop`
+/// (Name=Quill Notes), `quill-notes.png` and an `AppRun` that is never run. It is
+/// 4096 bytes, so it is the payload for the AppImage-layout tests.
+pub const LAYOUT_PAYLOAD: &[u8] = include_bytes!("fixtures/appimage-layout-payload.sqsh");
+
+/// Layout-only ELF64 little-endian x86_64 header with the AppImage Type-2 magic.
+///
+/// `loads` are PT_LOAD program headers as `(p_offset, p_filesz)`. `sections` are
+/// section headers as `(sh_type, sh_offset, sh_size)`, written as a table at
+/// `shoff`. The returned bytes end at the end of whatever tables were written,
+/// so a caller appends the payload right after them. Nothing here is executed.
+pub fn elf_layout(shoff: usize, sections: &[(u32, u64, u64)], loads: &[(u64, u64)]) -> Vec<u8> {
+    let len = (shoff + sections.len() * 64).max(64 + loads.len() * 56);
+    let mut d = vec![0u8; len];
+    d[0..4].copy_from_slice(b"\x7fELF");
+    d[4] = 2; // ELFCLASS64
+    d[5] = 1; // ELFDATA2LSB
+    d[6] = 1; // EV_CURRENT
+    d[8] = b'A';
+    d[9] = b'I';
+    d[10] = 2; // AppImage type 2
+    d[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    d[18..20].copy_from_slice(&0x3Eu16.to_le_bytes()); // EM_X86_64
+    d[20..24].copy_from_slice(&1u32.to_le_bytes()); // EV_CURRENT
+    let phoff: u64 = if loads.is_empty() { 0 } else { 64 };
+    d[32..40].copy_from_slice(&phoff.to_le_bytes());
+    d[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
+    d[52..54].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    d[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    d[56..58].copy_from_slice(&(loads.len() as u16).to_le_bytes());
+    d[58..60].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
+    d[60..62].copy_from_slice(&(sections.len() as u16).to_le_bytes());
+    for (i, (offset, filesz)) in loads.iter().enumerate() {
+        let base = 64 + i * 56;
+        d[base..base + 4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+        d[base + 8..base + 16].copy_from_slice(&offset.to_le_bytes());
+        d[base + 32..base + 40].copy_from_slice(&filesz.to_le_bytes());
+        d[base + 40..base + 48].copy_from_slice(&filesz.to_le_bytes());
+    }
+    for (i, (kind, offset, size)) in sections.iter().enumerate() {
+        let base = shoff + i * 64;
+        d[base + 4..base + 8].copy_from_slice(&kind.to_le_bytes());
+        d[base + 24..base + 32].copy_from_slice(&offset.to_le_bytes());
+        d[base + 32..base + 40].copy_from_slice(&size.to_le_bytes());
+    }
+    d
+}
+
+/// Whether the squashfs tool the inspector shells out to is installed.
+pub fn unsquashfs_on_path() -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|dir| dir.join("unsquashfs").is_file())
+    })
+}
+
+/// Every call a fake runner received, as argument vectors.
+pub type RunLog = Arc<Mutex<Vec<Vec<String>>>>;
+
+/// Stand in for an AppImage's own `--appimage-extract` (never a real AppImage). When
+/// the core runs `--appimage-extract` through the fake runner, this writes a
+/// squashfs-root tree into the working directory it is given: `demo.desktop`
+/// (Name=Unpacked, version 9.9, Icon=demo) and `demo.png`. Every call is recorded.
+pub fn plant_self_extraction(h: &Harness) -> RunLog {
+    let calls: RunLog = Arc::new(Mutex::new(Vec::new()));
+    let seen = calls.clone();
+    h.runner.on_run(Box::new(move |req| {
+        seen.lock().unwrap().push(req.args.clone());
+        if !req.args.iter().any(|a| a == "--appimage-extract") {
+            return None;
+        }
+        let root = std::path::Path::new(&req.work_dir).join("squashfs-root");
+        std::fs::create_dir_all(&root).ok()?;
+        std::fs::write(
+            root.join("demo.desktop"),
+            b"[Desktop Entry]\nName=Unpacked\nX-AppImage-Version=9.9\nIcon=demo\nExec=demo\n",
+        )
+        .ok()?;
+        std::fs::write(root.join("demo.png"), b"\x89PNG\r\n\x1a\n").ok()?;
+        Some(ProcessResult {
+            program: req.program.clone(),
+            exit_code: 0,
+            ..Default::default()
+        })
+    }));
+    calls
+}
+
+/// Whether the recorded calls include a self-extraction.
+pub fn ran_self_extraction(log: &RunLog) -> bool {
+    log.lock()
+        .unwrap()
+        .iter()
+        .any(|args| args.iter().any(|a| a == "--appimage-extract"))
 }

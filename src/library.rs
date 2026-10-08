@@ -49,11 +49,11 @@ impl<'a> AppImageLibrary<'a> {
     /// elsewhere -- manual integrations and ones made by other tools -- so
     /// they can be offered for explicit adoption. That setting was persisted
     /// and read by nothing before; external discovery did not exist.
-    pub fn scan(&self, registry: &ManagedRegistry) -> Vec<DiscoveredApp> {
+    pub fn scan(&self, registry: &ManagedRegistry) -> Result<Vec<DiscoveredApp>, String> {
         let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
         let mut out = Vec::new();
 
-        for path in self.managed_folder_files() {
+        for path in self.managed_folder_files()? {
             if !seen.insert(path.clone()) {
                 continue;
             }
@@ -71,7 +71,7 @@ impl<'a> AppImageLibrary<'a> {
             }
         }
         out.sort_by(|a, b| a.path.cmp(&b.path));
-        out
+        Ok(out)
     }
 
     fn describe(
@@ -105,15 +105,31 @@ impl<'a> AppImageLibrary<'a> {
         }
     }
 
-    fn managed_folder_files(&self) -> Vec<PathBuf> {
-        let Ok(entries) = fs::read_dir(self.settings.managed_folder()) else {
-            return Vec::new();
+    /// AppImages in the managed folder. A folder that does not exist yet holds
+    /// none. A folder that exists but cannot be read is an error: an empty list
+    /// would read as "nothing here" when the folder was merely locked.
+    fn managed_folder_files(&self) -> Result<Vec<PathBuf>, String> {
+        let folder = self.settings.managed_folder();
+        let entries = match fs::read_dir(folder) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(format!(
+                    "Cannot read the managed folder {}: {e}",
+                    folder.display()
+                ))
+            }
         };
-        entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| is_appimage_file(p))
-            .collect()
+        let mut found = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|e| format!("Cannot read the managed folder {}: {e}", folder.display()))?
+                .path();
+            if is_appimage_file(&path) {
+                found.push(path);
+            }
+        }
+        Ok(found)
     }
 
     /// AppImage paths referenced by desktop entries in the user's

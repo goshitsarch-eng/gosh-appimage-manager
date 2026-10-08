@@ -13,6 +13,7 @@ fn launch_spawns_managed_path_with_args() {
         &IntegrateRequest {
             source_path: path.to_str().unwrap().to_string(),
             assume_yes: true,
+            confirm_unsafe: false,
             ..Default::default()
         },
         &cancel,

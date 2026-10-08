@@ -24,9 +24,10 @@ to release when the tag disagrees with `Cargo.toml` or the newest
 ## What CI does
 
 1. **validate** — tag ↔ Cargo.toml ↔ metainfo version agreement.
-2. **tarball** — native `cargo build --release --features gui` on
-   `ubuntu-24.04` (x86_64) and `ubuntu-24.04-arm` (aarch64), packaged by
-   `scripts/package-release.sh`.
+2. **tarball** — native `cargo build --release` on `ubuntu-24.04`
+   (x86_64) and `ubuntu-24.04-arm` (aarch64), packaged by
+   `scripts/package-release.sh`. The tarball carries the CLI and launcher;
+   the desktop app ships in the Flatpak.
 3. **flatpak** — the shared `flatpak.yml` workflow, same two runners,
    producing versioned `.flatpak` bundles.
 4. **release** — downloads every artifact, runs
@@ -53,7 +54,7 @@ duplicate.
 ## Local dry-run
 
 ```sh
-cargo build --release --features gui
+cargo build --release
 scripts/package-release.sh X.Y.Z x86_64      # writes the tarball here
 scripts/verify-release.sh <dir> X.Y.Z        # checks a full artifact dir
 ```

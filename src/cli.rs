@@ -10,7 +10,6 @@ use std::sync::atomic::AtomicBool;
 use crate::controller::AppController;
 use crate::diagnostics;
 use crate::elf;
-use crate::inspector::AppImageInspector;
 use crate::limits;
 use crate::process::ProcessRequest;
 use crate::types::{
@@ -169,8 +168,30 @@ pub fn run_cli(
     let keep_both = has_arg(args, "--keep-both");
     let replace = has_arg(args, "--replace");
     let del = has_arg(args, "--delete");
+    // The user's confirmation that the unsafe fallback may run for this one file.
+    let allow_unsafe = has_arg(args, "--allow-unsafe");
     let cancel = AtomicBool::new(false);
     let verbose = controller.settings().debug_logging();
+
+    // Settings that could not be read run on defaults, so a change made now
+    // would rest on the wrong basis. Mutating commands refuse before anything
+    // runs. Reads go ahead, with a warning that the defaults are in use.
+    const MUTATING: &[&str] = &[
+        "--adopt",
+        "--integrate",
+        "--update",
+        "--remove",
+        "--remove-all",
+        "--set-update-source",
+    ];
+    if MUTATING.iter().any(|flag| has_arg(args, flag)) {
+        if let Err(reason) = controller.readiness() {
+            let _ = writeln!(stderr, "Refusing to change anything: {reason}");
+            return ExitCode::Failure;
+        }
+    } else if let Some(error) = controller.settings().load_error() {
+        let _ = writeln!(stderr, "Warning: {error}");
+    }
 
     if has_arg(args, "--list-update-managers") {
         for name in UpdateSourceFactory::names() {
@@ -293,7 +314,13 @@ pub fn run_cli(
     if has_arg(args, "--list-discovered") {
         // Discovery and adoption were fully implemented but reachable from no
         // command and no UI, so external AppImages could never be adopted.
-        let discovered = controller.discover();
+        let discovered = match controller.discover() {
+            Ok(found) => found,
+            Err(error) => {
+                let _ = writeln!(stderr, "{error}");
+                return ExitCode::Failure;
+            }
+        };
         let mut items = Vec::new();
         for app in &discovered {
             if json {
@@ -412,6 +439,7 @@ pub fn run_cli(
             CopyMode::Copy
         };
         req.assume_yes = yes;
+        req.confirm_unsafe = allow_unsafe;
         if replace {
             req.conflict = ConflictPolicy::Replace;
             let mut target = arg_value(args, "--replace-uuid");
@@ -427,12 +455,15 @@ pub fn run_cli(
                 controller.registry().by_path(&path)
             };
             if owned.is_none() && target.is_empty() {
-                let inspector = AppImageInspector::new(controller.runner());
-                let options = InspectOptions {
-                    allow_unsafe_extract: false,
-                    ..Default::default()
-                };
-                let inspected = inspector.inspect(&path, &options, &cancel, None);
+                let inspected = controller.inspect_with(
+                    &path,
+                    &InspectOptions {
+                        confirm_unsafe: allow_unsafe,
+                        ..Default::default()
+                    },
+                    &cancel,
+                    None,
+                );
                 if !inspected.existing_managed_id.is_empty() {
                     owned = controller
                         .registry()
@@ -477,6 +508,16 @@ pub fn run_cli(
             req.conflict = ConflictPolicy::Unspecified;
         }
         let result = controller.integrate(&req, &cancel);
+        if result.fallback_pending {
+            // Nothing was installed and the source was not moved. Say how to allow it.
+            let _ = writeln!(stderr, "{}", result.error);
+            let _ = writeln!(
+                stderr,
+                "To run it for this file only, run this command: {}",
+                suggested_command(args, &["--allow-unsafe", "--yes"])
+            );
+            return ExitCode::NeedsConfirmation;
+        }
         diagnostics::write_if(
             stderr,
             verbose,
@@ -489,6 +530,9 @@ pub fn run_cli(
                 return ExitCode::Validation;
             }
             return ExitCode::Failure;
+        }
+        for warning in &result.warnings {
+            let _ = writeln!(stderr, "Warning: {warning}");
         }
         let _ = writeln!(stderr, "Integrated {}", result.app.managed_path);
         return ExitCode::Ok;
@@ -734,6 +778,16 @@ pub fn run_cli(
     }
 
     if has_arg(args, "--fetch-updates") {
+        // The login entry passes --background. With "Check in the background"
+        // off it must not contact any update source, so it stops here. A
+        // manual --fetch-updates without the flag always scans.
+        if has_arg(args, "--background") && !controller.settings().background_update_checks() {
+            let _ = writeln!(
+                stderr,
+                "Background update checks are off; no update source was contacted."
+            );
+            return ExitCode::Ok;
+        }
         let scan = controller.scan_updates(&cancel);
         diagnostics::write_if(
             stderr,
@@ -896,20 +950,37 @@ pub fn run_host_probe(controller: &AppController, stdout: &mut dyn Write) -> Exi
     ExitCode::Ok
 }
 
+/// The command a user can run to allow a pending file: their own arguments, plus each
+/// flag in `add` that is not already there. Every argument is quoted where needed, so
+/// the line can be pasted, and `-y` counts as `--yes`.
+fn suggested_command(args: &[String], add: &[&str]) -> String {
+    let mut parts = vec!["gosh-appimage-manager".to_string()];
+    parts.extend(args.iter().map(|arg| crate::safe_fs::copyable_path(arg)));
+    for flag in add {
+        let present = args
+            .iter()
+            .any(|arg| arg == flag || (*flag == "--yes" && arg == "-y"));
+        if !present {
+            parts.push(flag.to_string());
+        }
+    }
+    parts.join(" ")
+}
+
 /// Inspect a local file without executing it (JSON to stdout).
 pub fn run_inspect_probe(
     controller: &AppController,
     path: &str,
+    confirm_unsafe: bool,
     stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
 ) -> ExitCode {
     let cancel = AtomicBool::new(false);
     let options = InspectOptions {
-        allow_unsafe_extract: false,
-        confirm_unsafe_extract: false,
+        confirm_unsafe,
         ..Default::default()
     };
-    let inspector = AppImageInspector::new(controller.runner());
-    let result = inspector.inspect(path, &options, &cancel, None);
+    let result = controller.inspect_with(path, &options, &cancel, None);
     let mut obj = serde_json::Map::new();
     obj.insert(
         "schema_version".into(),
@@ -949,20 +1020,47 @@ pub fn run_inspect_probe(
     );
     obj.insert(
         "unsafe_fallback".into(),
-        serde_json::Value::Bool(result.extraction_used_unsafe_fallback),
+        serde_json::Value::Bool(result.unsafe_fallback_ran),
+    );
+    obj.insert(
+        "warnings".into(),
+        serde_json::Value::Array(
+            result
+                .warnings
+                .iter()
+                .map(|warning| serde_json::Value::String(warning.clone()))
+                .collect(),
+        ),
     );
     obj.insert(
         "extractor".into(),
         serde_json::Value::String(result.extractor_used.clone()),
     );
+    obj.insert(
+        "fallback_pending".into(),
+        serde_json::Value::Bool(result.fallback_pending),
+    );
     let mut data = serde_json::to_vec(&obj).unwrap_or_default();
     data.push(b'\n');
     let _ = stdout.write_all(&data);
-    if result.extraction_used_unsafe_fallback {
+    // The same warnings `--integrate` prints, so a run that produced nothing is still visible.
+    for warning in &result.warnings {
+        let _ = writeln!(stderr, "Warning: {warning}");
+    }
+    if result.unsafe_fallback_ran {
         let _ = stdout.write_all(b"INSPECT_EXECUTED_UNSAFE\n");
         return ExitCode::Failure;
     }
     let _ = stdout.write_all(b"INSPECT_NO_EXECUTION\n");
+    if result.fallback_pending {
+        let probe_args = ["--probe-inspect".to_string(), path.to_string()];
+        let _ = writeln!(
+            stderr,
+            "To run it for this file only, run this command: {}",
+            suggested_command(&probe_args, &["--allow-unsafe"])
+        );
+        return ExitCode::NeedsConfirmation;
+    }
     if result.magic_valid {
         ExitCode::Ok
     } else {

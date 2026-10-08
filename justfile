@@ -1,21 +1,19 @@
-# Recipes for Gosh AppImage Manager 3.0.0 (Rust + libcosmic).
-# Run `just <recipe>`. The GUI needs network once for the libcosmic checkout.
+# Recipes for Gosh AppImage Manager 3.0.0 (Rust core with a Flutter GUI).
+# Run `just <recipe>`.
 
-# Debug CLI build (no GUI deps)
+# Debug build of the Rust core and launcher (the GUI lives in flutter/)
 build:
     cargo build
-
-# Debug build with the libcosmic GUI
-build-gui:
-    cargo build --features gui
-
-# Release build with the libcosmic GUI (what Flatpak ships)
-release:
-    cargo build --release --features gui
 
 # Full test suite (fake seams + synthetic fixtures; no network, no home writes)
 test:
     cargo test
+
+# Flutter front end: format, analysis, and the Dart tests. The bridge tests drive
+# the real core, so they run against a fresh scratch home, never a real one.
+flutter-check:
+    cd bridge && cargo build
+    cd flutter && dart format --output=none --set-exit-if-changed lib test && flutter analyze && GOSHAIM_HOME="$(mktemp -d)" flutter test
 
 lint:
     cargo clippy --all-targets -- -D warnings
@@ -23,9 +21,9 @@ lint:
 fmt-check:
     cargo fmt --check
 
-# Offline self-test through the real binary
+# Offline self-test through the real binary, with HOME and GOSHAIM_HOME in a scratch dir
 self-test: build
-    ./target/debug/gosh-appimage-manager --self-test
+    d="$(mktemp -d)"; HOME="$d" GOSHAIM_HOME="$d" ./target/debug/gosh-appimage-manager --self-test; rc=$?; rm -rf "$d"; exit $rc
 
 # Desktop + AppStream validation
 validate:

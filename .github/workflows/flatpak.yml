@@ -4,7 +4,7 @@
 # release.yml (which passes `version` so bundles get versioned names).
 #
 # Both arches build natively: aarch64 on the ubuntu-24.04-arm runner, not
-# under qemu. The build needs ~15 GB for the 23.08 SDK plus several GB of
+# under qemu. The build needs ~15 GB for the 26.08 SDK plus several GB of
 # Rust/Flatpak build cache, more than the ~14 GB free on a stock runner,
 # so every job first reclaims disk. aarch64 native builds are far faster
 # than the old qemu-user run; fail-fast is off so one arch never cancels
@@ -87,6 +87,24 @@ jobs:
             x86_64)  grep -q 'x86-64' binary.txt ;;
             aarch64) grep -q 'ARM aarch64' binary.txt ;;
           esac
+
+      - name: Verify packaged GUI bundle architecture
+        run: |
+          gui=build-dir/files/libexec/gosh-appimage-manager/gosh-appimage-manager-gui
+          test -x "$gui"
+          file "$gui" | tee gui.txt
+          case '${{ matrix.arch }}' in
+            x86_64)  grep -q 'x86-64' gui.txt ;;
+            aarch64) grep -q 'ARM aarch64' gui.txt ;;
+          esac
+
+      - name: Packaged launcher resolves the GUI
+        run: |
+          # The binary's launcher looks for ../libexec/gosh-appimage-manager/
+          # relative to /app/bin. Check that exact path inside the sandbox.
+          flatpak-builder --run build-dir \
+            packaging/com.goshapps.AppImageManager.yml \
+            sh -c 'test -x /app/libexec/gosh-appimage-manager/gosh-appimage-manager-gui'
 
       - name: Packaged self-test
         run: |

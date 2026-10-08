@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::desktop;
 use crate::integration::IntegrationService;
@@ -24,11 +25,26 @@ pub struct AppController {
     settings: SettingsStore,
     registry: ManagedRegistry,
     runner: Box<dyn ProcessRunner>,
-    network: Box<dyn NetworkClient>,
-    processes: Box<dyn ProcessTable>,
+    // Shared, so an operation's blocking calls can run on helper threads that
+    // outlive the caller's wait. See `cancel`.
+    network: Arc<dyn NetworkClient>,
+    processes: Arc<dyn ProcessTable>,
     trash: Box<dyn TrashSink>,
     tasks: TaskQueue,
     notifier: UpdateNotifier,
+}
+
+/// Whether a login entry body is the update-check entry this app writes. The
+/// name and the `--fetch-updates` Exec both have to match, so a file that
+/// merely shares the path is never treated as ours.
+fn is_update_check_entry(body: &str) -> bool {
+    body.lines()
+        .any(|line| line == "Name=Gosh AppImage Manager update checks")
+        && exec_line(body).is_some_and(|exec| exec.contains("--fetch-updates"))
+}
+
+fn exec_line(body: &str) -> Option<&str> {
+    body.lines().find_map(|line| line.strip_prefix("Exec="))
 }
 
 impl AppController {
@@ -59,8 +75,8 @@ impl AppController {
             settings,
             registry,
             runner,
-            network,
-            processes,
+            network: Arc::from(network),
+            processes: Arc::from(processes),
             trash,
             tasks: TaskQueue::new(),
             notifier: UpdateNotifier::new(),
@@ -124,7 +140,11 @@ impl AppController {
     }
 
     pub fn update_service(&self) -> UpdateService<'_> {
-        UpdateService::new(&self.settings, &*self.network, &*self.processes)
+        UpdateService::new(
+            &self.settings,
+            Arc::clone(&self.network),
+            Arc::clone(&self.processes),
+        )
     }
 
     pub fn library(&self) -> AppImageLibrary<'_> {
@@ -154,8 +174,10 @@ impl AppController {
         cancel: &std::sync::atomic::AtomicBool,
         existing: Option<&str>,
     ) -> crate::types::InspectionResult {
+        // Every inspection takes the stored setting through the same gate.
+        let options = crate::inspector::gated_options(&self.settings, options);
         crate::inspector::AppImageInspector::new(&*self.runner)
-            .inspect(path, options, cancel, existing)
+            .inspect(path, &options, cancel, existing)
     }
 
     pub fn integrate(
@@ -189,7 +211,7 @@ impl AppController {
 
     /// Discover AppImages in the managed folder, plus external ones when the
     /// `manage_outside_folder` setting is on.
-    pub fn discover(&self) -> Vec<crate::library::DiscoveredApp> {
+    pub fn discover(&self) -> Result<Vec<crate::library::DiscoveredApp>, String> {
         AppImageLibrary::new(&self.settings).scan(&self.registry)
     }
 
@@ -359,8 +381,12 @@ impl AppController {
         &self,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> crate::updates_service::UpdateScan {
-        UpdateService::new(&self.settings, &*self.network, &*self.processes)
-            .list_updates_detailed(&self.registry, cancel)
+        UpdateService::new(
+            &self.settings,
+            Arc::clone(&self.network),
+            Arc::clone(&self.processes),
+        )
+        .list_updates_detailed(&self.registry, cancel)
     }
 
     pub fn apply_update(
@@ -369,12 +395,38 @@ impl AppController {
         force: bool,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> crate::types::IntegrateResult {
-        UpdateService::new(&self.settings, &*self.network, &*self.processes).apply(
-            &mut self.registry,
-            app,
-            force,
-            cancel,
+        self.apply_update_with_progress(app, force, cancel, &mut |_| {})
+    }
+
+    /// As `apply_update`, reporting the versions and each stage to `events`.
+    pub fn apply_update_with_progress(
+        &mut self,
+        app: &crate::types::InstalledApp,
+        force: bool,
+        cancel: &std::sync::atomic::AtomicBool,
+        events: &mut dyn FnMut(crate::types::ApplyEvent),
+    ) -> crate::types::IntegrateResult {
+        UpdateService::new(
+            &self.settings,
+            Arc::clone(&self.network),
+            Arc::clone(&self.processes),
         )
+        .apply_with_progress(&mut self.registry, app, force, cancel, events)
+    }
+
+    /// Check one app's update source without downloading or applying anything.
+    /// The installed file, its registry row and its version are not touched.
+    pub fn check_one_update(
+        &self,
+        app: &crate::types::InstalledApp,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> crate::updates_sources::UpdateCheckResult {
+        UpdateService::new(
+            &self.settings,
+            Arc::clone(&self.network),
+            Arc::clone(&self.processes),
+        )
+        .check(app, cancel)
     }
 
     pub fn set_update_source(
@@ -384,13 +436,12 @@ impl AppController {
         config: crate::updates_sources::Config,
         error: &mut String,
     ) -> bool {
-        UpdateService::new(&self.settings, &*self.network, &*self.processes).set_source(
-            &mut self.registry,
-            app,
-            manager,
-            config,
-            error,
+        UpdateService::new(
+            &self.settings,
+            Arc::clone(&self.network),
+            Arc::clone(&self.processes),
         )
+        .set_source(&mut self.registry, app, manager, config, error)
     }
 
     pub fn unset_update_source(
@@ -398,15 +449,20 @@ impl AppController {
         app: crate::types::InstalledApp,
         error: &mut String,
     ) -> bool {
-        UpdateService::new(&self.settings, &*self.network, &*self.processes).unset_source(
-            &mut self.registry,
-            app,
-            error,
+        UpdateService::new(
+            &self.settings,
+            Arc::clone(&self.network),
+            Arc::clone(&self.processes),
         )
+        .unset_source(&mut self.registry, app, error)
     }
 
-    /// Write or remove the session autostart entry for background checks.
-    /// Background checks notify only; they never download or apply.
+    /// Write or remove the login entry for background checks.
+    ///
+    /// Background checks notify only; they never download or apply. Adding the
+    /// entry needs "Check in the background" on, so a login check can never run
+    /// while the user has turned update checks off. Removing it is always
+    /// allowed.
     pub fn sync_autostart(&self, enabled: bool) -> Result<(), String> {
         let path = self.autostart_desktop_path();
         if !enabled {
@@ -415,6 +471,38 @@ impl AppController {
             }
             return Ok(());
         }
+        if !self.settings.background_update_checks() {
+            return Err("Turn on Check in the background before adding a login check.".to_string());
+        }
+        self.write_autostart_entry()
+    }
+
+    /// Bring a login entry this app wrote in line with the background-check
+    /// setting. Called at startup, so an entry from an earlier build cannot run
+    /// an unwanted check.
+    ///
+    /// Background off: the entry is removed. Background on: the entry is
+    /// rewritten when its Exec line lacks `--background`. A file that is not
+    /// one of ours is never touched.
+    pub fn reconcile_autostart(&self) -> Result<(), String> {
+        let path = self.autostart_desktop_path();
+        let Ok(existing) = fs::read_to_string(&path) else {
+            return Ok(());
+        };
+        if !is_update_check_entry(&existing) {
+            return Ok(());
+        }
+        if !self.settings.background_update_checks() {
+            return fs::remove_file(&path).map_err(|e| format!("Cannot remove autostart: {e}"));
+        }
+        if exec_line(&existing).is_some_and(|exec| exec.contains("--background")) {
+            return Ok(());
+        }
+        self.write_autostart_entry()
+    }
+
+    fn write_autostart_entry(&self) -> Result<(), String> {
+        let path = self.autostart_desktop_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("Cannot create autostart dir: {e}"))?;
         }
@@ -424,16 +512,21 @@ impl AppController {
 
     /// Build the autostart entry body without writing it anywhere.
     ///
+    /// The Exec line runs `--fetch-updates --background`: the login check does
+    /// nothing unless "Check in the background" is still on when it starts.
     /// Kept separate so the diagnostic probe can verify the Exec line without
     /// installing the entry or changing the user's settings.
     pub fn render_autostart_entry(&self) -> Result<String, String> {
         let exec = if crate::process::in_flatpak() {
-            "flatpak run com.goshapps.AppImageManager --fetch-updates".to_string()
+            "flatpak run com.goshapps.AppImageManager --fetch-updates --background".to_string()
         } else {
             let exe = std::env::current_exe()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| "gosh-appimage-manager".to_string());
-            format!("{} --fetch-updates", desktop::escape_exec_arg(&exe))
+            format!(
+                "{} --fetch-updates --background",
+                desktop::escape_exec_arg(&exe)
+            )
         };
         Ok(format!(
             "[Desktop Entry]\nType=Application\nName=Gosh AppImage Manager update checks\nExec={exec}\nIcon=com.goshapps.AppImageManager\nTerminal=false\nCategories=Utility;\nX-GNOME-Autostart-enabled=true\n"

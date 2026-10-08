@@ -335,6 +335,43 @@ fn history_bound_never_drops_a_running_task() {
     );
 }
 
+/// D-04: a removal task must record whether it deletes permanently, so the
+/// Tasks page can say "Deleted" rather than "Moved ... to the Trash".
+#[test]
+fn removal_task_records_whether_it_is_permanent() {
+    use goshaim_core::tasks::TaskQueue;
+    use goshaim_core::types::{TaskItem, TaskKind};
+
+    let mut queue = TaskQueue::new();
+    let trashed = queue.begin(TaskKind::Remove, "Removing", "Old Notes", false);
+    let deleted = queue.begin(TaskKind::Remove, "Removing", "Quill Notes", false);
+    queue.set_permanent(&deleted, true);
+    queue.finish(&trashed, Ok(()), false);
+    queue.finish(&deleted, Ok(()), false);
+    assert!(
+        !queue.get(&trashed).unwrap().permanent,
+        "a Trash removal must record permanent=false"
+    );
+    assert!(
+        queue.get(&deleted).unwrap().permanent,
+        "a permanent removal must record permanent=true"
+    );
+    let check = queue.begin(TaskKind::CheckUpdate, "Checking for updates", "", false);
+    assert!(
+        !queue.get(&check).unwrap().permanent,
+        "a task that is not a removal is never permanent"
+    );
+
+    // A record written before the field existed still reads, as not permanent.
+    let mut stored = serde_json::to_value(queue.get(&deleted).unwrap()).unwrap();
+    stored.as_object_mut().unwrap().remove("permanent");
+    let old: TaskItem = serde_json::from_value(stored).expect("an old record must still read");
+    assert!(
+        !old.permanent,
+        "a record without the field defaults to not permanent"
+    );
+}
+
 /// Audit finding C-9. The installed desktop entry used `%U`, which hands the
 /// application URLs, while the GUI treated its positional arguments as
 /// filesystem paths -- so opening an AppImage from a file manager produced

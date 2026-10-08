@@ -18,6 +18,7 @@ fn integrate_one(h: &Harness) -> (goshaim_core::controller::AppController, Strin
             replace_uuid: String::new(),
             copy_mode: CopyMode::Copy,
             assume_yes: true,
+            confirm_unsafe: false,
         },
         &AtomicBool::new(false),
     );
@@ -157,4 +158,22 @@ fn refresh_metadata_reports_a_missing_or_invalid_file() {
     assert!(c
         .refresh_metadata("no-such-uuid", &AtomicBool::new(false))
         .is_err());
+}
+
+/// Saved arguments are in the registry on disk, so a restarted controller shows
+/// them again, not only the session that saved them.
+#[test]
+fn saved_arguments_survive_a_restart() {
+    let h = Harness::new();
+    let (mut c, uuid) = integrate_one(&h);
+    c.set_arguments_and_environment(&uuid, vec!["--restart-check".into()], vec![])
+        .expect("saving valid arguments should succeed");
+    drop(c);
+
+    let restarted = h.controller();
+    let app = restarted
+        .registry()
+        .by_uuid(&uuid)
+        .expect("still registered");
+    assert_eq!(app.arguments, vec!["--restart-check".to_string()]);
 }
