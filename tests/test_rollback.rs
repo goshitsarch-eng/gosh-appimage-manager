@@ -64,6 +64,7 @@ fn integrate_failing_at(point: IntegrateFailPoint) -> (Fixture, IntegrateResult,
             replace_uuid: String::new(),
             copy_mode: CopyMode::Copy,
             assume_yes: true,
+            confirm_unsafe: false,
         },
         &AtomicBool::new(false),
     );
@@ -134,6 +135,7 @@ fn failed_replace_restores_the_previous_installation() {
             replace_uuid: String::new(),
             copy_mode: CopyMode::Copy,
             assume_yes: true,
+            confirm_unsafe: false,
         },
         &cancel,
     );
@@ -163,6 +165,7 @@ fn failed_replace_restores_the_previous_installation() {
             replace_uuid: first.app.uuid.clone(),
             copy_mode: CopyMode::Copy,
             assume_yes: true,
+            confirm_unsafe: false,
         },
         &cancel,
     );

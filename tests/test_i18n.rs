@@ -126,39 +126,3 @@ fn english_passes_through_untouched() {
     assert!(catalog.is_empty());
     assert!(!catalog.is_rtl());
 }
-
-/// Every message id used in the interface must be unique to one English
-/// string: two different strings sharing an id would make one untranslatable.
-#[test]
-fn message_ids_map_to_exactly_one_source_string() {
-    use std::collections::HashMap;
-    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/gui.rs"))
-        .expect("gui.rs should be readable");
-    let mut seen: HashMap<String, String> = HashMap::new();
-    let mut count = 0;
-    // t!("id", "English")
-    for capture in source.split("t!(\"").skip(1) {
-        let Some((id, rest)) = capture.split_once("\",") else {
-            continue;
-        };
-        let rest = rest.trim_start();
-        let Some(text) = rest.strip_prefix('"') else {
-            continue;
-        };
-        let Some((english, _)) = text.split_once("\")") else {
-            continue;
-        };
-        count += 1;
-        if let Some(previous) = seen.get(id) {
-            assert_eq!(
-                previous, english,
-                "message id {id} is used for two different strings"
-            );
-        }
-        seen.insert(id.to_string(), english.to_string());
-    }
-    assert!(
-        count >= 40,
-        "expected the interface to be routed through the catalog, found {count} call sites"
-    );
-}

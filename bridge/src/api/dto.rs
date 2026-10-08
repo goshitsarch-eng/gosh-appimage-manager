@@ -7,6 +7,8 @@ use goshaim_core::types::{
     RemovalResult, TaskItem, TaskKind, TaskState, UpdateOffer,
 };
 
+use crate::api::common::is_timeout;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyValueDto {
     pub key: String,
@@ -56,6 +58,12 @@ pub struct AppDto {
     pub mime_types: Vec<String>,
     pub startup_wm_class: String,
     pub action_names: Vec<String>,
+    /// Unix seconds of the first integration or adoption. Zero when the core
+    /// never recorded it (an entry from before the column existed).
+    pub integrated_at: i64,
+    /// The folder the AppImage was integrated from. Empty when the core never
+    /// recorded it, as for an adoption or an entry from before the column.
+    pub integrated_folder: String,
 }
 
 impl AppDto {
@@ -113,6 +121,8 @@ impl AppDto {
                 .iter()
                 .map(|action| action.name.clone())
                 .collect(),
+            integrated_at: app.integrated_at,
+            integrated_folder: app.integrated_folder.clone(),
         }
     }
 }
@@ -155,6 +165,8 @@ pub struct InspectDto {
     pub planned_target: String,
     pub extractor_used: String,
     pub used_unsafe_fallback: bool,
+    /// The fallback is needed for this file and was not confirmed. Nothing was run.
+    pub fallback_pending: bool,
 }
 
 impl InspectDto {
@@ -199,6 +211,7 @@ impl InspectDto {
             planned_target: result.planned_target.clone(),
             extractor_used: result.extractor_used.clone(),
             used_unsafe_fallback: result.extraction_used_unsafe_fallback,
+            fallback_pending: result.fallback_pending,
         }
     }
 }
@@ -219,6 +232,8 @@ pub struct OutcomeDto {
     /// and empty when no single installation is implicated.
     pub conflict_uuid: String,
     pub conflict_name: String,
+    /// The file needs the unsafe fallback, not yet confirmed. Nothing was installed.
+    pub fallback_pending: bool,
 }
 
 impl OutcomeDto {
@@ -231,6 +246,7 @@ impl OutcomeDto {
         };
         outcome.rolled_back = result.rolled_back.clone();
         outcome.source_removed = result.source_removed;
+        outcome.fallback_pending = result.fallback_pending;
         outcome
     }
 
@@ -251,6 +267,7 @@ impl OutcomeDto {
             source_removed: false,
             conflict_uuid: String::new(),
             conflict_name: String::new(),
+            fallback_pending: false,
         }
     }
 }
@@ -319,6 +336,9 @@ pub struct UpdateFailureDto {
     pub name: String,
     pub manager: String,
     pub error: String,
+    /// The source did not answer in time. The status is unknown, not "up to
+    /// date", and the Updates page says so.
+    pub timed_out: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -328,6 +348,54 @@ pub struct UpdateScanDto {
     pub skipped: i64,
     pub checked: i64,
     pub cancelled: bool,
+}
+
+/// The result of "Check for update" on one app. It reports what the source
+/// offers. It never downloads or applies anything.
+#[derive(Debug, Clone)]
+pub struct UpdateCheckDto {
+    pub uuid: String,
+    pub current_version: String,
+    /// The newer version the source offers, or empty when there is none.
+    pub available_version: String,
+    pub download_size: i64,
+    pub reduced_verification: bool,
+    /// Why the check did not complete. Empty when it did.
+    pub error: String,
+    pub timed_out: bool,
+}
+
+impl UpdateCheckDto {
+    pub(crate) fn from_core(
+        app: &goshaim_core::types::InstalledApp,
+        checked: &goshaim_core::updates_sources::UpdateCheckResult,
+    ) -> Self {
+        let offered = checked.ok
+            && checked.available
+            && !checked.url.is_empty()
+            && !checked.version.is_empty()
+            && checked.version != app.version;
+        let error = if checked.ok {
+            String::new()
+        } else if checked.error.is_empty() {
+            "Update check failed".to_string()
+        } else {
+            checked.error.clone()
+        };
+        Self {
+            uuid: app.uuid.clone(),
+            current_version: app.version.clone(),
+            available_version: if offered {
+                checked.version.clone()
+            } else {
+                String::new()
+            },
+            download_size: if offered { checked.size } else { 0 },
+            reduced_verification: offered && checked.reduced_verification,
+            timed_out: !checked.ok && is_timeout(&error),
+            error,
+        }
+    }
 }
 
 /// The outcome of "update all": applied, failed and skipped apps by name.
@@ -372,6 +440,22 @@ pub struct TaskDto {
     pub status_text: String,
     pub error: String,
     pub retryable: bool,
+    /// Unix seconds when the task began, and when it ended (0 while running).
+    pub started_at: i64,
+    pub finished_at: i64,
+    /// The versions the task moves between. An integration sets only
+    /// `to_version`; a removal sets only `from_version`. Empty when unknown.
+    pub from_version: String,
+    pub to_version: String,
+    /// The update stage (1 Download, 2 Verify, 3 Swap in), or 0 when none.
+    pub phase_index: i32,
+    pub phase: String,
+    /// Bytes moved in the current stage, and the total (0 when unknown).
+    pub bytes_done: i64,
+    pub bytes_total: i64,
+    /// True for a removal that deleted the AppImage permanently. False for a
+    /// Trash removal and for every other task.
+    pub permanent: bool,
 }
 
 impl TaskDto {
@@ -401,6 +485,15 @@ impl TaskDto {
             status_text: item.status_text.clone(),
             error: item.error.clone(),
             retryable: item.retryable,
+            started_at: item.started_at,
+            finished_at: item.finished_at,
+            from_version: item.from_version.clone(),
+            to_version: item.to_version.clone(),
+            phase_index: item.phase_index,
+            phase: item.phase.clone(),
+            bytes_done: item.bytes_done as i64,
+            bytes_total: item.bytes_total as i64,
+            permanent: item.permanent,
         }
     }
 }
@@ -408,4 +501,28 @@ impl TaskDto {
 /// Lowercase hex, the form the Details and Inspect pages display.
 pub(crate) fn hex_string(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod pending_tests {
+    use super::*;
+    use goshaim_core::types::{InspectionResult, IntegrateResult};
+
+    #[test]
+    fn the_pending_flag_reaches_the_inspection_dto() {
+        let result = InspectionResult {
+            fallback_pending: true,
+            ..Default::default()
+        };
+        assert!(InspectDto::from_core(&result, None).fallback_pending);
+    }
+
+    #[test]
+    fn the_pending_flag_reaches_the_integration_outcome() {
+        let result = IntegrateResult {
+            fallback_pending: true,
+            ..Default::default()
+        };
+        assert!(OutcomeDto::from_integrate(&result).fallback_pending);
+    }
 }

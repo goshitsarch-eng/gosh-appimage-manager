@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use goshaim_core::controller::AppController;
 use goshaim_core::tasks::TaskQueue;
-use goshaim_core::types::TaskKind;
+use goshaim_core::types::{TaskKind, UpdatePhase};
 
 /// Result type for every bridge function.
 pub type Res<T> = Result<T, CoreError>;
@@ -27,6 +27,9 @@ pub enum ErrorKind {
     Permission,
     CorruptData,
     Network,
+    /// A network operation ran out of time. Kept apart from `Network` because
+    /// the Updates page says the status is unknown rather than failed.
+    Timeout,
     Process,
     Failure,
     Internal,
@@ -72,10 +75,9 @@ pub(crate) fn classify(message: String) -> CoreError {
         || lower.contains("permission denied")
     {
         ErrorKind::Permission
-    } else if lower.contains("dns resolution")
-        || lower.contains("network")
-        || lower.contains("timed out")
-    {
+    } else if lower.contains("timed out") {
+        ErrorKind::Timeout
+    } else if lower.contains("dns resolution") || lower.contains("network") {
         ErrorKind::Network
     } else if lower.contains("not valid json") || lower.contains("corrupt") {
         ErrorKind::CorruptData
@@ -96,6 +98,11 @@ pub(crate) fn classify(message: String) -> CoreError {
         message,
         details: String::new(),
     }
+}
+
+/// Whether a core failure message is a timeout. See `classify`.
+pub(crate) fn is_timeout(message: &str) -> bool {
+    classify(message.to_string()).kind == ErrorKind::Timeout
 }
 
 /// Run a bridge body, turning a Rust panic into a typed `internal` error so it
@@ -199,6 +206,35 @@ impl OperationGuard {
         }
     }
 
+    /// Name the app this operation concerns, once it is known.
+    pub(crate) fn named(&self, name: &str) {
+        if let Some(task_id) = task_id_of(&self.op_id) {
+            with_tasks(|queue| queue.set_target(&task_id, name));
+        }
+    }
+
+    /// Record the versions this operation moves between.
+    pub(crate) fn versions(&self, from_version: &str, to_version: &str) {
+        if let Some(task_id) = task_id_of(&self.op_id) {
+            with_tasks(|queue| queue.set_versions(&task_id, from_version, to_version));
+        }
+    }
+
+    /// Record whether this removal deletes permanently (true) or moves the app
+    /// to the Trash (false).
+    pub(crate) fn set_permanent(&self, permanent: bool) {
+        if let Some(task_id) = task_id_of(&self.op_id) {
+            with_tasks(|queue| queue.set_permanent(&task_id, permanent));
+        }
+    }
+
+    /// Record the update stage and the bytes moved in it.
+    pub(crate) fn phase(&self, phase: UpdatePhase, done: u64, total: u64) {
+        if let Some(task_id) = task_id_of(&self.op_id) {
+            with_tasks(|queue| queue.set_phase(&task_id, phase, done, total));
+        }
+    }
+
     /// Finish the operation with its outcome.
     pub(crate) fn finish(mut self, outcome: Result<(), String>) {
         self.complete(outcome);
@@ -218,7 +254,12 @@ impl OperationGuard {
 
 impl Drop for OperationGuard {
     fn drop(&mut self) {
-        self.complete(Err("The operation stopped unexpectedly.".to_string()));
+        // This runs while a panic may be unwinding through the operation. A
+        // panic that escapes a destructor during an unwind aborts the process,
+        // so nothing in this path may leave it.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.complete(Err("The operation stopped unexpectedly.".to_string()));
+        }));
     }
 }
 
@@ -228,11 +269,20 @@ fn task_id_of(op_id: &str) -> Option<String> {
         .map(|operation| operation.task_id.clone())
 }
 
-/// Ask a running operation to stop. Returns false when it is not running.
-pub(crate) fn cancel_operation(op_id: &str) -> bool {
+/// Ask a running operation to stop. `id` is either the operation's own id (the
+/// status bar names an operation that way) or its Tasks-page task id (the Tasks
+/// page names it that way). Returns false when no running operation has that id.
+pub(crate) fn cancel_operation(id: &str) -> bool {
     let task_id = {
         let registry = operations();
-        match registry.get(op_id) {
+        // The op id is the registry key, and it is tried first, so an op id that
+        // happens to look like a task id still names its own operation. A task
+        // id is matched against each operation's task id, the reverse of
+        // `task_id_of`.
+        let operation = registry
+            .get(id)
+            .or_else(|| registry.values().find(|operation| operation.task_id == id));
+        match operation {
             Some(operation) => {
                 operation.cancel.store(true, Ordering::Relaxed);
                 operation.task_id.clone()
@@ -255,5 +305,70 @@ mod guard_tests {
         assert!(matches!(error.kind, ErrorKind::Internal));
         assert!(error.details.contains("deliberate panic in a test"));
         assert_eq!(guard(|| Ok(7)).expect("a clean call returns its value"), 7);
+    }
+
+    /// Audit R6-01: a panic while an operation is registered must not stop the
+    /// process or the registry. The operation is recorded as failed, dropped
+    /// from the registry, and later operations still run.
+    #[test]
+    fn a_panic_inside_an_operation_leaves_the_registry_usable() {
+        let outcome = std::panic::catch_unwind(|| {
+            let _op = OperationGuard::begin(
+                "r6-01-panicking",
+                TaskKind::Inspect,
+                "Inspecting",
+                "panicking.AppImage",
+            );
+            panic!("deliberate panic inside an operation");
+        });
+        assert!(outcome.is_err(), "the panic reaches the caller");
+        assert!(
+            !cancel_operation("r6-01-panicking"),
+            "the dropped operation is no longer registered"
+        );
+        let recorded = crate::api::system::list_tasks()
+            .into_iter()
+            .find(|task| task.target == "panicking.AppImage")
+            .expect("the task is still listed");
+        assert!(
+            matches!(recorded.state, crate::api::dto::TaskStateDto::Failed),
+            "the operation is recorded as failed, not left running"
+        );
+
+        let op = OperationGuard::begin(
+            "r6-01-after",
+            TaskKind::Inspect,
+            "Inspecting",
+            "after.AppImage",
+        );
+        assert!(
+            cancel_operation("r6-01-after"),
+            "a later operation registers and can be cancelled"
+        );
+        op.finish(Ok(()));
+    }
+
+    /// Audit R6-01: a panic while the task queue is locked poisons its lock. The
+    /// next operation must still start and finish, with no abort.
+    #[test]
+    fn a_panic_while_the_task_queue_is_locked_does_not_stop_later_operations() {
+        let _ = std::panic::catch_unwind(|| {
+            with_tasks(|_queue| -> () { panic!("deliberate panic while the task queue is locked") })
+        });
+        let op = OperationGuard::begin(
+            "r6-01-poisoned",
+            TaskKind::Inspect,
+            "Inspecting",
+            "poisoned.AppImage",
+        );
+        op.finish(Ok(()));
+        let recorded = crate::api::system::list_tasks()
+            .into_iter()
+            .find(|task| task.target == "poisoned.AppImage")
+            .expect("the later operation is listed");
+        assert!(matches!(
+            recorded.state,
+            crate::api::dto::TaskStateDto::Succeeded
+        ));
     }
 }

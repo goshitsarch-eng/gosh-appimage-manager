@@ -5,8 +5,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
+use crate::cancel::{CancellableNetwork, CancellableProcesses, CANCELLED};
 use crate::desktop;
 use crate::elf;
 use crate::inspector::parse_upd_info;
@@ -17,7 +19,9 @@ use crate::registry::ManagedRegistry;
 use crate::removal::canonical_existing;
 use crate::safe_fs;
 use crate::settings::SettingsStore;
-use crate::types::{InstalledApp, IntegrateResult, UpdateFailPoint, UpdateOffer};
+use crate::types::{
+    ApplyEvent, InstalledApp, IntegrateResult, UpdateFailPoint, UpdateOffer, UpdatePhase,
+};
 use crate::updates_sources::{Config, UpdateCheckResult, UpdateSourceFactory};
 
 /// One app whose update check could not complete.
@@ -79,16 +83,16 @@ pub fn parse_expected_sha256(digest: &str) -> Option<String> {
 
 pub struct UpdateService<'a> {
     settings: &'a SettingsStore,
-    network: &'a dyn NetworkClient,
-    processes: &'a dyn ProcessTable,
+    network: Arc<dyn NetworkClient>,
+    processes: Arc<dyn ProcessTable>,
     fail_point: UpdateFailPoint,
 }
 
 impl<'a> UpdateService<'a> {
     pub fn new(
         settings: &'a SettingsStore,
-        network: &'a dyn NetworkClient,
-        processes: &'a dyn ProcessTable,
+        network: Arc<dyn NetworkClient>,
+        processes: Arc<dyn ProcessTable>,
     ) -> Self {
         Self {
             settings,
@@ -127,8 +131,9 @@ impl<'a> UpdateService<'a> {
         Ok((source, config))
     }
 
-    /// Metadata-only check (never downloads the AppImage itself).
-    pub fn check(&self, app: &InstalledApp, _cancel: &AtomicBool) -> UpdateCheckResult {
+    /// Metadata-only check (never downloads the AppImage itself). A source that
+    /// stops answering does not hold up a cancelled check.
+    pub fn check(&self, app: &InstalledApp, cancel: &AtomicBool) -> UpdateCheckResult {
         let (source, config) = match self.effective_source(app) {
             Ok(pair) => pair,
             Err(error) => {
@@ -138,7 +143,8 @@ impl<'a> UpdateService<'a> {
                 }
             }
         };
-        let mut result = source.check(app, &config, self.network);
+        let network = CancellableNetwork::new(Arc::clone(&self.network), cancel);
+        let mut result = source.check(app, &config, &network);
         if result.manager.is_empty() {
             result.manager = source.name().to_string();
         }
@@ -176,8 +182,9 @@ impl<'a> UpdateService<'a> {
         cancel: &AtomicBool,
     ) -> UpdateScan {
         let mut scan = UpdateScan::default();
+        let processes = CancellableProcesses::new(Arc::clone(&self.processes), cancel);
         for app in registry.apps() {
-            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            if cancel.load(Ordering::Relaxed) {
                 scan.cancelled = true;
                 break;
             }
@@ -187,6 +194,11 @@ impl<'a> UpdateService<'a> {
             }
             scan.checked += 1;
             let checked = self.check(&app, cancel);
+            if cancel.load(Ordering::Relaxed) {
+                // A check cut short by the cancel is not a failed check.
+                scan.cancelled = true;
+                break;
+            }
             if !checked.ok {
                 scan.failures.push(UpdateCheckFailure {
                     uuid: app.uuid.clone(),
@@ -213,8 +225,12 @@ impl<'a> UpdateService<'a> {
             let running = {
                 let canon = canonical_existing(&app.managed_path)
                     .unwrap_or_else(|| PathBuf::from(&app.managed_path));
-                self.processes.is_running(&canon.to_string_lossy())
+                processes.is_running(&canon.to_string_lossy())
             };
+            if cancel.load(Ordering::Relaxed) {
+                scan.cancelled = true;
+                break;
+            }
             scan.offers.push(UpdateOffer {
                 uuid: app.uuid.clone(),
                 name: app.name.clone(),
@@ -241,12 +257,29 @@ impl<'a> UpdateService<'a> {
         force: bool,
         cancel: &AtomicBool,
     ) -> IntegrateResult {
+        self.apply_with_progress(registry, app, force, cancel, &mut |_| {})
+    }
+
+    /// As `apply`, and report the versions once the source is checked and each
+    /// stage as it starts (download bytes included) to `events`.
+    pub fn apply_with_progress(
+        &self,
+        registry: &mut ManagedRegistry,
+        app: &InstalledApp,
+        force: bool,
+        cancel: &AtomicBool,
+        events: &mut dyn FnMut(ApplyEvent),
+    ) -> IntegrateResult {
         let mut result = IntegrateResult::default();
         if !app.owned {
             result.error = "Not an owned managed AppImage".to_string();
             return result;
         }
         let checked = self.check(app, cancel);
+        if cancel.load(Ordering::Relaxed) {
+            result.error = CANCELLED.to_string();
+            return result;
+        }
         if !checked.ok {
             result.error = checked.error;
             return result;
@@ -269,7 +302,12 @@ impl<'a> UpdateService<'a> {
         }
         let canon = canonical_existing(&app.managed_path)
             .unwrap_or_else(|| PathBuf::from(&app.managed_path));
-        let running = self.processes.is_running(&canon.to_string_lossy());
+        let processes = CancellableProcesses::new(Arc::clone(&self.processes), cancel);
+        let running = processes.is_running(&canon.to_string_lossy());
+        if cancel.load(Ordering::Relaxed) {
+            result.error = CANCELLED.to_string();
+            return result;
+        }
         if running && !force {
             result.error = "Application is running; use --force to override".to_string();
             return result;
@@ -282,15 +320,29 @@ impl<'a> UpdateService<'a> {
         let live = PathBuf::from(&app.managed_path);
         let staging = safe_fs::sibling_temp(&live, ".gosh-upd-");
         let max_bytes = self.settings.max_appimage_bytes() as u64;
+        let expected = checked.size.max(0) as u64;
+        events(ApplyEvent::Planned {
+            from_version: app.version.clone(),
+            to_version: checked.version.clone(),
+            download_size: expected,
+        });
         // Stream to the staging file rather than buffering the whole AppImage:
         // these are routinely hundreds of megabytes and the bound defaults to
         // 8 GiB. This is also the first point cancellation can take effect.
-        if let Err(error) = self.network.download_to_file(
+        let network = CancellableNetwork::new(Arc::clone(&self.network), cancel);
+        if let Err(error) = network.download_to_file(
             &checked.url,
             &staging,
             max_bytes,
             cancel,
             Local::from_config(&app.update_config),
+            &mut |done, total| {
+                events(ApplyEvent::Phase {
+                    phase: UpdatePhase::Download,
+                    done,
+                    total: if total > 0 { total } else { expected },
+                })
+            },
         ) {
             let _ = fs::remove_file(&staging);
             result.error = error;
@@ -310,6 +362,11 @@ impl<'a> UpdateService<'a> {
             result.error = "Injected failure at AfterDownload".to_string();
             return result;
         }
+        events(ApplyEvent::Phase {
+            phase: UpdatePhase::Verify,
+            done: 0,
+            total: 0,
+        });
         // Validate the staged file as an AppImage (unsafe fallback never).
         let staged_info = elf::parse_file(&staging, limits::ELF_HEADER_READ_BYTES);
         if !staged_info.error.is_empty()
@@ -374,6 +431,14 @@ impl<'a> UpdateService<'a> {
             );
             return result;
         }
+        // Everything from here to the swap is on this thread, after the
+        // download has returned. Nothing is installed once the operation is
+        // cancelled, so the check comes before the rollback copy is made.
+        if cancel.load(Ordering::Relaxed) {
+            let _ = fs::remove_file(&staging);
+            result.error = CANCELLED.to_string();
+            return result;
+        }
         // Rollback copy of the live file.
         let backup = safe_fs::sibling_temp(&live, ".gosh-upd-bak-");
         if live.exists() && safe_fs::backup_copy(&live, &backup).is_err() {
@@ -387,6 +452,20 @@ impl<'a> UpdateService<'a> {
             result.error = "Injected failure at BackupCreate".to_string();
             return result;
         }
+        events(ApplyEvent::Phase {
+            phase: UpdatePhase::SwapIn,
+            done: 0,
+            total: 0,
+        });
+        // The swap replaces the installed file, so it is the last point a cancel
+        // can stop. A cancel that arrived by now removes the staged file and the
+        // rollback copy, and leaves the installed file as it was.
+        if cancel.load(Ordering::Relaxed) {
+            let _ = fs::remove_file(&staging);
+            let _ = fs::remove_file(&backup);
+            result.error = CANCELLED.to_string();
+            return result;
+        }
         if safe_fs::rename_over(&staging, &live).is_err() {
             let _ = fs::rename(&backup, &live);
             let _ = fs::remove_file(&staging);
@@ -398,7 +477,10 @@ impl<'a> UpdateService<'a> {
             result.error = "Injected failure at AfterReplace".to_string();
             return result;
         }
-        // Refresh desktop entry (same path, new version marker) + registry.
+        // The swap is committed. The desktop entry and the registry are then
+        // brought in line with the new file, or the swap is rolled back. A cancel
+        // does not stop either, because stopping midway would leave them apart.
+        // Rollback renames are never skipped for the same reason.
         let snapshot = registry.snapshot();
         let mut updated = app.clone();
         updated.version = checked.version.clone();
@@ -473,7 +555,8 @@ impl<'a> UpdateService<'a> {
         } else {
             config
         };
-        if let Err(e) = source.validate_config(&config) {
+        let config = source.normalize_config(config, &app.embedded_update);
+        if let Err(e) = source.validate_for_app(&app.managed_path, &config) {
             *error = e;
             return false;
         }

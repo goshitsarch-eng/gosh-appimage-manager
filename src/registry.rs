@@ -42,8 +42,41 @@ CREATE TABLE IF NOT EXISTS apps(
     adopted INTEGER NOT NULL DEFAULT 0,
     website TEXT NOT NULL DEFAULT '',
     terminal INTEGER NOT NULL DEFAULT 0,
-    actions TEXT NOT NULL DEFAULT '[]'
+    actions TEXT NOT NULL DEFAULT '[]',
+    integrated_at INTEGER NOT NULL DEFAULT 0,
+    integrated_folder TEXT NOT NULL DEFAULT ''
 );";
+
+/// Columns added after the first registry release. `CREATE TABLE IF NOT
+/// EXISTS` does not add them to a table that already exists, so each is
+/// checked and added here. Rows keep their data and take the default.
+const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
+    ("apps", "integrated_at", "INTEGER NOT NULL DEFAULT 0"),
+    ("apps", "integrated_folder", "TEXT NOT NULL DEFAULT ''"),
+];
+
+/// Add every column in `ADDED_COLUMNS` that the table lacks. Running it again
+/// on a migrated registry changes nothing.
+fn migrate_columns(conn: &Connection) -> Result<(), String> {
+    for (table, column, definition) in ADDED_COLUMNS {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|e| format!("Cannot migrate registry: {e}"))?;
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("Cannot migrate registry: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("Cannot migrate registry: {e}"))?;
+        drop(stmt);
+        if !names.iter().any(|name| name == column) {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN {column} {definition};"
+            ))
+            .map_err(|e| format!("Cannot migrate registry: {e}"))?;
+        }
+    }
+    Ok(())
+}
 
 fn app_type_to_int(t: AppImageType) -> i64 {
     match t {
@@ -205,8 +238,8 @@ const INSERT_SQL: &str = "INSERT OR REPLACE INTO apps(
     app_type, architecture, size, arguments, default_arguments, environment, update_manager,
     update_config, embedded_update, last_update_check, available_version, available_url,
     available_size, update_available, digest, reduced_verification, external_folder, owned,
-    adopted, website, terminal, actions)
- VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+    adopted, website, terminal, actions, integrated_at, integrated_folder)
+ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
 fn bind_app(stmt: &mut rusqlite::Statement<'_>, app: &InstalledApp) -> Result<(), String> {
     stmt.execute(params![
@@ -241,6 +274,8 @@ fn bind_app(stmt: &mut rusqlite::Statement<'_>, app: &InstalledApp) -> Result<()
         app.website,
         i64::from(app.terminal),
         serde_json::to_string(&app.actions).unwrap_or_else(|_| "[]".into()),
+        app.integrated_at,
+        app.integrated_folder,
     ])
     .map(|_| ())
     .map_err(|e| format!("Cannot save registry: {e}"))
@@ -357,6 +392,7 @@ impl ManagedRegistry {
             Self::restrict_mode(&self.path);
             conn.execute_batch(SCHEMA)
                 .map_err(|e| format!("Cannot migrate registry: {e}"))?;
+            migrate_columns(&conn)?;
             conn.execute(
                 "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
                 params![limits::REGISTRY_SCHEMA_VERSION.to_string()],
@@ -382,7 +418,8 @@ impl ManagedRegistry {
                         default_arguments, environment, update_manager, update_config,
                         embedded_update, last_update_check, available_version, available_url,
                         available_size, update_available, digest, reduced_verification,
-                        external_folder, owned, adopted, website, terminal, actions
+                        external_folder, owned, adopted, website, terminal, actions,
+                        integrated_at, integrated_folder
                  FROM apps ORDER BY rowid",
             )
             .map_err(|e| format!("Cannot read registry: {e}"))?;
@@ -420,6 +457,8 @@ impl ManagedRegistry {
                     website: row.get(28)?,
                     terminal: row.get::<_, i64>(29)? != 0,
                     actions: parse_actions(&row.get::<_, String>(30)?),
+                    integrated_at: row.get(31)?,
+                    integrated_folder: row.get(32)?,
                     ..Default::default()
                 })
             })
@@ -622,6 +661,7 @@ impl ManagedRegistry {
         app.managed_path = managed_path;
         app.owned = true;
         app.adopted = true;
+        app.integrated_at = crate::tasks::now_unix();
         app.external_folder = external;
         self.upsert(app.clone())?;
         Ok(app)

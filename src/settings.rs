@@ -67,11 +67,48 @@ impl Dirs {
     }
 }
 
+/// Whether `folder` may be the managed folder: an absolute path to a folder that
+/// exists. The reason is returned when it may not, so the caller can show it.
+pub fn validate_managed_folder(folder: &Path) -> Result<(), String> {
+    const RULE: &str = "The managed folder must be an existing directory";
+    if !folder.is_absolute() {
+        return Err(format!(
+            "{RULE}: {} is not an absolute path.",
+            folder.display()
+        ));
+    }
+    match fs::metadata(folder) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(format!("{RULE}: {} is not a folder.", folder.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(format!("{RULE}: {} does not exist.", folder.display()))
+        }
+        Err(e) => Err(format!(
+            "{RULE}: {} cannot be read ({e}).",
+            folder.display()
+        )),
+    }
+}
+
 fn env_path(key: &str) -> Option<PathBuf> {
     std::env::var_os(key)
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
 }
+
+/// Settings keys this version reads and writes. Any other key in the file belongs
+/// to someone else (a newer version, or the user's own edits) and is kept as it is.
+const KNOWN_KEYS: &[&str] = &[
+    "ManagedFolder",
+    "MoveSource",
+    "ManageOutsideFolder",
+    "TerminalOmitSuffix",
+    "BackgroundUpdateChecks",
+    "UnsafeExtractionFallback",
+    "Appearance",
+    "DebugLogging",
+    "MaxAppImageBytes",
+];
 
 /// Persistent user settings (mirrors SettingsStore keys exactly).
 #[derive(Debug, Clone)]
@@ -91,6 +128,14 @@ pub struct SettingsStore {
     load_error: Option<String>,
     /// True once an existing file has been read successfully.
     loaded: bool,
+    /// The file exists but could not be read. Saving would replace bytes this
+    /// process never saw, so every save is refused.
+    unreadable: bool,
+    /// The file exists but is corrupt. Its bytes move to a backup name before the
+    /// first save writes a new file in its place.
+    corrupt: bool,
+    /// Keys this version does not know, kept so a save does not drop them.
+    extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl SettingsStore {
@@ -110,6 +155,9 @@ impl SettingsStore {
             max_appimage_bytes: limits::DEFAULT_MAX_APPIMAGE_BYTES,
             load_error: None,
             loaded: false,
+            unreadable: false,
+            corrupt: false,
+            extra: BTreeMap::new(),
         };
         store.managed_folder = store.dirs.default_managed_folder();
         store.load();
@@ -130,7 +178,10 @@ impl SettingsStore {
         &self.managed_folder
     }
 
+    /// Choose the managed folder. It must pass `validate_managed_folder`; a
+    /// refused folder is neither kept nor saved.
     pub fn set_managed_folder(&mut self, folder: PathBuf) -> Result<(), String> {
+        validate_managed_folder(&folder)?;
         self.managed_folder = folder;
         self.save()
     }
@@ -171,8 +222,9 @@ impl SettingsStore {
         self.save()
     }
 
-    /// Unsafe `--appimage-extract` fallback. Off by default, warned, and never
-    /// honoured by tests or background flows.
+    /// Unsafe `--appimage-extract` fallback: whether it may run. Off by default.
+    /// When on, an AppImage whose metadata safe extraction cannot read is run
+    /// with its own `--appimage-extract`, and the result says so.
     pub fn unsafe_extraction_fallback(&self) -> bool {
         self.unsafe_extraction_fallback
     }
@@ -247,30 +299,48 @@ impl SettingsStore {
             Ok(body) => body,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
             Err(e) => {
-                // Unreadable is not the same as absent. Say so, and leave
-                // `loaded` false so a save cannot quietly overwrite a file we
-                // never managed to read.
+                // Unreadable is not the same as absent. Say so, and refuse to
+                // save: a save would replace a file this process never read.
+                self.unreadable = true;
                 self.load_error = Some(format!(
-                    "Cannot read {}: {e}. Using defaults; your settings were not changed.",
+                    "Cannot read {}: {e}. Fix its permissions or move it aside, then try again. \
+                     Until then the app uses default settings.",
                     self.config_path.display()
                 ));
                 return;
             }
         };
-        let map: BTreeMap<String, serde_json::Value> = match serde_json::from_slice(&body) {
+        let parsed = std::str::from_utf8(&body)
+            .map_err(|e| format!("is not valid UTF-8 (byte {} is not text)", e.valid_up_to()))
+            .and_then(|text| {
+                serde_json::from_str::<serde_json::Value>(text)
+                    .map_err(|e| format!("is not valid JSON ({e})"))
+            })
+            .and_then(|value| match value {
+                serde_json::Value::Object(map) => Ok(map.into_iter().collect::<BTreeMap<_, _>>()),
+                _ => Err("does not hold a settings object".to_string()),
+            });
+        let map = match parsed {
             Ok(map) => map,
-            Err(e) => {
+            Err(reason) => {
                 // A corrupt file used to reset every setting to its default in
-                // silence, and the next change overwrote the original -- so a
-                // stray byte destroyed the user's configuration with no notice.
+                // silence, and the next change overwrote it, so a stray byte
+                // destroyed the user's configuration with no notice. Its bytes
+                // are moved aside before the first save instead.
+                self.corrupt = true;
                 self.load_error = Some(format!(
-                    "{} is not valid JSON ({e}). Using defaults; the existing file is left \
-                     untouched until you change a setting.",
+                    "{} {reason}. Fix it or move it aside, then try again. Until then the app \
+                     uses default settings.",
                     self.config_path.display()
                 ));
                 return;
             }
         };
+        self.extra = map
+            .iter()
+            .filter(|(key, _)| !KNOWN_KEYS.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
         self.loaded = true;
         let str_entry = |key: &str| {
             map.get(key)
@@ -300,8 +370,15 @@ impl SettingsStore {
     /// Returns the failure rather than discarding it: a setting that silently
     /// fails to save looks exactly like one that saved, and reappears at its
     /// old value on the next launch with no explanation.
-    fn save(&self) -> Result<(), String> {
-        let mut map = BTreeMap::new();
+    fn save(&mut self) -> Result<(), String> {
+        if self.unreadable {
+            return Err(format!(
+                "Not saving {}: the existing file could not be read, and saving would replace it.",
+                self.config_path.display()
+            ));
+        }
+        // Unknown keys go back exactly as they were; known keys are written below.
+        let mut map = self.extra.clone();
         map.insert(
             "ManagedFolder".to_string(),
             serde_json::Value::String(self.managed_folder.to_string_lossy().into_owned()),
@@ -330,7 +407,16 @@ impl SettingsStore {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
         }
-        crate::safe_fs::atomic_write(&self.config_path, &body, 0o600)
+        if self.corrupt && fs::symlink_metadata(&self.config_path).is_ok() {
+            let tag = format!("corrupt-{}", crate::tasks::now_unix());
+            crate::safe_fs::move_aside(&self.config_path, &tag)?;
+        }
+        crate::safe_fs::atomic_write(&self.config_path, &body, 0o600)?;
+        if self.corrupt {
+            self.corrupt = false;
+            self.load_error = None;
+        }
+        Ok(())
     }
 
     /// A problem reading the settings file at startup, if there was one.

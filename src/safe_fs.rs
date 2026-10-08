@@ -185,6 +185,60 @@ pub fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> 
     Ok(())
 }
 
+/// Move `path` aside to a name nothing else uses, keeping its bytes. The name is
+/// `<file>.<tag>`, or `<file>.<tag>-2`, `-3`, and so on when that is taken.
+///
+/// A hard link is made first, which fails rather than replaces an existing name,
+/// so an earlier backup is never overwritten. Only then is the original name
+/// removed. Returns the backup path.
+pub fn move_aside(path: &Path, tag: &str) -> Result<PathBuf, String> {
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let failed = |e: std::io::Error| format!("Cannot move {} aside: {e}", path.display());
+    for attempt in 1..=1000u32 {
+        let name = if attempt == 1 {
+            format!("{file_name}.{tag}")
+        } else {
+            format!("{file_name}.{tag}-{attempt}")
+        };
+        let backup = parent.join(name);
+        match fs::hard_link(path, &backup) {
+            Ok(()) => {
+                // The bytes now have two names. Drop the original one; if that
+                // fails, drop the backup name too so nothing is left half-moved.
+                return match fs::remove_file(path) {
+                    Ok(()) => Ok(backup),
+                    Err(e) => {
+                        let _ = fs::remove_file(&backup);
+                        Err(failed(e))
+                    }
+                };
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                // No hard links here (another device, or a filesystem without
+                // them). Rename, but only into a name that is still free.
+                if fs::symlink_metadata(&backup).is_ok() {
+                    continue;
+                }
+                return fs::rename(path, &backup)
+                    .map(|_| backup)
+                    .map_err(|_| failed(e));
+            }
+        }
+    }
+    Err(format!(
+        "Cannot move {} aside: no free backup name",
+        path.display()
+    ))
+}
+
 /// Rename over an existing destination (commit step).
 pub fn rename_over(src: &Path, dst: &Path) -> Result<(), String> {
     fs::rename(src, dst).map_err(|e| format!("Cannot replace {}: {e}", dst.display()))
@@ -289,6 +343,26 @@ pub fn remove_dir_no_follow(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Read a whole file, refusing one larger than `max_bytes`.
+///
+/// The read itself is bounded, so an oversized file cannot fill memory before
+/// the size check runs. Running out of memory aborts the process without any
+/// error reaching the caller.
+pub fn read_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
+    let file = File::open(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(format!(
+            "{} exceeds the size bound ({max_bytes} bytes)",
+            path.display()
+        ));
+    }
+    Ok(bytes)
+}
+
 /// Streaming SHA-256 with periodic cancellation checks.
 pub fn sha256_file(path: &Path, cancel: &std::sync::atomic::AtomicBool) -> Result<Vec<u8>, String> {
     use sha2::Digest;
@@ -327,6 +401,20 @@ pub fn argv_safe_path(path: &Path) -> String {
         format!("./{text}")
     } else {
         text
+    }
+}
+
+/// A path as a shell reads it, so a command shown to the user can be pasted:
+/// bare when it has no special characters, otherwise single-quoted.
+pub fn copyable_path(path: &str) -> String {
+    let plain = !path.is_empty()
+        && path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+,:@%=".contains(c));
+    if plain {
+        path.to_string()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
     }
 }
 

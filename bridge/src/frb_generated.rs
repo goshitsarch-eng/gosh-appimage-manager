@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1921690632;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1502905828;
 
 // Section: executor
 
@@ -245,6 +245,39 @@ fn wire__crate__api__system__cancel_task_impl(
         },
     )
 }
+fn wire__crate__api__updates__check_one_update_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "check_one_update",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_uuid = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::common::CoreError>((move || {
+                    let output_ok = crate::api::updates::check_one_update(api_uuid)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__updates__check_updates_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -369,10 +402,12 @@ fn wire__crate__api__inspect__inspect_path_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_op_id = <String>::sse_decode(&mut deserializer);
             let api_path = <String>::sse_decode(&mut deserializer);
+            let api_confirm_unsafe = <bool>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, crate::api::common::CoreError>((move || {
-                    let output_ok = crate::api::inspect::inspect_path(api_op_id, api_path)?;
+                    let output_ok =
+                        crate::api::inspect::inspect_path(api_op_id, api_path, api_confirm_unsafe)?;
                     std::result::Result::Ok(output_ok)
                 })())
             }
@@ -407,6 +442,7 @@ fn wire__crate__api__integrate__integrate_app_impl(
                 <crate::api::integrate::ConflictChoice>::sse_decode(&mut deserializer);
             let api_replace_uuid = <String>::sse_decode(&mut deserializer);
             let api_move_source = <bool>::sse_decode(&mut deserializer);
+            let api_confirm_unsafe = <bool>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, crate::api::common::CoreError>((move || {
@@ -416,6 +452,7 @@ fn wire__crate__api__integrate__integrate_app_impl(
                         api_conflict,
                         api_replace_uuid,
                         api_move_source,
+                        api_confirm_unsafe,
                     )?;
                     std::result::Result::Ok(output_ok)
                 })())
@@ -909,6 +946,8 @@ impl SseDecode for crate::api::dto::AppDto {
         let mut var_mimeTypes = <Vec<String>>::sse_decode(deserializer);
         let mut var_startupWmClass = <String>::sse_decode(deserializer);
         let mut var_actionNames = <Vec<String>>::sse_decode(deserializer);
+        let mut var_integratedAt = <i64>::sse_decode(deserializer);
+        let mut var_integratedFolder = <String>::sse_decode(deserializer);
         return crate::api::dto::AppDto {
             uuid: var_uuid,
             name: var_name,
@@ -944,6 +983,8 @@ impl SseDecode for crate::api::dto::AppDto {
             mime_types: var_mimeTypes,
             startup_wm_class: var_startupWmClass,
             action_names: var_actionNames,
+            integrated_at: var_integratedAt,
+            integrated_folder: var_integratedFolder,
         };
     }
 }
@@ -1057,9 +1098,10 @@ impl SseDecode for crate::api::common::ErrorKind {
             3 => crate::api::common::ErrorKind::Permission,
             4 => crate::api::common::ErrorKind::CorruptData,
             5 => crate::api::common::ErrorKind::Network,
-            6 => crate::api::common::ErrorKind::Process,
-            7 => crate::api::common::ErrorKind::Failure,
-            8 => crate::api::common::ErrorKind::Internal,
+            6 => crate::api::common::ErrorKind::Timeout,
+            7 => crate::api::common::ErrorKind::Process,
+            8 => crate::api::common::ErrorKind::Failure,
+            9 => crate::api::common::ErrorKind::Internal,
             _ => unreachable!("Invalid variant for ErrorKind: {}", inner),
         };
     }
@@ -1116,6 +1158,7 @@ impl SseDecode for crate::api::dto::InspectDto {
         let mut var_plannedTarget = <String>::sse_decode(deserializer);
         let mut var_extractorUsed = <String>::sse_decode(deserializer);
         let mut var_usedUnsafeFallback = <bool>::sse_decode(deserializer);
+        let mut var_fallbackPending = <bool>::sse_decode(deserializer);
         return crate::api::dto::InspectDto {
             path: var_path,
             size_bytes: var_sizeBytes,
@@ -1151,6 +1194,7 @@ impl SseDecode for crate::api::dto::InspectDto {
             planned_target: var_plannedTarget,
             extractor_used: var_extractorUsed,
             used_unsafe_fallback: var_usedUnsafeFallback,
+            fallback_pending: var_fallbackPending,
         };
     }
 }
@@ -1370,6 +1414,7 @@ impl SseDecode for crate::api::dto::OutcomeDto {
         let mut var_sourceRemoved = <bool>::sse_decode(deserializer);
         let mut var_conflictUuid = <String>::sse_decode(deserializer);
         let mut var_conflictName = <String>::sse_decode(deserializer);
+        let mut var_fallbackPending = <bool>::sse_decode(deserializer);
         return crate::api::dto::OutcomeDto {
             ok: var_ok,
             partial: var_partial,
@@ -1381,6 +1426,7 @@ impl SseDecode for crate::api::dto::OutcomeDto {
             source_removed: var_sourceRemoved,
             conflict_uuid: var_conflictUuid,
             conflict_name: var_conflictName,
+            fallback_pending: var_fallbackPending,
         };
     }
 }
@@ -1454,6 +1500,15 @@ impl SseDecode for crate::api::dto::TaskDto {
         let mut var_statusText = <String>::sse_decode(deserializer);
         let mut var_error = <String>::sse_decode(deserializer);
         let mut var_retryable = <bool>::sse_decode(deserializer);
+        let mut var_startedAt = <i64>::sse_decode(deserializer);
+        let mut var_finishedAt = <i64>::sse_decode(deserializer);
+        let mut var_fromVersion = <String>::sse_decode(deserializer);
+        let mut var_toVersion = <String>::sse_decode(deserializer);
+        let mut var_phaseIndex = <i32>::sse_decode(deserializer);
+        let mut var_phase = <String>::sse_decode(deserializer);
+        let mut var_bytesDone = <i64>::sse_decode(deserializer);
+        let mut var_bytesTotal = <i64>::sse_decode(deserializer);
+        let mut var_permanent = <bool>::sse_decode(deserializer);
         return crate::api::dto::TaskDto {
             id: var_id,
             kind: var_kind,
@@ -1464,6 +1519,15 @@ impl SseDecode for crate::api::dto::TaskDto {
             status_text: var_statusText,
             error: var_error,
             retryable: var_retryable,
+            started_at: var_startedAt,
+            finished_at: var_finishedAt,
+            from_version: var_fromVersion,
+            to_version: var_toVersion,
+            phase_index: var_phaseIndex,
+            phase: var_phase,
+            bytes_done: var_bytesDone,
+            bytes_total: var_bytesTotal,
+            permanent: var_permanent,
         };
     }
 }
@@ -1513,6 +1577,28 @@ impl SseDecode for () {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {}
 }
 
+impl SseDecode for crate::api::dto::UpdateCheckDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_uuid = <String>::sse_decode(deserializer);
+        let mut var_currentVersion = <String>::sse_decode(deserializer);
+        let mut var_availableVersion = <String>::sse_decode(deserializer);
+        let mut var_downloadSize = <i64>::sse_decode(deserializer);
+        let mut var_reducedVerification = <bool>::sse_decode(deserializer);
+        let mut var_error = <String>::sse_decode(deserializer);
+        let mut var_timedOut = <bool>::sse_decode(deserializer);
+        return crate::api::dto::UpdateCheckDto {
+            uuid: var_uuid,
+            current_version: var_currentVersion,
+            available_version: var_availableVersion,
+            download_size: var_downloadSize,
+            reduced_verification: var_reducedVerification,
+            error: var_error,
+            timed_out: var_timedOut,
+        };
+    }
+}
+
 impl SseDecode for crate::api::dto::UpdateFailureDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1520,11 +1606,13 @@ impl SseDecode for crate::api::dto::UpdateFailureDto {
         let mut var_name = <String>::sse_decode(deserializer);
         let mut var_manager = <String>::sse_decode(deserializer);
         let mut var_error = <String>::sse_decode(deserializer);
+        let mut var_timedOut = <bool>::sse_decode(deserializer);
         return crate::api::dto::UpdateFailureDto {
             uuid: var_uuid,
             name: var_name,
             manager: var_manager,
             error: var_error,
+            timed_out: var_timedOut,
         };
     }
 }
@@ -1593,34 +1681,35 @@ fn pde_ffi_dispatcher_primary_impl(
         3 => wire__crate__api__updates__apply_all_updates_impl(port, ptr, rust_vec_len, data_len),
         4 => wire__crate__api__updates__apply_update_impl(port, ptr, rust_vec_len, data_len),
         6 => wire__crate__api__system__cancel_task_impl(port, ptr, rust_vec_len, data_len),
-        7 => wire__crate__api__updates__check_updates_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__system__clear_finished_tasks_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__library__get_app_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__inspect__inspect_path_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__integrate__integrate_app_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__library__launch_app_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__library__list_library_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__system__list_tasks_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__settings__load_settings_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__library__refresh_metadata_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__library__remove_app_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__library__reveal_app_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__library__save_arguments_and_environment_impl(
+        7 => wire__crate__api__updates__check_one_update_impl(port, ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__updates__check_updates_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__system__clear_finished_tasks_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__library__get_app_impl(port, ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__inspect__inspect_path_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__integrate__integrate_app_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__library__launch_app_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__library__list_library_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__system__list_tasks_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__settings__load_settings_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__library__refresh_metadata_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__library__remove_app_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__library__reveal_app_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__library__save_arguments_and_environment_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        20 => wire__crate__api__settings__save_settings_impl(port, ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__settings__set_autostart_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__library__set_update_source_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__settings__settings_patch_dto_default_impl(
+        21 => wire__crate__api__settings__save_settings_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__settings__set_autostart_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__library__set_update_source_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__settings__settings_patch_dto_default_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        24 => {
+        25 => {
             wire__crate__api__library__unset_update_source_impl(port, ptr, rust_vec_len, data_len)
         }
         _ => unreachable!(),
@@ -1680,6 +1769,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::dto::AppDto {
             self.mime_types.into_into_dart().into_dart(),
             self.startup_wm_class.into_into_dart().into_dart(),
             self.action_names.into_into_dart().into_dart(),
+            self.integrated_at.into_into_dart().into_dart(),
+            self.integrated_folder.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1823,9 +1914,10 @@ impl flutter_rust_bridge::IntoDart for crate::api::common::ErrorKind {
             Self::Permission => 3.into_dart(),
             Self::CorruptData => 4.into_dart(),
             Self::Network => 5.into_dart(),
-            Self::Process => 6.into_dart(),
-            Self::Failure => 7.into_dart(),
-            Self::Internal => 8.into_dart(),
+            Self::Timeout => 6.into_dart(),
+            Self::Process => 7.into_dart(),
+            Self::Failure => 8.into_dart(),
+            Self::Internal => 9.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -1876,6 +1968,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::dto::InspectDto {
             self.planned_target.into_into_dart().into_dart(),
             self.extractor_used.into_into_dart().into_dart(),
             self.used_unsafe_fallback.into_into_dart().into_dart(),
+            self.fallback_pending.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1941,6 +2034,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::dto::OutcomeDto {
             self.source_removed.into_into_dart().into_dart(),
             self.conflict_uuid.into_into_dart().into_dart(),
             self.conflict_name.into_into_dart().into_dart(),
+            self.fallback_pending.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -2024,6 +2118,15 @@ impl flutter_rust_bridge::IntoDart for crate::api::dto::TaskDto {
             self.status_text.into_into_dart().into_dart(),
             self.error.into_into_dart().into_dart(),
             self.retryable.into_into_dart().into_dart(),
+            self.started_at.into_into_dart().into_dart(),
+            self.finished_at.into_into_dart().into_dart(),
+            self.from_version.into_into_dart().into_dart(),
+            self.to_version.into_into_dart().into_dart(),
+            self.phase_index.into_into_dart().into_dart(),
+            self.phase.into_into_dart().into_dart(),
+            self.bytes_done.into_into_dart().into_dart(),
+            self.bytes_total.into_into_dart().into_dart(),
+            self.permanent.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -2080,6 +2183,32 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::dto::TaskStateDto>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::dto::UpdateCheckDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.uuid.into_into_dart().into_dart(),
+            self.current_version.into_into_dart().into_dart(),
+            self.available_version.into_into_dart().into_dart(),
+            self.download_size.into_into_dart().into_dart(),
+            self.reduced_verification.into_into_dart().into_dart(),
+            self.error.into_into_dart().into_dart(),
+            self.timed_out.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::dto::UpdateCheckDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::dto::UpdateCheckDto>
+    for crate::api::dto::UpdateCheckDto
+{
+    fn into_into_dart(self) -> crate::api::dto::UpdateCheckDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::dto::UpdateFailureDto {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -2087,6 +2216,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::dto::UpdateFailureDto {
             self.name.into_into_dart().into_dart(),
             self.manager.into_into_dart().into_dart(),
             self.error.into_into_dart().into_dart(),
+            self.timed_out.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -2202,6 +2332,8 @@ impl SseEncode for crate::api::dto::AppDto {
         <Vec<String>>::sse_encode(self.mime_types, serializer);
         <String>::sse_encode(self.startup_wm_class, serializer);
         <Vec<String>>::sse_encode(self.action_names, serializer);
+        <i64>::sse_encode(self.integrated_at, serializer);
+        <String>::sse_encode(self.integrated_folder, serializer);
     }
 }
 
@@ -2297,9 +2429,10 @@ impl SseEncode for crate::api::common::ErrorKind {
                 crate::api::common::ErrorKind::Permission => 3,
                 crate::api::common::ErrorKind::CorruptData => 4,
                 crate::api::common::ErrorKind::Network => 5,
-                crate::api::common::ErrorKind::Process => 6,
-                crate::api::common::ErrorKind::Failure => 7,
-                crate::api::common::ErrorKind::Internal => 8,
+                crate::api::common::ErrorKind::Timeout => 6,
+                crate::api::common::ErrorKind::Process => 7,
+                crate::api::common::ErrorKind::Failure => 8,
+                crate::api::common::ErrorKind::Internal => 9,
                 _ => {
                     unimplemented!("");
                 }
@@ -2360,6 +2493,7 @@ impl SseEncode for crate::api::dto::InspectDto {
         <String>::sse_encode(self.planned_target, serializer);
         <String>::sse_encode(self.extractor_used, serializer);
         <bool>::sse_encode(self.used_unsafe_fallback, serializer);
+        <bool>::sse_encode(self.fallback_pending, serializer);
     }
 }
 
@@ -2542,6 +2676,7 @@ impl SseEncode for crate::api::dto::OutcomeDto {
         <bool>::sse_encode(self.source_removed, serializer);
         <String>::sse_encode(self.conflict_uuid, serializer);
         <String>::sse_encode(self.conflict_name, serializer);
+        <bool>::sse_encode(self.fallback_pending, serializer);
     }
 }
 
@@ -2589,6 +2724,15 @@ impl SseEncode for crate::api::dto::TaskDto {
         <String>::sse_encode(self.status_text, serializer);
         <String>::sse_encode(self.error, serializer);
         <bool>::sse_encode(self.retryable, serializer);
+        <i64>::sse_encode(self.started_at, serializer);
+        <i64>::sse_encode(self.finished_at, serializer);
+        <String>::sse_encode(self.from_version, serializer);
+        <String>::sse_encode(self.to_version, serializer);
+        <i32>::sse_encode(self.phase_index, serializer);
+        <String>::sse_encode(self.phase, serializer);
+        <i64>::sse_encode(self.bytes_done, serializer);
+        <i64>::sse_encode(self.bytes_total, serializer);
+        <bool>::sse_encode(self.permanent, serializer);
     }
 }
 
@@ -2645,6 +2789,19 @@ impl SseEncode for () {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {}
 }
 
+impl SseEncode for crate::api::dto::UpdateCheckDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.uuid, serializer);
+        <String>::sse_encode(self.current_version, serializer);
+        <String>::sse_encode(self.available_version, serializer);
+        <i64>::sse_encode(self.download_size, serializer);
+        <bool>::sse_encode(self.reduced_verification, serializer);
+        <String>::sse_encode(self.error, serializer);
+        <bool>::sse_encode(self.timed_out, serializer);
+    }
+}
+
 impl SseEncode for crate::api::dto::UpdateFailureDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2652,6 +2809,7 @@ impl SseEncode for crate::api::dto::UpdateFailureDto {
         <String>::sse_encode(self.name, serializer);
         <String>::sse_encode(self.manager, serializer);
         <String>::sse_encode(self.error, serializer);
+        <bool>::sse_encode(self.timed_out, serializer);
     }
 }
 

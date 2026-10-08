@@ -29,7 +29,7 @@ fn managed_folder_is_always_scanned() {
     std::fs::create_dir_all(&managed).unwrap();
     write_fixture(&managed, "Inside.AppImage");
 
-    let found = c.discover();
+    let found = c.discover().unwrap();
     assert_eq!(found.len(), 1, "found: {found:?}");
     assert_eq!(found[0].name, "Inside");
     assert!(!found[0].managed, "not in the registry yet");
@@ -49,10 +49,13 @@ fn external_entries_are_found_only_when_the_setting_is_on() {
     write_foreign_entry(&c.settings().applications_dir(), "foreign.desktop", &target);
 
     // Off by default: only the managed folder is scanned.
-    assert!(c.discover().is_empty(), "external discovery must be opt-in");
+    assert!(
+        c.discover().unwrap().is_empty(),
+        "external discovery must be opt-in"
+    );
 
     c.settings_mut().set_manage_outside_folder(true).unwrap();
-    let found = c.discover();
+    let found = c.discover().unwrap();
     assert_eq!(found.len(), 1, "found: {found:?}");
     assert_eq!(found[0].path, target.to_string_lossy());
     assert_eq!(
@@ -80,12 +83,13 @@ fn our_own_entries_are_not_reported_as_external() {
             replace_uuid: String::new(),
             copy_mode: goshaim_core::types::CopyMode::Copy,
             assume_yes: true,
+            confirm_unsafe: false,
         },
         &std::sync::atomic::AtomicBool::new(false),
     );
     assert!(result.ok, "{}", result.error);
 
-    let found = c.discover();
+    let found = c.discover().unwrap();
     assert_eq!(found.len(), 1, "found: {found:?}");
     assert!(
         found[0].managed,
@@ -144,4 +148,42 @@ fn adoption_refuses_duplicates_and_non_appimages() {
     std::fs::write(&plain, b"not an appimage").unwrap();
     assert!(c.adopt_external(&plain.to_string_lossy()).is_err());
     assert!(c.adopt_external("/nope/missing.AppImage").is_err());
+}
+
+/// A managed folder that exists but cannot be read is an error, never an empty
+/// list. A folder that does not exist yet simply holds no apps.
+#[test]
+fn an_unreadable_managed_folder_is_an_error_not_an_empty_list() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = Harness::new();
+    let mut c = h.controller();
+    // The folder must exist to be chosen, so it is created, chosen, then removed.
+    let missing = h.tmp.path().join("not-created-yet");
+    std::fs::create_dir_all(&missing).unwrap();
+    c.settings_mut()
+        .set_managed_folder(missing.clone())
+        .unwrap();
+    std::fs::remove_dir(&missing).unwrap();
+    assert!(c.discover().unwrap().is_empty());
+
+    let locked = h.tmp.path().join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&locked).is_ok() {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        eprintln!(
+            "SKIPPED an_unreadable_managed_folder_is_an_error_not_an_empty_list: running as root"
+        );
+        return;
+    }
+    c.settings_mut().set_managed_folder(locked.clone()).unwrap();
+    let outcome = c.discover();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let error = outcome.expect_err("an unreadable folder must not look empty");
+    assert!(
+        error.contains(&locked.display().to_string()),
+        "error: {error}"
+    );
 }

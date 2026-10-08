@@ -54,7 +54,14 @@ pub struct ProcessRequest {
     pub host: HostSpawn,
     pub timeout_ms: u64,
     pub work_dir: String,
+    /// Start the child with a minimal environment: nothing inherited, only PATH
+    /// (fixed), LANG=C, and HOME and TMPDIR set to `work_dir`. Used for code the
+    /// manager does not trust, which must not see the manager's environment.
+    pub minimal_env: bool,
 }
+
+/// The PATH a minimal-environment child gets: fixed, not inherited.
+const MINIMAL_PATH: &str = "/usr/bin:/bin";
 
 /// Is this request allowed to run on the host at all?
 ///
@@ -170,6 +177,15 @@ impl SystemRunner {
         }
         let mut cmd = Command::new(&program);
         cmd.args(&args);
+        if req.minimal_env {
+            cmd.env_clear();
+            cmd.env("PATH", MINIMAL_PATH);
+            cmd.env("LANG", "C");
+            if !req.work_dir.is_empty() {
+                cmd.env("HOME", &req.work_dir);
+                cmd.env("TMPDIR", &req.work_dir);
+            }
+        }
         for (key, value) in &req.env {
             if key.is_empty() || key.contains('\0') || value.contains('\0') {
                 continue;
@@ -199,9 +215,205 @@ impl SystemRunner {
                 });
             }
         }
-        cmd.spawn()
-            .map_err(|e| format!("Cannot start {}: {e}", req.program))
+        spawn_retrying_busy(&mut cmd).map_err(|e| format!("Cannot start {}: {e}", req.program))
     }
+}
+
+/// Start a child, retrying briefly when the executable is "text file busy".
+///
+/// That error (ETXTBSY) means the file was still open for writing, or a concurrent
+/// fork still holds its write descriptor. A file that was just written and is about
+/// to run hits it for a few milliseconds, so waiting clears it. Any other error is
+/// returned at once.
+fn spawn_retrying_busy(cmd: &mut Command) -> std::io::Result<std::process::Child> {
+    #[cfg(unix)]
+    const ETXTBSY: i32 = 26;
+    const ATTEMPTS: u32 = 50;
+    let mut attempt = 0;
+    loop {
+        match cmd.spawn() {
+            #[cfg(unix)]
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) && attempt < ATTEMPTS => {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Read a child's output pipe to its end, bounded by the output limit.
+fn spawn_pipe_reader<R>(pipe: Option<R>) -> std::io::Result<std::thread::JoinHandle<Vec<u8>>>
+where
+    R: std::io::Read + Send + 'static,
+{
+    std::thread::Builder::new().spawn(move || {
+        let mut out = Vec::new();
+        if let Some(mut reader) = pipe {
+            let mut buf = [0u8; 8192];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if out.len() + n > limits::MAX_PROCESS_OUTPUT_BYTES + 1 {
+                            out.extend_from_slice(&buf[..n]);
+                            break;
+                        }
+                        out.extend_from_slice(&buf[..n]);
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+        out
+    })
+}
+
+/// Stop a child that started but cannot be watched, and report why.
+fn abandon_child(
+    mut child: std::process::Child,
+    mut result: ProcessResult,
+    program: &str,
+    error: std::io::Error,
+) -> ProcessResult {
+    kill_process_group(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
+    result.refused = true;
+    result.exit_code = 1;
+    result.stderr = format!("Cannot watch {program} while it runs: {error}").into_bytes();
+    result
+}
+
+/// How often the runner checks a running child while it waits for it.
+const EXIT_POLL: Duration = Duration::from_millis(5);
+
+/// Wait up to `timeout` for `child` to exit. `Ok(None)` means it was still
+/// running when the time was up.
+///
+/// This polls `try_wait` instead of waiting on a SIGCHLD handler. A handler is
+/// one per process, and the state it shares can be disturbed by any other
+/// reaper of children. The wait-timeout crate did that, and a watched child
+/// that was reaped elsewhere aborted the whole process. See
+/// tests/test_process.rs.
+fn wait_for_exit<W: ExitPoll + ?Sized>(
+    child: &mut W,
+    timeout: Duration,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let started = std::time::Instant::now();
+    loop {
+        match child.poll_exit() {
+            Ok(Some(status)) => return Ok(Some(status)),
+            Ok(None) => {}
+            // An interrupted or would-block poll says nothing about the child.
+            // Ask again, rather than reporting a child that is still running as
+            // one that cannot be watched.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) => {}
+            Err(error) => return Err(error),
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            return Ok(None);
+        }
+        std::thread::sleep(EXIT_POLL.min(timeout - elapsed));
+    }
+}
+
+/// What the runner asks of a child while it waits: has it exited yet?
+trait ExitPoll {
+    fn poll_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>>;
+}
+
+impl ExitPoll for std::process::Child {
+    fn poll_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.try_wait()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod wait_tests {
+    use std::collections::VecDeque;
+    use std::io;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+    use std::time::Duration;
+
+    use super::{wait_for_exit, ExitPoll};
+
+    /// Answers a scripted sequence of polls, then reports that the child runs.
+    struct Scripted(VecDeque<io::Result<Option<ExitStatus>>>);
+
+    impl ExitPoll for Scripted {
+        fn poll_exit(&mut self) -> io::Result<Option<ExitStatus>> {
+            self.0.pop_front().unwrap_or(Ok(None))
+        }
+    }
+
+    fn exited() -> ExitStatus {
+        ExitStatus::from_raw(0)
+    }
+
+    #[test]
+    fn a_transient_failure_to_poll_is_asked_again_not_reported() {
+        let mut child = Scripted(VecDeque::from([
+            Err(io::Error::from(io::ErrorKind::WouldBlock)),
+            Err(io::Error::from(io::ErrorKind::Interrupted)),
+            Ok(None),
+            Ok(Some(exited())),
+        ]));
+        let status = wait_for_exit(&mut child, Duration::from_secs(10))
+            .expect("transient failures are not errors");
+        assert_eq!(status, Some(exited()), "the exit is still seen");
+    }
+
+    #[test]
+    fn a_failure_that_is_not_transient_is_returned_to_the_caller() {
+        // ECHILD: the child was reaped by someone else.
+        let mut child = Scripted(VecDeque::from([Err(io::Error::from_raw_os_error(10))]));
+        let error = wait_for_exit(&mut child, Duration::from_secs(10))
+            .expect_err("a reaped child cannot be watched");
+        assert_eq!(error.raw_os_error(), Some(10));
+    }
+
+    #[test]
+    fn a_child_still_running_at_the_deadline_is_reported_as_running() {
+        let mut child = Scripted(VecDeque::new());
+        let outcome = wait_for_exit(&mut child, Duration::from_millis(30))
+            .expect("a running child is not an error");
+        assert_eq!(outcome, None);
+    }
+}
+
+/// `ECHILD` on Linux and the BSDs: the child is no longer ours to wait for.
+#[cfg(unix)]
+const ECHILD: i32 = 10;
+
+/// Report a child the runner can no longer watch. A child that someone else
+/// reaped has a pid that may already belong to another process, so it is not
+/// signalled or waited for. Any other failure leaves a child that may still be
+/// running, which is stopped.
+fn unwatchable_child(
+    mut child: std::process::Child,
+    mut result: ProcessResult,
+    program: &str,
+    error: std::io::Error,
+) -> ProcessResult {
+    #[cfg(unix)]
+    let reaped_elsewhere = error.raw_os_error() == Some(ECHILD);
+    #[cfg(not(unix))]
+    let reaped_elsewhere = false;
+    if !reaped_elsewhere {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    result.refused = true;
+    result.exit_code = 1;
+    result.stderr = format!("Cannot watch {program} while it runs: {error}").into_bytes();
+    result
 }
 
 /// Join an output-reader thread, giving up if it is stuck on a pipe held open
@@ -220,6 +432,28 @@ fn join_bounded(handle: std::thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
 }
 
 const READER_JOIN_GRACE_MS: u64 = 2_000;
+
+/// Kill the process group a child leads. Every child is made a session leader
+/// before it runs, so its group id is its own pid, and whatever it started shares
+/// that group. Killing only the child would leave those processes running.
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    const SIGKILL: i32 = 9;
+    if let Ok(pid) = i32::try_from(pid) {
+        if pid > 0 {
+            // SAFETY: a plain system call on a process group id we created.
+            unsafe {
+                kill(-pid, SIGKILL);
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: u32) {}
 
 #[cfg(unix)]
 fn libc_setsdt() {
@@ -249,70 +483,28 @@ impl ProcessRunner for SystemRunner {
             }
         };
         let timeout = Duration::from_millis(req.timeout_ms.max(1));
-        let mut stdout_taken = child.stdout.take();
-        let mut stderr_taken = child.stderr.take();
-        // Bounded output readers.
-        let stdout_handle = std::thread::spawn(move || {
-            let mut out = Vec::new();
-            if let Some(reader) = stdout_taken.as_mut() {
-                use std::io::Read;
-                let mut buf = [0u8; 8192];
-                loop {
-                    match reader.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if out.len() + n > limits::MAX_PROCESS_OUTPUT_BYTES + 1 {
-                                out.extend_from_slice(&buf[..n]);
-                                break;
-                            }
-                            out.extend_from_slice(&buf[..n]);
-                        }
-                        Err(_) => break,
-                    }
-                }
+        // Bounded output readers. If a thread cannot be made, the child is already
+        // running, so it is stopped and reported, never left behind.
+        let stdout_handle = match spawn_pipe_reader(child.stdout.take()) {
+            Ok(handle) => handle,
+            Err(e) => return abandon_child(child, result, &req.program, e),
+        };
+        let stderr_handle = match spawn_pipe_reader(child.stderr.take()) {
+            Ok(handle) => handle,
+            Err(e) => return abandon_child(child, result, &req.program, e),
+        };
+        let exit = match wait_for_exit(&mut child, timeout) {
+            Ok(Some(status)) => Some(status),
+            Ok(None) => {
+                kill_process_group(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                result.timed_out = true;
+                None
             }
-            out
-        });
-        let stderr_handle = std::thread::spawn(move || {
-            let mut out = Vec::new();
-            if let Some(reader) = stderr_taken.as_mut() {
-                use std::io::Read;
-                let mut buf = [0u8; 8192];
-                loop {
-                    match reader.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if out.len() + n > limits::MAX_PROCESS_OUTPUT_BYTES + 1 {
-                                out.extend_from_slice(&buf[..n]);
-                                break;
-                            }
-                            out.extend_from_slice(&buf[..n]);
-                        }
-                        Err(_) => break,
-                    }
-                }
-            }
-            out
-        });
-        let exit = {
-            use wait_timeout::ChildExt;
-            match child.wait_timeout(timeout) {
-                Ok(Some(status)) => Some(status),
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    result.timed_out = true;
-                    None
-                }
-                Err(_) => {
-                    let _ = child.kill();
-                    // Reap here too; the previous code killed without waiting
-                    // and left a zombie behind on this path.
-                    let _ = child.wait();
-                    result.timed_out = true;
-                    None
-                }
-            }
+            // The child was reaped by someone else, or its state cannot be read.
+            // That is not a timeout, and it must not end the process.
+            Err(e) => return unwatchable_child(child, result, &req.program, e),
         };
         // Killing the child closes our copies of the pipe ends, but a
         // grandchild that inherited them keeps the reader threads blocked. An

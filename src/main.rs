@@ -1,10 +1,11 @@
 // Gosh AppImage Manager 3.0.0 — entry point. Made by Gosh.
-// Same binary serves CLI (no GUI) and the libcosmic GUI shell.
+// One binary: the CLI, plus the launcher that starts the Flutter GUI.
 
 use std::io::{IsTerminal, Write};
 
 use goshaim_core::cli;
 use goshaim_core::controller::AppController;
+use goshaim_core::launcher;
 use goshaim_core::limits;
 use goshaim_core::types::ExitCode;
 
@@ -37,16 +38,18 @@ fn print_help(stdout: &mut dyn Write) {
          Opening an AppImage never integrates or executes it.\n\
          \n\
          Usage:\n  \
-         gosh-appimage-manager [--integrate <path> [--keep-both|--replace] [--replace-uuid UUID|--target PATH] [--yes]]\n  \
+         gosh-appimage-manager [--integrate <path> [--keep-both|--replace] [--replace-uuid UUID|--target PATH] [--yes] [--allow-unsafe]]\n  \
          gosh-appimage-manager [--update <path>|--all [--yes] [--force]]\n  \
          gosh-appimage-manager [--remove <path> [--yes] [--delete]] [--remove-all [--yes]]\n  \
          gosh-appimage-manager [--list-installed [--json]] [--list-updates [--json]]\n  \
          gosh-appimage-manager [--list-discovered [--json]] [--adopt <path> [--yes]]\n  \
          gosh-appimage-manager [--list-update-managers] [--set-update-source <path> --manager <name> key=value... | --unset]\n  \
-         gosh-appimage-manager [--fetch-updates] [--self-test]\n  \
-         gosh-appimage-manager [--probe-host] [--probe-inspect <path>] [--probe-autostart]\n  \
+         gosh-appimage-manager [--fetch-updates [--background]] [--self-test]\n  \
+         gosh-appimage-manager [--probe-host] [--probe-inspect <path> [--allow-unsafe]] [--probe-autostart]\n  \
          gosh-appimage-manager [files...]  (open in GUI)\n\
          \n\
+         --allow-unsafe runs the unsafe extraction fallback for that one file. The Settings\n\
+         switch must be on as well; without the flag a file that needs it is left pending.\n\
          JSON lists use schema_version 1 with installed/updates arrays.\n\
          Diagnostics go to stderr so stdout stays valid JSON.",
         version = limits::VERSION
@@ -71,6 +74,7 @@ fn main() {
     let probe_host = args.iter().any(|a| a == "--probe-host");
     let probe_inspect = args.iter().any(|a| a == "--probe-inspect");
     let probe_autostart = args.iter().any(|a| a == "--probe-autostart");
+    let allow_unsafe = args.iter().any(|a| a == "--allow-unsafe");
     let cli = is_cli_command(&args);
 
     if cli && !self_test {
@@ -91,7 +95,13 @@ fn main() {
                 .and_then(|i| args.get(i + 1))
                 .cloned()
                 .unwrap_or_default();
-            let code = cli::run_inspect_probe(&controller, &path, &mut out_lock);
+            let code = cli::run_inspect_probe(
+                &controller,
+                &path,
+                allow_unsafe,
+                &mut out_lock,
+                &mut std::io::stderr(),
+            );
             std::process::exit(code as i32);
         }
         if probe_autostart {
@@ -132,7 +142,13 @@ fn main() {
                 .and_then(|i| args.get(i + 1))
                 .cloned()
                 .unwrap_or_default();
-            let code = cli::run_inspect_probe(&controller, &path, &mut out_lock);
+            let code = cli::run_inspect_probe(
+                &controller,
+                &path,
+                allow_unsafe,
+                &mut out_lock,
+                &mut std::io::stderr(),
+            );
             std::process::exit(code as i32);
         }
         if probe_autostart {
@@ -145,42 +161,11 @@ fn main() {
         std::process::exit(code as i32);
     }
 
-    // GUI mode.
-    run_gui_or_hint(args);
-}
-
-#[cfg(feature = "gui")]
-fn run_gui_or_hint(args: Vec<String>) {
-    let code = goshaim_core::gui::run(args);
-    std::process::exit(code);
-}
-
-#[cfg(not(feature = "gui"))]
-fn run_gui_or_hint(args: Vec<String>) {
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    let _ = writeln!(
-        out,
-        "Gosh AppImage Manager {} — Made by Gosh",
-        limits::VERSION
-    );
-    let _ = writeln!(
-        out,
-        "This build has no GUI. Rebuild with --features gui, or pass --help for CLI usage."
-    );
-    if !args.is_empty() {
-        let _ = writeln!(
-            out,
-            "\nIgnored argument(s): {}. This build cannot open files in a window.",
-            args.join(" ")
-        );
-    }
-    let _ = writeln!(out);
-    print_help(&mut out);
-    let _ = out.flush();
-    // Exit rather than waiting on stdin. A read here used to hang the process
-    // forever on the exact flow the README documents (`cargo build` then
-    // `cargo run`), which looks like a freeze rather than a build without a
-    // GUI.
-    std::process::exit(ExitCode::Usage as i32);
+    // GUI mode: no CLI command, so the Flutter GUI gets the window and any
+    // file arguments. On success this call never returns.
+    let code = {
+        let stderr = std::io::stderr();
+        launcher::launch_gui(&args, &mut stderr.lock())
+    };
+    std::process::exit(code as i32);
 }

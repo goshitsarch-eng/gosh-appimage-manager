@@ -13,6 +13,7 @@ fn trash_removal_cleans_owned_artifacts() {
         &IntegrateRequest {
             source_path: path.to_str().unwrap().to_string(),
             assume_yes: true,
+            confirm_unsafe: false,
             ..Default::default()
         },
         &cancel,
@@ -41,6 +42,7 @@ fn trash_failure_leaves_everything_intact() {
         &IntegrateRequest {
             source_path: path.to_str().unwrap().to_string(),
             assume_yes: true,
+            confirm_unsafe: false,
             ..Default::default()
         },
         &cancel,
@@ -111,6 +113,7 @@ fn permanent_delete_removes_file_and_artifacts() {
         &IntegrateRequest {
             source_path: path.to_str().unwrap().to_string(),
             assume_yes: true,
+            confirm_unsafe: false,
             ..Default::default()
         },
         &cancel,
@@ -138,6 +141,7 @@ fn remove_all_only_touches_owned() {
         &IntegrateRequest {
             source_path: path.to_str().unwrap().to_string(),
             assume_yes: true,
+            confirm_unsafe: false,
             ..Default::default()
         },
         &cancel,

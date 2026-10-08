@@ -1,6 +1,6 @@
 mod common;
 
-use common::{args, Harness};
+use common::{args, plant_self_extraction, ran_self_extraction, Harness};
 
 #[test]
 fn host_probe_reports_spawn_and_folder() {
@@ -24,7 +24,13 @@ fn inspect_probe_json_marks_no_execution() {
     let path = common::write_fixture(h.tmp.path(), "Demo.AppImage");
     let c = h.controller();
     let mut out = Vec::new();
-    let code = goshaim_core::cli::run_inspect_probe(&c, path.to_str().unwrap(), &mut out);
+    let code = goshaim_core::cli::run_inspect_probe(
+        &c,
+        path.to_str().unwrap(),
+        false,
+        &mut out,
+        &mut Vec::new(),
+    );
     assert_eq!(code as i32, goshaim_core::types::ExitCode::Ok as i32);
     let text = String::from_utf8_lossy(&out);
     assert!(text.contains("INSPECT_NO_EXECUTION"));
@@ -49,7 +55,13 @@ fn inspect_probe_invalid_file_fails() {
     let h = Harness::new();
     let c = h.controller();
     let mut out = Vec::new();
-    let code = goshaim_core::cli::run_inspect_probe(&c, "/nonexistent/x.AppImage", &mut out);
+    let code = goshaim_core::cli::run_inspect_probe(
+        &c,
+        "/nonexistent/x.AppImage",
+        false,
+        &mut out,
+        &mut Vec::new(),
+    );
     assert_eq!(code as i32, goshaim_core::types::ExitCode::Failure as i32);
     assert!(String::from_utf8_lossy(&out).contains("INSPECT_NO_EXECUTION"));
 }
@@ -95,4 +107,121 @@ fn autostart_probe_verifies_without_mutating() {
 fn version_flag_prints_3_0_0() {
     assert_eq!(goshaim_core::limits::VERSION, "3.0.0");
     let _ = args(&["--version"]);
+}
+
+/// `--probe-inspect` takes the stored setting like every other inspection. With it
+/// on, the fallback runs, and the probe says that the AppImage executed.
+#[test]
+fn inspect_probe_reports_an_unsafe_run_when_the_setting_is_on() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let log = plant_self_extraction(&h);
+    c.settings_mut()
+        .set_unsafe_extraction_fallback(true)
+        .expect("the owner can turn the fallback on");
+    let path = common::write_fixture(h.tmp.path(), "Demo.AppImage");
+    let mut out = Vec::new();
+
+    let code = goshaim_core::cli::run_inspect_probe(
+        &c,
+        path.to_str().unwrap(),
+        true,
+        &mut out,
+        &mut Vec::new(),
+    );
+
+    let text = String::from_utf8_lossy(&out).into_owned();
+    assert!(ran_self_extraction(&log), "the fallback did not run");
+    assert!(
+        text.contains("INSPECT_EXECUTED_UNSAFE"),
+        "probe output: {text}"
+    );
+    assert_eq!(code as i32, goshaim_core::types::ExitCode::Failure as i32);
+}
+
+/// Without the flag, a probe that would need the fallback runs nothing, says why
+/// on stderr, and exits as needing confirmation.
+#[test]
+fn inspect_probe_stops_at_a_pending_read_and_names_the_flag() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    let log = plant_self_extraction(&h);
+    c.settings_mut()
+        .set_unsafe_extraction_fallback(true)
+        .expect("the owner can turn the fallback on");
+    let path = common::write_fixture(h.tmp.path(), "Demo.AppImage");
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+
+    let code =
+        goshaim_core::cli::run_inspect_probe(&c, path.to_str().unwrap(), false, &mut out, &mut err);
+
+    let stderr = String::from_utf8_lossy(&err).into_owned();
+    assert!(
+        !ran_self_extraction(&log),
+        "the AppImage ran before confirmation"
+    );
+    assert_eq!(
+        code as i32,
+        goshaim_core::types::ExitCode::NeedsConfirmation as i32
+    );
+    assert!(stderr.contains("--allow-unsafe"), "stderr: {stderr}");
+}
+
+/// QA2-018: a fallback that ran but produced no metadata must still be reported as
+/// run. The probe says so on stdout and stderr, and its JSON lists the warnings.
+#[test]
+fn a_probe_reports_a_fallback_that_ran_even_when_it_produced_no_metadata() {
+    let h = Harness::new();
+    let mut c = h.controller();
+    // The stand-in runs when asked and leaves a marker, but writes no squashfs-root.
+    let marker = h.tmp.path().join("ran.marker");
+    let marker_for_hook = marker.clone();
+    h.runner.on_run(Box::new(move |req| {
+        if !req.args.iter().any(|a| a == "--appimage-extract") {
+            return None;
+        }
+        std::fs::write(&marker_for_hook, b"ran").ok()?;
+        Some(goshaim_core::process::ProcessResult {
+            program: req.program.clone(),
+            exit_code: 0,
+            ..Default::default()
+        })
+    }));
+    c.settings_mut()
+        .set_unsafe_extraction_fallback(true)
+        .expect("the owner can turn the fallback on");
+    let path = common::write_fixture(h.tmp.path(), "Demo.AppImage");
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+
+    let code =
+        goshaim_core::cli::run_inspect_probe(&c, path.to_str().unwrap(), true, &mut out, &mut err);
+
+    let text = String::from_utf8_lossy(&out).into_owned();
+    let stderr = String::from_utf8_lossy(&err).into_owned();
+    assert!(marker.exists(), "the AppImage did not run");
+    assert!(
+        text.contains("INSPECT_EXECUTED_UNSAFE"),
+        "probe output: {text}"
+    );
+    assert_eq!(code as i32, goshaim_core::types::ExitCode::Failure as i32);
+    let json: serde_json::Value = serde_json::from_str(text.lines().next().unwrap_or(""))
+        .expect("the probe prints JSON first");
+    assert_eq!(
+        json["unsafe_fallback"],
+        serde_json::json!(true),
+        "json: {json}"
+    );
+    let warnings = json["warnings"].as_array().cloned().unwrap_or_default();
+    assert!(
+        warnings.iter().any(|w| w
+            .as_str()
+            .is_some_and(|w| w.contains("Unsafe extraction fallback used"))),
+        "warnings in json: {json}"
+    );
+    assert!(
+        stderr.contains("Unsafe extraction fallback used"),
+        "stderr: {stderr}"
+    );
 }

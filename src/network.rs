@@ -67,6 +67,9 @@ pub trait NetworkClient: Send + Sync {
     /// payload path: a large or hostile response drives an allocation of that
     /// size and the process is OOM-killed. Nothing here holds more than one
     /// buffer at a time.
+    ///
+    /// `progress` is called after each chunk with the bytes written so far and
+    /// the expected total (0 when the server did not say).
     fn download_to_file(
         &self,
         url: &str,
@@ -74,19 +77,41 @@ pub trait NetworkClient: Send + Sync {
         max_bytes: u64,
         cancel: &std::sync::atomic::AtomicBool,
         local: Local,
+        progress: &mut dyn FnMut(u64, u64),
     ) -> Result<u64, String>;
 }
 
 /// Copy `reader` into `dest` with a byte ceiling and cancellation, creating the
 /// file mode 0600 and removing it on any failure.
 pub fn stream_to_file<R: Read>(
-    mut reader: R,
+    reader: R,
     dest: &std::path::Path,
     max_bytes: u64,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<u64, String> {
+    stream_to_file_reporting(reader, dest, max_bytes, cancel, 0, &mut |_, _| {})
+}
+
+/// As `stream_to_file`, and report `(bytes written, expected total)` after each
+/// chunk. `expected` is 0 when the size is not known.
+///
+/// This writes only to `dest`, which the caller chose as private staging. A
+/// cancelled stream creates nothing, and removes what it wrote before it reports
+/// the cancel. It may run on a helper thread that outlives the caller's wait, so
+/// nothing here renames or touches anything beyond `dest`.
+pub fn stream_to_file_reporting<R: Read>(
+    mut reader: R,
+    dest: &std::path::Path,
+    max_bytes: u64,
+    cancel: &std::sync::atomic::AtomicBool,
+    expected: u64,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<u64, String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("Cancelled".to_string());
+    }
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -103,7 +128,15 @@ pub fn stream_to_file<R: Read>(
             return Err("Cancelled".to_string());
         }
         let n = match reader.read(&mut buf) {
-            Ok(0) => break,
+            Ok(0) => {
+                // A cancel that arrives during the last read is not a success.
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    drop(file);
+                    let _ = std::fs::remove_file(dest);
+                    return Err("Cancelled".to_string());
+                }
+                break;
+            }
             Ok(n) => n,
             Err(e) => {
                 drop(file);
@@ -122,6 +155,7 @@ pub fn stream_to_file<R: Read>(
             let _ = std::fs::remove_file(dest);
             return Err(format!("Cannot write {}: {e}", dest.display()));
         }
+        progress(total, expected);
     }
     file.flush()
         .map_err(|e| format!("Cannot write {}: {e}", dest.display()))?;
@@ -385,10 +419,11 @@ impl NetworkClient for ReqwestClient {
         max_bytes: u64,
         cancel: &std::sync::atomic::AtomicBool,
         local: Local,
+        progress: &mut dyn FnMut(u64, u64),
     ) -> Result<u64, String> {
         if url.starts_with("ftp://") || url.starts_with("FTP://") {
             let body = ftp_download(url, max_bytes, local)?;
-            return stream_to_file(body.as_slice(), dest, max_bytes, cancel);
+            return stream_to_file_reporting(body.as_slice(), dest, max_bytes, cancel, 0, progress);
         }
         let checked = url_guard::validate(url, false, local.allowed())?;
         let (host, port) = host_port(&checked.url)?;
@@ -404,7 +439,8 @@ impl NetworkClient for ReqwestClient {
                 response.status()
             ));
         }
-        stream_to_file(response, dest, max_bytes, cancel)
+        let expected = response.content_length().unwrap_or(0);
+        stream_to_file_reporting(response, dest, max_bytes, cancel, expected, progress)
     }
 }
 
@@ -709,8 +745,10 @@ impl NetworkClient for FakeNetwork {
         max_bytes: u64,
         cancel: &std::sync::atomic::AtomicBool,
         local: Local,
+        progress: &mut dyn FnMut(u64, u64),
     ) -> Result<u64, String> {
         let body = self.download_bounded(url, max_bytes, local)?;
-        stream_to_file(body.as_slice(), dest, max_bytes, cancel)
+        let expected = body.len() as u64;
+        stream_to_file_reporting(body.as_slice(), dest, max_bytes, cancel, expected, progress)
     }
 }

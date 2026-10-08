@@ -66,6 +66,7 @@ fn integrate(h: &Harness) -> goshaim_core::types::IntegrateResult {
             replace_uuid: String::new(),
             copy_mode: CopyMode::Copy,
             assume_yes: true,
+            confirm_unsafe: false,
         },
         &AtomicBool::new(false),
     )
@@ -152,6 +153,7 @@ fn icon_staging_is_owned_and_removable() {
             replace_uuid: String::new(),
             copy_mode: CopyMode::Copy,
             assume_yes: true,
+            confirm_unsafe: false,
         },
         &AtomicBool::new(false),
     );

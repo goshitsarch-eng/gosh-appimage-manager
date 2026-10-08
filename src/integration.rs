@@ -58,12 +58,26 @@ impl<'a> IntegrationService<'a> {
         cancel: &AtomicBool,
         existing: Option<&str>,
     ) -> crate::types::InspectionResult {
-        let options = InspectOptions {
-            allow_unsafe_extract: false,
-            confirm_unsafe_extract: false,
-            max_bytes: self.settings.max_appimage_bytes(),
-            ..Default::default()
-        };
+        self.inspect_confirmed(path, cancel, existing, false)
+    }
+
+    /// Inspect for an operation. The unsafe fallback runs only when `confirm_unsafe`
+    /// says the user confirmed this file, and the stored setting is on.
+    pub fn inspect_confirmed(
+        &self,
+        path: &str,
+        cancel: &AtomicBool,
+        existing: Option<&str>,
+        confirm_unsafe: bool,
+    ) -> crate::types::InspectionResult {
+        let options = crate::inspector::gated_options(
+            self.settings,
+            &InspectOptions {
+                max_bytes: self.settings.max_appimage_bytes(),
+                confirm_unsafe,
+                ..Default::default()
+            },
+        );
         self.inspector.inspect(path, &options, cancel, existing)
     }
 
@@ -74,18 +88,22 @@ impl<'a> IntegrationService<'a> {
         cancel: &AtomicBool,
     ) -> IntegrateResult {
         let mut result = IntegrateResult::default();
-        match self.integrate_inner(registry, req, cancel) {
+        let mut warnings = Vec::new();
+        match self.integrate_inner(registry, req, cancel, &mut warnings) {
             Ok((app, source_removed)) => {
                 result.ok = true;
                 result.app = app;
                 result.source_removed = source_removed;
+                result.warnings = warnings;
             }
             Err(Failure {
                 error,
                 rolled_back,
                 partial,
                 source_removed,
+                fallback_pending,
             }) => {
+                result.fallback_pending = fallback_pending;
                 result.error = error;
                 result.rolled_back = rolled_back;
                 result.partial = partial;
@@ -100,6 +118,7 @@ impl<'a> IntegrationService<'a> {
         registry: &mut ManagedRegistry,
         req: &IntegrateRequest,
         cancel: &AtomicBool,
+        warnings: &mut Vec<String>,
     ) -> Result<(InstalledApp, bool), Failure> {
         let mut rolled_back: Vec<String> = Vec::new();
         // 1. Validate + inspect before any write.
@@ -107,7 +126,7 @@ impl<'a> IntegrationService<'a> {
             .by_path(&req.source_path)
             .map(|a| a.uuid)
             .unwrap_or_default();
-        let inspected = self.inspect_only(
+        let inspected = self.inspect_confirmed(
             &req.source_path,
             cancel,
             if existing.is_empty() {
@@ -115,13 +134,25 @@ impl<'a> IntegrationService<'a> {
             } else {
                 Some(existing.as_str())
             },
+            req.confirm_unsafe,
         );
+        // Metadata that could not be read is a warning the user must see: the
+        // app is still integrated, but under a file-name fallback and no icon.
+        warnings.extend(inspected.warnings.iter().cloned());
         if !inspected.magic_valid {
             return Err(Failure::new(if inspected.error.is_empty() {
                 "Not a valid AppImage".to_string()
             } else {
                 inspected.error.clone()
             }));
+        }
+        if inspected.fallback_pending {
+            // Nothing is installed and the source stays put until the user confirms.
+            inspected.discard_staging();
+            return Err(Failure {
+                fallback_pending: true,
+                ..Failure::new(PENDING_FALLBACK_MESSAGE.to_string())
+            });
         }
         if !inspected.architecture_supported {
             return Err(Failure::new(format!(
@@ -215,8 +246,13 @@ impl<'a> IntegrationService<'a> {
             Failure::new(e)
         })?;
 
-        // Identity: reuse UUID + preserve customisation on replace.
+        // Identity: a replace keeps the UUID and the user's customisation. The
+        // provenance (date and folder) is the replacing integration's: the copy
+        // now installed came from this source, today, so the old install's date
+        // and folder do not carry over.
         let mut app = InstalledApp::new_owned();
+        app.integrated_at = crate::tasks::now_unix();
+        app.integrated_folder = source_folder(&req.source_path);
         if let Some(old) = &replacing {
             app.uuid = old.uuid.clone();
             app.arguments = old.arguments.clone();
@@ -229,10 +265,8 @@ impl<'a> IntegrationService<'a> {
             app.uuid = ManagedRegistry::new_uuid();
         }
         app.name = if inspected.metadata.name.is_empty() {
-            destination
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "AppImage".to_string())
+            // The source's own file name, not the managed copy's sanitised one.
+            desktop::display_name_from_file(&source_name)
         } else {
             inspected.metadata.name.clone()
         };
@@ -425,6 +459,7 @@ impl<'a> IntegrationService<'a> {
                 rolled_back,
                 partial: false,
                 source_removed: false,
+                fallback_pending: false,
             });
         }
         // Success: drop backups + rollback material.
@@ -469,6 +504,7 @@ impl<'a> IntegrationService<'a> {
                 rolled_back,
                 partial,
                 source_removed,
+                fallback_pending: false,
             });
         }
         Self::clear_icon_staging(&inspected);
@@ -576,6 +612,45 @@ fn restore_live(backup: &Option<PathBuf>, live: &Path) {
     }
 }
 
+/// The folder an integration's source sits in, as the registry records it: the
+/// parent of the source path, made absolute so it names a real place. The CLI
+/// passes its argument as given, so a relative path is common there. Empty when
+/// the path names no folder at all.
+fn source_folder(source_path: &str) -> String {
+    let folder = match Path::new(source_path).parent() {
+        // A bare file name sits in the working directory.
+        Some(dir) if dir.as_os_str().is_empty() => Path::new("."),
+        Some(dir) => dir,
+        None => return String::new(),
+    };
+    std::path::absolute(folder)
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::source_folder;
+
+    #[test]
+    fn source_folder_is_the_parent_of_an_absolute_source() {
+        assert_eq!(
+            source_folder("/home/someone/Downloads/Quill.AppImage"),
+            "/home/someone/Downloads"
+        );
+        assert_eq!(source_folder("/Quill.AppImage"), "/");
+    }
+
+    #[test]
+    fn source_folder_makes_a_relative_source_absolute() {
+        let cwd = std::env::current_dir().unwrap();
+        let cwd = cwd.to_string_lossy().into_owned();
+        assert_eq!(source_folder("Quill.AppImage"), cwd);
+        assert_eq!(source_folder("./Quill.AppImage"), cwd);
+        assert_eq!(source_folder("sub/Quill.AppImage"), format!("{cwd}/sub"),);
+    }
+}
+
 fn ensure_appimage_suffix(path: &Path) -> PathBuf {
     if path
         .extension()
@@ -614,12 +689,17 @@ fn choose_keep_both(dir: &Path, candidate: &Path) -> PathBuf {
     ))
 }
 
+/// Why a pending file was not integrated, shown to the user.
+const PENDING_FALLBACK_MESSAGE: &str = "Metadata could not be read safely, so this AppImage needs your confirmation before its own --appimage-extract is run to read it. Nothing was run or installed.";
+
 #[derive(Debug)]
+
 struct Failure {
     error: String,
     rolled_back: Vec<String>,
     partial: bool,
     source_removed: bool,
+    fallback_pending: bool,
 }
 
 impl Failure {
@@ -629,6 +709,7 @@ impl Failure {
             rolled_back: Vec::new(),
             partial: false,
             source_removed: false,
+            fallback_pending: false,
         }
     }
 }
