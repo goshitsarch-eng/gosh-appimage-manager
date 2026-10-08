@@ -6,30 +6,35 @@ Issues and pull requests are welcome. Keep changes small and explain the
 ## Setup
 
 - Rust 1.89 or newer (see `rust-version` in `Cargo.toml`).
-- For the GUI: Wayland and XKB development headers
-  (`libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev` on Debian/Ubuntu,
-  `wayland-devel libxkbcommon-devel` on Fedora). The first
-  `--features gui` build needs network for the pinned libcosmic checkout.
-- Optional: `just`, `desktop-file-validate`, `appstreamcli`,
-  `flatpak-builder` + the freedesktop 23.08 SDK, and `xvfb`/`xdotool`/
-  ImageMagick/`python3` for the GUI smoke test.
+- For the GUI: Flutter 3.47.6 on Linux, plus clang, CMake, Ninja, pkg-config,
+  and the GTK 3 development headers. The package list for Debian/Ubuntu is in
+  `.github/workflows/flutter.yml`. Building the GUI also builds the Rust
+  bridge in `bridge/`.
+- Optional: `just`, `desktop-file-validate`, `appstreamcli`, and
+  `flatpak-builder` with the freedesktop 26.08 SDK.
 
 ## Everyday commands
 
 ```sh
-cargo build                      # CLI only
-cargo build --features gui       # GUI build
+cargo build                      # the Rust core, CLI, and launcher
 cargo test                       # full test suite
 cargo clippy --all-targets -- -D warnings
-cargo clippy --features gui --all-targets -- -D warnings
 cargo fmt --check
+just flutter-check               # Flutter format, analysis, and tests
 ```
 
-`./scripts/verify.sh` chains all of the above plus an isolated-`HOME`
-`--self-test`, desktop/AppStream validation, the GUI smoke test, and the
-x86_64 Flatpak build. Whatever a prerequisite is missing for is skipped
-loudly, never faked — read the tail of its output. `SKIP_GUI=1` and
-`SKIP_FLATPAK=1` skip the heavy stages.
+To run the GUI from a checkout, build it and point the launcher at the
+executable with `GOSH_APPIMAGE_GUI` (an absolute path):
+
+```sh
+(cd flutter && flutter build linux --release)
+GOSH_APPIMAGE_GUI=/abs/path/to/flutter/build/linux/<arch>/release/bundle/gosh-appimage-manager-gui cargo run
+```
+
+`./scripts/verify.sh` chains the Rust gates above plus an isolated-`HOME`
+`--self-test`, desktop/AppStream validation, and the x86_64 Flatpak build.
+Whatever a prerequisite is missing for is skipped loudly, never faked — read
+the tail of its output. `SKIP_FLATPAK=1` skips the Flatpak stage.
 
 ## Expectations
 
@@ -46,17 +51,13 @@ loudly, never faked — read the tail of its output. `SKIP_GUI=1` and
 
 ## Translations
 
-See `i18n/README.md` — catalogs are plain JSON keyed by message id, loaded
-at runtime, no rebuild needed.
+The Rust core loads JSON message catalogs (see `i18n/README.md`), but no
+interface uses them yet.
 
 ## Docs worth knowing
 
-- `docs/documentation/APP-INVENTORY.md` — what the app actually does,
-  feature by feature, with source references.
-- `docs/documentation/PLAN.md` — how the documentation set is organized.
-- `docs/rewrite-3.0.0.md` — module map and packaging decisions.
-- `docs/implementation-brief.md` — the binding behavioural spec
-  (superseded on stack, current on behaviour).
-- `AUDIT.md`, `docs/audit/`, `docs/migration/` — dated records of past
-  audits and hardening rounds. Treat their "current state" lines as
-  snapshots, not status.
+- `README.md` — what the app does, the CLI reference, and build steps.
+- `docs/RELEASING.md` — how releases are cut.
+- `docs/verification.md` — the evidence record for the current build.
+- `docs/flutter/` — the Flutter front end: architecture and status.
+- `AGENTS.md` — the safety contract and engineering rules.

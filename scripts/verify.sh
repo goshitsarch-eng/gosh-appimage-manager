@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Gosh AppImage Manager — single verification entry point.
 # Chains the existing gates; prerequisites that are absent are skipped LOUDLY,
-# never faked as passes. Set SKIP_FLATPAK=1 / SKIP_GUI=1 to skip those stages.
+# never faked as passes. Set SKIP_FLATPAK=1 to skip the Flatpak stage.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -19,17 +19,9 @@ note "stage: cargo test (--no-fail-fast so one failure cannot hide the rest)"
 cargo test --no-fail-fast
 pass_step "cargo test"
 
-note "stage: clippy (default features)"
+note "stage: clippy"
 cargo clippy --all-targets -- -D warnings
-pass_step "clippy default"
-
-if pkg-config --exists wayland-client xkbcommon 2>/dev/null; then
-  note "stage: clippy (gui features)"
-  cargo clippy --features gui --all-targets -- -D warnings
-  pass_step "clippy gui"
-else
-  skip_step "clippy gui (missing wayland/xkb system headers)"
-fi
+pass_step "clippy"
 
 note "stage: fmt"
 cargo fmt --check
@@ -57,17 +49,6 @@ if command -v appstreamcli >/dev/null 2>&1; then
   pass_step "appstreamcli"
 else
   skip_step "appstreamcli (not installed)"
-fi
-
-if [ "${SKIP_GUI:-0}" = "1" ]; then
-  skip_step "gui smoke (SKIP_GUI=1)"
-elif command -v Xvfb >/dev/null 2>&1 && command -v xdotool >/dev/null 2>&1; then
-  note "stage: gui build + smoke"
-  cargo build --features gui
-  bash tools/gui-smoke.sh
-  pass_step "gui smoke"
-else
-  skip_step "gui smoke (needs Xvfb + xdotool; GUI compile checked by clippy-gui where possible)"
 fi
 
 if [ "${SKIP_FLATPAK:-0}" = "1" ]; then

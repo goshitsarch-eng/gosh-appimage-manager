@@ -1,8 +1,8 @@
 # Gosh AppImage Manager
 
-Inspect, integrate, launch, update, and remove AppImages. Written in Rust
-with libcosmic (COSMIC Epoch); one `gosh-appimage-manager` binary provides
-both the desktop app and a scriptable CLI.
+Inspect, integrate, launch, update, and remove AppImages. A Rust core does
+the work, a Flutter GUI is the desktop app, and one `gosh-appimage-manager`
+binary provides a scriptable CLI and starts that GUI.
 
 - Application ID: `com.goshapps.AppImageManager`
 - Version 3.0.0 · GPL-3.0-or-later · by Gosh Apps / Gosh-Its-Arch
@@ -37,8 +37,8 @@ AI-assisted software is something you're comfortable using.
   referenced by desktop entries elsewhere when discovery is enabled — are
   listed for adoption.
 - **CLI** with JSON output, non-mutating probes, and an offline self-test.
-- **Localizable.** The interface is fully routed through JSON message
-  catalogs; only English ships today.
+- **Localizable.** The Rust core loads JSON message catalogs (`i18n/`), but
+  no interface uses them yet; only English ships.
 
 ## Install
 
@@ -60,29 +60,26 @@ section below.
 
 Each release also carries `…-linux-<arch>.tar.gz` containing the binary,
 desktop integration files, icons, licenses, and an `install.sh` that
-installs under `/usr/local` (or `PREFIX=~/.local`).
+installs under `/usr/local` (or `PREFIX=~/.local`). The tarball has the CLI
+and launcher only; the desktop app comes with the Flatpak.
 
 ### Build from source
 
 Native build needs Rust 1.89 or newer — that is what the locked dependency
-graph requires (`rust-version` in `Cargo.toml`). The GUI additionally needs
-Wayland and XKB development headers:
+graph requires (`rust-version` in `Cargo.toml`). The GUI is a separate
+Flutter app in `flutter/`, built on the Rust core through the bridge in
+`bridge/`; see [Development](#development).
 
 ```sh
-# Debian/Ubuntu
-sudo apt-get install libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev
-# Fedora
-sudo dnf install wayland-devel libxkbcommon-devel
+cargo build                 # the Rust core, CLI, and launcher
+cargo test
 ```
 
-```sh
-cargo build --features gui          # needs network once, for the pinned libcosmic checkout
-cargo run --features gui            # run the app
-cargo build                         # CLI-only build (no GUI deps)
-```
-
-Without `--features gui` the same binary serves the CLI and prints a hint
-when run with no command.
+With a command, the binary runs the CLI. With no command, it starts the GUI
+from `../libexec/gosh-appimage-manager/gosh-appimage-manager-gui`, relative
+to its own directory. Set `GOSH_APPIMAGE_GUI` to an absolute path to run a
+different GUI build. If the GUI is missing, the binary prints one line and a
+hint to stderr and exits with status 1.
 
 ## Using the app
 
@@ -122,8 +119,8 @@ library · Ctrl+F check for updates · Esc dismiss a dialog.
 - Verbose diagnostics — per-operation lines on stderr.
 - Check for updates in the background (notify only), and Run those checks
   at login via an autostart entry.
-- Unsafe extraction fallback — see Safety below; today it cannot actually
-  run.
+- Unsafe extraction fallback — opt-in in Settings, off by default. See Safety
+  below.
 
 ## CLI
 
@@ -131,7 +128,7 @@ The same executable doubles as a CLI; commands never start the GUI.
 `--version` prints `3.0.0`. `--help` (or `-h`) prints usage.
 
 ```
-gosh-appimage-manager --integrate <path> [--keep-both|--replace] [--replace-uuid UUID|--target PATH] [--yes]
+gosh-appimage-manager --integrate <path> [--keep-both|--replace] [--replace-uuid UUID|--target PATH] [--yes] [--allow-unsafe]
 gosh-appimage-manager --update <path>|--all [--yes] [--force]
 gosh-appimage-manager --remove <path> [--yes] [--delete]
 gosh-appimage-manager --remove-all [--yes] [--delete]
@@ -145,9 +142,14 @@ gosh-appimage-manager --set-update-source <path> --unset
 gosh-appimage-manager --fetch-updates
 gosh-appimage-manager --self-test
 gosh-appimage-manager --probe-host
-gosh-appimage-manager --probe-inspect <path>
+gosh-appimage-manager --probe-inspect <path> [--allow-unsafe]
 gosh-appimage-manager --probe-autostart
 ```
+
+`--allow-unsafe` lets the unsafe extraction fallback run for that one file,
+when Settings' Unsafe extraction fallback is also on. Without it, an AppImage
+that needs the fallback is left pending: `--integrate` exits with code 5 and
+installs nothing, and the message names the flag to add.
 
 `-y` is a short alias for `--yes`. Destructive commands ask for
 confirmation on a terminal; without one they refuse (exit 5) unless `--yes`
@@ -168,8 +170,11 @@ needs `project` (`host` defaults to gitlab.com); `codeberg` needs `owner`,
 `url` (a `version` key is recommended — without one the source reports
 "no version information"). `allow_local_network=true` opts a source into
 private/loopback endpoints; embedded metadata can never set it. The GUI's
-update-source field accepts a single `key=value` line, so multi-key
-managers are configured from the CLI.
+update-source field accepts a single `key=value` line. For GitHub that line is
+`repo=owner/name`. The AppImage's `filename` is still needed unless its embedded
+update information names the same repo; the GUI then shows the exact
+`--set-update-source` command. Other multi-key managers are configured from the
+CLI.
 
 `--list-discovered` reports AppImages in the managed folder and, when
 discovery is enabled, ones referenced by desktop entries elsewhere.
@@ -217,23 +222,24 @@ variables are not read — inside the Flatpak these are the sandbox's
 cargo test                        # full suite: fake seams + synthetic fixtures, no network
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
-./scripts/verify.sh               # everything above + self-test + validators + optional GUI smoke/Flatpak
+./scripts/verify.sh               # everything above + self-test + validators + optional Flatpak
 ```
 
-`just` wraps the common flows (`just build`, `build-gui`, `release`,
-`test`, `lint`, `validate`, `vendor`, `flatpak-x86_64`,
+`just` wraps the common flows (`just build`, `test`, `lint`, `fmt-check`,
+`self-test`, `flutter-check`, `validate`, `vendor`, `flatpak-x86_64`,
 `flatpak-aarch64`). See [CONTRIBUTING.md](CONTRIBUTING.md) for the full
-workflow, `docs/RELEASING.md` for how releases are cut, and
-`docs/documentation/APP-INVENTORY.md` for a feature-level map of the
-code.
+workflow and `docs/RELEASING.md` for how releases are cut.
 
 ## Flatpak
 
-Manifest: `packaging/com.goshapps.AppImageManager.yml` (freedesktop 23.08 +
-a pinned Rust 1.90.0 toolchain — the SDK extension's 1.81 predates the
-dependency graph). One manifest builds both x86_64 and aarch64; Cargo deps
-are vendored in `packaging/cargo-sources.json` (`just vendor
-/path/to/flatpak-builder-tools` regenerates it).
+Manifest: `packaging/com.goshapps.AppImageManager.yml` (freedesktop 26.08).
+The Rust core uses a pinned Rust 1.90.0 toolchain (the SDK extension's 1.81
+predates the dependency graph); its Cargo deps are vendored in
+`packaging/cargo-sources.json` (`just vendor /path/to/flatpak-builder-tools`
+regenerates it). The Flutter GUI is a second module that builds the bundle
+the way `.github/workflows/flutter.yml` does and installs it to
+`/app/libexec/gosh-appimage-manager/`. That module uses the network during
+the build. One manifest builds both x86_64 and aarch64.
 
 ```sh
 flatpak-builder --user --force-clean build-dir packaging/com.goshapps.AppImageManager.yml --arch=x86_64
@@ -292,10 +298,13 @@ where they are.
 - Launch is start-only and detached; the manager never waits then kills.
 - A failed integration removes what it created and restores what it
   replaced.
-- The unsafe `--appimage-extract` fallback exists in code but is
-  unreachable: it needs a per-file confirmation no UI offers. Enabling it
-  in Settings only adds a warning after failed safe extraction. Treat it
-  as disabled regardless of the switch.
+- The unsafe `--appimage-extract` fallback is opt-in. It is off by default, and
+  Settings' Unsafe extraction fallback turns it on after a warning. It runs only
+  after safe extraction fails, and only for a file you confirm, one file at a
+  time (`--allow-unsafe` on the command line, or the confirmation in the app).
+  It runs the AppImage itself: in a private staging copy, with a timeout, a
+  minimal environment, and a check of the extracted tree. Turn it on only for
+  AppImages you trust.
 - No telemetry. Network requests go only to update endpoints you configured
   or that an AppImage's embedded metadata named, and only when checking or
   applying updates.
@@ -309,13 +318,12 @@ where they are.
   still integrate, named after the file.
 - zsync metadata is parsed, but updates always download the full file —
   no binary deltas.
-- The GUI has been rendered and driven on a headless X server
-  (`tools/gui-smoke.sh`), not exercised under a real COSMIC/Wayland
-  compositor — window-manager behavior (tiling, fractional scaling,
-  minimum size) is the compositor's. See `docs/verification.md`.
+- The GUI is written in Flutter. Its feature parity and verification status
+  are recorded in `docs/flutter/PARITY.md` and `docs/verification.md`.
 - Only English ships. The interface is localizable — see `i18n/README.md`.
-- The GUI's update-source field takes a single `key=value` pair; configure
-  multi-key managers via `--set-update-source`.
+- The GUI's update-source field takes a single `key=value` pair. A GitHub
+  source that needs a `filename` is set with the command the GUI shows; other
+  multi-key managers are configured via `--set-update-source`.
 - FTP is a legacy explicit option with an insecure-transport warning; URLs
   with credentials are rejected.
 - Static and FTP sources without a `version` key report "no version

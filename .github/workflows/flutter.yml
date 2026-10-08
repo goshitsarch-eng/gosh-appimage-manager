@@ -109,7 +109,7 @@ jobs:
 
       - name: Bundle architecture matches the runner
         run: |
-          binary="$(find flutter/build/linux -path '*/release/bundle/gosh_appimage_flutter' | head -1)"
+          binary="$(find flutter/build/linux -path '*/release/bundle/gosh-appimage-manager-gui' | head -1)"
           test -n "$binary"
           file "$binary"
           file "$binary" | grep -q "${{ matrix.expected }}"
