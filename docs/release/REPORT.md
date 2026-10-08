@@ -15,7 +15,8 @@ Date: 2026-09-13. Repo: `goshitsarch-eng/gosh-appimage-manager` (private).
   which holds `contents: write` for `gh release`.
 - **Artifacts:**
   `gosh-appimage-manager-<ver>-linux-<arch>.{tar.gz,flatpak}` + `SHA256SUMS`.
-- **Tarball:** `cargo build --release --features gui` →
+- **Tarball:** `cargo build --release` (CLI and launcher; the GUI feature
+  was removed after this report) →
   `scripts/package-release.sh` (intentional share/bin layout + install.sh).
 - **Flatpak:** `flatpak-builder` on freedesktop 23.08 with vendored cargo
   sources; in-job `file` arch check + packaged `--self-test`, then
