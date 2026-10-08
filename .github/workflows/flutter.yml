@@ -4,7 +4,7 @@
 # the local verification on an aarch64 host.
 on:
   push:
-    branches: [main]
+    branches: [main, "feature/**"]
   pull_request:
   workflow_dispatch:
 
