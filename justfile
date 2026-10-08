@@ -17,6 +17,12 @@ release:
 test:
     cargo test
 
+# Flutter front end: format, analysis, and the Dart tests. The bridge tests drive
+# the real core, so they run against a fresh scratch home, never a real one.
+flutter-check:
+    cd bridge && cargo build
+    cd flutter && dart format --output=none --set-exit-if-changed lib test && flutter analyze && GOSHAIM_HOME="$(mktemp -d)" flutter test
+
 lint:
     cargo clippy --all-targets -- -D warnings
 

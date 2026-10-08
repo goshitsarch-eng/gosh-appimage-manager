@@ -6,7 +6,14 @@
 // Static analysis wrongly picks the IO variant, thus ignore this
 // ignore_for_file: argument_type_not_assignable
 
-import 'api/app.dart';
+import 'api/common.dart';
+import 'api/dto.dart';
+import 'api/inspect.dart';
+import 'api/integrate.dart';
+import 'api/library.dart';
+import 'api/settings.dart';
+import 'api/system.dart';
+import 'api/updates.dart';
 
 import 'dart:async';
 import 'dart:convert';
@@ -24,19 +31,46 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   });
 
   @protected
-  AnyhowException dco_decode_AnyhowException(dynamic raw);
-
-  @protected
-  RustStreamSink<int> dco_decode_StreamSink_u_32_Sse(dynamic raw);
-
-  @protected
   String dco_decode_String(dynamic raw);
+
+  @protected
+  AppDto dco_decode_app_dto(dynamic raw);
+
+  @protected
+  AppearanceChoice dco_decode_appearance_choice(dynamic raw);
+
+  @protected
+  BatchDto dco_decode_batch_dto(dynamic raw);
 
   @protected
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  AppDto dco_decode_box_autoadd_app_dto(dynamic raw);
+
+  @protected
+  AppearanceChoice dco_decode_box_autoadd_appearance_choice(dynamic raw);
+
+  @protected
+  bool dco_decode_box_autoadd_bool(dynamic raw);
+
+  @protected
+  PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
+
+  @protected
+  SettingsPatchDto dco_decode_box_autoadd_settings_patch_dto(dynamic raw);
+
+  @protected
+  ConflictChoice dco_decode_conflict_choice(dynamic raw);
+
+  @protected
   CoreError dco_decode_core_error(dynamic raw);
+
+  @protected
+  DiscoveredDto dco_decode_discovered_dto(dynamic raw);
+
+  @protected
+  EnvVarDto dco_decode_env_var_dto(dynamic raw);
 
   @protected
   ErrorKind dco_decode_error_kind(dynamic raw);
@@ -45,19 +79,79 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_i_32(dynamic raw);
 
   @protected
-  InspectSummary dco_decode_inspect_summary(dynamic raw);
+  PlatformInt64 dco_decode_i_64(dynamic raw);
+
+  @protected
+  InspectDto dco_decode_inspect_dto(dynamic raw);
+
+  @protected
+  KeyValueDto dco_decode_key_value_dto(dynamic raw);
+
+  @protected
+  LibraryDto dco_decode_library_dto(dynamic raw);
 
   @protected
   List<String> dco_decode_list_String(dynamic raw);
 
   @protected
+  List<AppDto> dco_decode_list_app_dto(dynamic raw);
+
+  @protected
+  List<DiscoveredDto> dco_decode_list_discovered_dto(dynamic raw);
+
+  @protected
+  List<EnvVarDto> dco_decode_list_env_var_dto(dynamic raw);
+
+  @protected
+  List<KeyValueDto> dco_decode_list_key_value_dto(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
-  int dco_decode_u_32(dynamic raw);
+  List<TaskDto> dco_decode_list_task_dto(dynamic raw);
 
   @protected
-  BigInt dco_decode_u_64(dynamic raw);
+  List<UpdateFailureDto> dco_decode_list_update_failure_dto(dynamic raw);
+
+  @protected
+  List<UpdateOfferDto> dco_decode_list_update_offer_dto(dynamic raw);
+
+  @protected
+  String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  AppDto? dco_decode_opt_box_autoadd_app_dto(dynamic raw);
+
+  @protected
+  AppearanceChoice? dco_decode_opt_box_autoadd_appearance_choice(dynamic raw);
+
+  @protected
+  bool? dco_decode_opt_box_autoadd_bool(dynamic raw);
+
+  @protected
+  PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw);
+
+  @protected
+  Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  OutcomeDto dco_decode_outcome_dto(dynamic raw);
+
+  @protected
+  SettingsDto dco_decode_settings_dto(dynamic raw);
+
+  @protected
+  SettingsPatchDto dco_decode_settings_patch_dto(dynamic raw);
+
+  @protected
+  TaskDto dco_decode_task_dto(dynamic raw);
+
+  @protected
+  TaskKindDto dco_decode_task_kind_dto(dynamic raw);
+
+  @protected
+  TaskStateDto dco_decode_task_state_dto(dynamic raw);
 
   @protected
   int dco_decode_u_8(dynamic raw);
@@ -66,21 +160,59 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void dco_decode_unit(dynamic raw);
 
   @protected
-  AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
+  UpdateFailureDto dco_decode_update_failure_dto(dynamic raw);
 
   @protected
-  RustStreamSink<int> sse_decode_StreamSink_u_32_Sse(
-    SseDeserializer deserializer,
-  );
+  UpdateOfferDto dco_decode_update_offer_dto(dynamic raw);
+
+  @protected
+  UpdateScanDto dco_decode_update_scan_dto(dynamic raw);
 
   @protected
   String sse_decode_String(SseDeserializer deserializer);
 
   @protected
+  AppDto sse_decode_app_dto(SseDeserializer deserializer);
+
+  @protected
+  AppearanceChoice sse_decode_appearance_choice(SseDeserializer deserializer);
+
+  @protected
+  BatchDto sse_decode_batch_dto(SseDeserializer deserializer);
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  AppDto sse_decode_box_autoadd_app_dto(SseDeserializer deserializer);
+
+  @protected
+  AppearanceChoice sse_decode_box_autoadd_appearance_choice(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  bool sse_decode_box_autoadd_bool(SseDeserializer deserializer);
+
+  @protected
+  PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer);
+
+  @protected
+  SettingsPatchDto sse_decode_box_autoadd_settings_patch_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ConflictChoice sse_decode_conflict_choice(SseDeserializer deserializer);
+
+  @protected
   CoreError sse_decode_core_error(SseDeserializer deserializer);
+
+  @protected
+  DiscoveredDto sse_decode_discovered_dto(SseDeserializer deserializer);
+
+  @protected
+  EnvVarDto sse_decode_env_var_dto(SseDeserializer deserializer);
 
   @protected
   ErrorKind sse_decode_error_kind(SseDeserializer deserializer);
@@ -89,19 +221,87 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
-  InspectSummary sse_decode_inspect_summary(SseDeserializer deserializer);
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
+
+  @protected
+  InspectDto sse_decode_inspect_dto(SseDeserializer deserializer);
+
+  @protected
+  KeyValueDto sse_decode_key_value_dto(SseDeserializer deserializer);
+
+  @protected
+  LibraryDto sse_decode_library_dto(SseDeserializer deserializer);
 
   @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
 
   @protected
+  List<AppDto> sse_decode_list_app_dto(SseDeserializer deserializer);
+
+  @protected
+  List<DiscoveredDto> sse_decode_list_discovered_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<EnvVarDto> sse_decode_list_env_var_dto(SseDeserializer deserializer);
+
+  @protected
+  List<KeyValueDto> sse_decode_list_key_value_dto(SseDeserializer deserializer);
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
-  int sse_decode_u_32(SseDeserializer deserializer);
+  List<TaskDto> sse_decode_list_task_dto(SseDeserializer deserializer);
 
   @protected
-  BigInt sse_decode_u_64(SseDeserializer deserializer);
+  List<UpdateFailureDto> sse_decode_list_update_failure_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<UpdateOfferDto> sse_decode_list_update_offer_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  AppDto? sse_decode_opt_box_autoadd_app_dto(SseDeserializer deserializer);
+
+  @protected
+  AppearanceChoice? sse_decode_opt_box_autoadd_appearance_choice(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  bool? sse_decode_opt_box_autoadd_bool(SseDeserializer deserializer);
+
+  @protected
+  PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer);
+
+  @protected
+  Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  OutcomeDto sse_decode_outcome_dto(SseDeserializer deserializer);
+
+  @protected
+  SettingsDto sse_decode_settings_dto(SseDeserializer deserializer);
+
+  @protected
+  SettingsPatchDto sse_decode_settings_patch_dto(SseDeserializer deserializer);
+
+  @protected
+  TaskDto sse_decode_task_dto(SseDeserializer deserializer);
+
+  @protected
+  TaskKindDto sse_decode_task_kind_dto(SseDeserializer deserializer);
+
+  @protected
+  TaskStateDto sse_decode_task_state_dto(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_8(SseDeserializer deserializer);
@@ -110,25 +310,70 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_decode_unit(SseDeserializer deserializer);
 
   @protected
-  void sse_encode_AnyhowException(
-    AnyhowException self,
-    SseSerializer serializer,
-  );
+  UpdateFailureDto sse_decode_update_failure_dto(SseDeserializer deserializer);
 
   @protected
-  void sse_encode_StreamSink_u_32_Sse(
-    RustStreamSink<int> self,
-    SseSerializer serializer,
-  );
+  UpdateOfferDto sse_decode_update_offer_dto(SseDeserializer deserializer);
+
+  @protected
+  UpdateScanDto sse_decode_update_scan_dto(SseDeserializer deserializer);
 
   @protected
   void sse_encode_String(String self, SseSerializer serializer);
 
   @protected
+  void sse_encode_app_dto(AppDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_appearance_choice(
+    AppearanceChoice self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_batch_dto(BatchDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_app_dto(AppDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_appearance_choice(
+    AppearanceChoice self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_i_64(
+    PlatformInt64 self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_settings_patch_dto(
+    SettingsPatchDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_conflict_choice(
+    ConflictChoice self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_core_error(CoreError self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_discovered_dto(DiscoveredDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_env_var_dto(EnvVarDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_error_kind(ErrorKind self, SseSerializer serializer);
@@ -137,13 +382,40 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
-  void sse_encode_inspect_summary(
-    InspectSummary self,
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_inspect_dto(InspectDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_key_value_dto(KeyValueDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_library_dto(LibraryDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_app_dto(List<AppDto> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_discovered_dto(
+    List<DiscoveredDto> self,
     SseSerializer serializer,
   );
 
   @protected
-  void sse_encode_list_String(List<String> self, SseSerializer serializer);
+  void sse_encode_list_env_var_dto(
+    List<EnvVarDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_key_value_dto(
+    List<KeyValueDto> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_prim_u_8_strict(
@@ -152,16 +424,91 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_u_32(int self, SseSerializer serializer);
+  void sse_encode_list_task_dto(List<TaskDto> self, SseSerializer serializer);
 
   @protected
-  void sse_encode_u_64(BigInt self, SseSerializer serializer);
+  void sse_encode_list_update_failure_dto(
+    List<UpdateFailureDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_update_offer_dto(
+    List<UpdateOfferDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_app_dto(
+    AppDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_appearance_choice(
+    AppearanceChoice? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_bool(bool? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_i_64(
+    PlatformInt64? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_list_prim_u_8_strict(
+    Uint8List? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_outcome_dto(OutcomeDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_settings_dto(SettingsDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_settings_patch_dto(
+    SettingsPatchDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_task_dto(TaskDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_task_kind_dto(TaskKindDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_task_state_dto(TaskStateDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_8(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_update_failure_dto(
+    UpdateFailureDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_update_offer_dto(
+    UpdateOfferDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_update_scan_dto(UpdateScanDto self, SseSerializer serializer);
 }
 
 // Section: wire_class

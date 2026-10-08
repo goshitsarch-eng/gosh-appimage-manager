@@ -93,7 +93,12 @@ jobs:
 
       - name: Dart checks
         working-directory: flutter
+        env:
+          # The bridge tests drive the real core. They only run against a
+          # scratch home, so the core never writes to a real one.
+          GOSHAIM_HOME: ${{ runner.temp }}/gosh-home
         run: |
+          mkdir -p "$GOSHAIM_HOME"
           dart format --output=none --set-exit-if-changed lib test
           flutter analyze
           flutter test

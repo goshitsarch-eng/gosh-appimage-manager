@@ -1,5 +1,7 @@
 #include "my_application.h"
 
+#include <string.h>
+
 #include <flutter_linux/flutter_linux.h>
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
@@ -19,40 +21,123 @@ static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
 }
 
+// Minimum window size, matching the original application.
+static const gint kMinWidth = 420;
+static const gint kMinHeight = 420;
+
+// Colours the header bar. Dart sends the window's background and text colours
+// so the bar matches the page under it, as the original's header does. The
+// provider is replaced on each call, so a change of appearance takes effect.
+static void apply_chrome(GtkWindow* window, const gchar* background,
+                         const gchar* foreground) {
+  g_autofree gchar* css = g_strdup_printf(
+      "headerbar { background-color: %s; background-image: none; "
+      "border: none; box-shadow: none; color: %s; min-height: 48px; }\n"
+      "headerbar button, headerbar label { color: %s; }",
+      background, foreground, foreground);
+  GtkCssProvider* provider = gtk_css_provider_new();
+  g_autoptr(GError) error = nullptr;
+  if (!gtk_css_provider_load_from_data(provider, css, -1, &error)) {
+    g_warning("Cannot colour the header bar: %s", error->message);
+    g_object_unref(provider);
+    return;
+  }
+  GdkScreen* screen = gdk_screen_get_default();
+  GtkCssProvider* previous = GTK_CSS_PROVIDER(
+      g_object_get_data(G_OBJECT(window), "gosh-chrome-css"));
+  if (previous != nullptr) {
+    gtk_style_context_remove_provider_for_screen(screen,
+                                                 GTK_STYLE_PROVIDER(previous));
+  }
+  gtk_style_context_add_provider_for_screen(
+      screen, GTK_STYLE_PROVIDER(provider),
+      GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+  // Setting the data drops (and so un-refs) the provider it replaces.
+  g_object_set_data_full(G_OBJECT(window), "gosh-chrome-css", provider,
+                         g_object_unref);
+}
+
+// Answers the "gosh/window" channel. Dart sets the window title to the page it
+// is showing, as the original does, and the header bar colours.
+static void window_method_call_cb(FlMethodChannel* channel,
+                                  FlMethodCall* method_call,
+                                  gpointer user_data) {
+  GtkWindow* window = GTK_WINDOW(user_data);
+  const gchar* method = fl_method_call_get_name(method_call);
+  FlValue* args = fl_method_call_get_args(method_call);
+  g_autoptr(FlMethodResponse) response = nullptr;
+  if (strcmp(method, "setTitle") == 0) {
+    if (fl_value_get_type(args) == FL_VALUE_TYPE_STRING) {
+      gtk_window_set_title(window, fl_value_get_string(args));
+      response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+    } else {
+      response = FL_METHOD_RESPONSE(fl_method_error_response_new(
+          "bad-args", "setTitle expects a string", nullptr));
+    }
+  } else if (strcmp(method, "setChrome") == 0) {
+    FlValue* background = nullptr;
+    FlValue* foreground = nullptr;
+    if (fl_value_get_type(args) == FL_VALUE_TYPE_MAP) {
+      background = fl_value_lookup_string(args, "background");
+      foreground = fl_value_lookup_string(args, "foreground");
+    }
+    if (background != nullptr && foreground != nullptr &&
+        fl_value_get_type(background) == FL_VALUE_TYPE_STRING &&
+        fl_value_get_type(foreground) == FL_VALUE_TYPE_STRING) {
+      apply_chrome(window, fl_value_get_string(background),
+                   fl_value_get_string(foreground));
+      response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+    } else {
+      response = FL_METHOD_RESPONSE(fl_method_error_response_new(
+          "bad-args", "setChrome expects background and foreground", nullptr));
+    }
+  } else {
+    response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
+  }
+  fl_method_call_respond(method_call, response, nullptr);
+}
+
+// The header's navigation button. Dart shows or hides the navigation rail.
+static void on_nav_toggle_clicked(GtkButton* button, gpointer user_data) {
+  GtkWindow* window = GTK_WINDOW(user_data);
+  FlMethodChannel* channel = FL_METHOD_CHANNEL(
+      g_object_get_data(G_OBJECT(window), "gosh-window-channel"));
+  if (channel != nullptr) {
+    fl_method_channel_invoke_method(channel, "toggleNav", nullptr, nullptr,
+                                    nullptr, nullptr);
+  }
+}
+
 // Implements GApplication::activate.
 static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
   GtkWindow* window =
       GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
 
-  // Use a header bar when running in GNOME as this is the common style used
-  // by applications and is the setup most users will be using (e.g. Ubuntu
-  // desktop).
-  // If running on X and not using GNOME then just use a traditional title bar
-  // in case the window manager does more exotic layout, e.g. tiling.
-  // If running on Wayland assume the header bar will work (may need changing
-  // if future cases occur).
-  gboolean use_header_bar = TRUE;
-#ifdef GDK_WINDOWING_X11
-  GdkScreen* screen = gtk_window_get_screen(window);
-  if (GDK_IS_X11_SCREEN(screen)) {
-    const gchar* wm_name = gdk_x11_screen_get_window_manager_name(screen);
-    if (g_strcmp0(wm_name, "GNOME Shell") != 0) {
-      use_header_bar = FALSE;
-    }
-  }
-#endif
-  if (use_header_bar) {
-    GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
-    gtk_widget_show(GTK_WIDGET(header_bar));
-    gtk_header_bar_set_title(header_bar, "gosh_appimage_flutter");
-    gtk_header_bar_set_show_close_button(header_bar, TRUE);
-    gtk_window_set_titlebar(window, GTK_WIDGET(header_bar));
-  } else {
-    gtk_window_set_title(window, "gosh_appimage_flutter");
-  }
+  // The header bar is the window's own title bar, as the original's COSMIC
+  // header is. It carries the navigation toggle at its start and stays empty,
+  // like the original's; the page is named in the window title the channel
+  // sets.
+  gtk_window_set_title(window, "Gosh AppImage Manager");
+  GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
+  gtk_widget_show(GTK_WIDGET(header_bar));
+  // An empty custom title, so GTK does not draw the window title in the bar.
+  gtk_header_bar_set_custom_title(header_bar, gtk_label_new(nullptr));
+  gtk_header_bar_set_show_close_button(header_bar, TRUE);
+  GtkWidget* toggle =
+      gtk_button_new_from_icon_name("sidebar-show-symbolic", GTK_ICON_SIZE_BUTTON);
+  gtk_widget_set_tooltip_text(toggle, "Show or hide the navigation");
+  gtk_widget_show(toggle);
+  g_signal_connect(toggle, "clicked", G_CALLBACK(on_nav_toggle_clicked),
+                   window);
+  gtk_header_bar_pack_start(header_bar, toggle);
+  gtk_window_set_titlebar(window, GTK_WIDGET(header_bar));
 
-  gtk_window_set_default_size(window, 1280, 720);
+  gtk_window_set_default_size(window, 1024, 768);
+  GdkGeometry geometry;
+  geometry.min_width = kMinWidth;
+  geometry.min_height = kMinHeight;
+  gtk_window_set_geometry_hints(window, nullptr, &geometry, GDK_HINT_MIN_SIZE);
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(
@@ -72,6 +157,17 @@ static void my_application_activate(GApplication* application) {
   g_signal_connect_swapped(view, "first-frame", G_CALLBACK(first_frame_cb),
                            self);
   gtk_widget_realize(GTK_WIDGET(view));
+
+  // The channel must outlive this function; the window owns it.
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  FlMethodChannel* window_channel = fl_method_channel_new(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)), "gosh/window",
+      FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(window_channel,
+                                            window_method_call_cb, window,
+                                            nullptr);
+  g_object_set_data_full(G_OBJECT(window), "gosh-window-channel",
+                         window_channel, g_object_unref);
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
 

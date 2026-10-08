@@ -1,14 +1,16 @@
-# Flutter front end on the Rust core — architecture proposal
+# Flutter front end on the Rust core — architecture
 
-Status: **proposal, not adopted.** The shipping application is still the
-Rust + libcosmic 3.0.0 binary described in `docs/audit/ARCHITECTURE.md` and
-`AGENTS.md`. This document records the direction chosen on 2026-10-07 (Flutter
-UI on the Rust core, Linux first) and the constraints that shape it. Nothing
-here changes the released application.
+Status: **the Flutter front end is implemented on the branch; the libcosmic
+application is still the one that ships.** The direction (Flutter UI on the Rust
+core, Linux first) was chosen on 2026-10-07. The Flutter application in
+`flutter/` now has every page, dialog and workflow of the libcosmic GUI, on the
+bridge in `bridge/`. It replaces the libcosmic GUI only after the parity
+sign-off in `docs/flutter/PARITY.md` and the cut-over steps in section 13,
+phase 7. Nothing here changes the released application yet.
 
-The bridge spike (`bridge/` and `flutter/`) builds, generates bindings and passes
-its tests on aarch64 (2026-10-08, section 9). The x86-64 build runs only in CI,
-through `.github/workflows/flutter.yml`, which is not yet pushed.
+Verification so far is on aarch64 only (2026-10-08 to 2026-10-09, sections 9
+and 13). The x86-64 build runs in CI through `.github/workflows/flutter.yml`,
+which is blocked by an account billing lock and has not run.
 
 ## 1. Scope and constraints
 
@@ -300,14 +302,14 @@ is built.
 
 | Phase | Content | Feature IDs (`MIGRATION_AUDIT.md`) | Entry condition | Status |
 |---|---|---|---|---|
-| 0 | This proposal, reviewed | — | — | Draft |
-| 1 | Spike (section 9) | — | Build-host decision (done) | Done on aarch64; x86-64 in CI pending |
-| 2 | Core fixes needed for the bridge: D-03, D-01, D-02, D-11 | F-08, F-24, F-63 | Owner approval | Not started |
-| 3 | Shell and read-only pages: Library, Inspect, Settings | F-01 to F-06, F-14, F-16 | Phase 1 passed on both architectures | Not started |
-| 4 | Integrate, remove, launch, details | F-07 to F-10, F-41 to F-50 | Phase 3 passed | Not started |
-| 5 | Updates and update sources | F-12, F-34, F-58 to F-67 | Phase 4 passed | Not started |
-| 6 | Autostart, notifications, diagnostics | F-20 to F-22, F-37, F-52 | Phase 5 passed | Not started |
-| 7 | Packaging, Flatpak, release, cut-over, AGENTS.md update, removal of the libcosmic GUI | F-69 to F-74 | Parity inventory complete | Not started |
+| 0 | This proposal, reviewed | — | — | Direction chosen 2026-10-07 |
+| 1 | Spike (section 9) | — | Build-host decision (done) | Done on aarch64; x86-64 in CI pending (billing lock) |
+| 2 | Core fixes needed for the bridge: D-03, D-01, D-02, D-11 | F-08, F-24, F-63 | Owner approval | Partly. The bridge builds a controller per call and the Dart side queues mutations, which covers D-03 for the front end. The core lock redesign and D-01, D-02, D-11 are not started |
+| 3 | Shell and read-only pages: Library, Inspect, Settings | F-01 to F-06, F-14, F-16 | Phase 1 passed on both architectures | Implemented on aarch64. Library compared with the original; other pages verified by widget and golden tests only (see PARITY.md) |
+| 4 | Integrate, remove, launch, details | F-07 to F-10, F-41 to F-50 | Phase 3 passed | Implemented. Integrate and remove run against the real core in tests; launch, reveal and adopt are verified by fakes only |
+| 5 | Updates and update sources | F-12, F-34, F-58 to F-67 | Phase 4 passed | Implemented. Check runs against the real core on an empty library; applying updates is verified by fakes only |
+| 6 | Autostart, notifications, diagnostics | F-20 to F-22, F-37, F-52 | Phase 5 passed | Partly. The login check and the diagnostics switch are wired; the desktop notifier and background checks stay in the CLI path |
+| 7 | Packaging, Flatpak, release, cut-over, AGENTS.md update, removal of the libcosmic GUI | F-69 to F-74 | Parity inventory complete | Not started. A release bundle builds and launches on aarch64; no Flatpak manifest for Flutter yet; the translation catalogs are not loaded by the Flutter UI |
 
 Each phase ends with the parity status of every inventory row it touches
 (`MIGRATION_AUDIT.md` section 12) and with a screenshot on each architecture.

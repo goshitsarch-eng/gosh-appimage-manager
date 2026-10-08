@@ -1278,3 +1278,47 @@ Limits and open items:
 - Tools installed in the user's home for this work: the Flutter SDK (3.47.6) at
   `~/development/flutter`, `flutter_rust_bridge_codegen` 2.13.0 in `~/.cargo/bin`,
   and the pub cache in `~/.pub-cache`.
+
+## 24. Flutter front end: implementation and verification (2026-10-08)
+
+Scope: the Flutter application now carries every page, dialog and workflow of the
+libcosmic GUI, on the bridge. The libcosmic GUI still ships, and nothing has been
+cut over. The per-feature mapping, the checks run, and the known differences are
+in `docs/flutter/PARITY.md`. This section records what changed in the bridge and
+the Flutter tree, and what the checks showed.
+
+What changed:
+
+- Bridge: `OutcomeDto` carries `conflict_uuid` and `conflict_name`. The replace
+  candidate is computed the way the GUI computes it, and only when one
+  installation is implicated. The spike module (`count_ticks`,
+  `panic_for_contract_test`) is removed. Panic containment is covered by a Rust
+  unit test on `guard`.
+- Flutter: `lib/core` (the `CoreApi` seam, with a fake for tests), `lib/state`
+  (the `AppModel` workflow, its status texts, the pure format and drop helpers),
+  `lib/theme` (COSMIC palettes derived by `cosmic-theme`, Fira Sans), and
+  `lib/ui` (shell, rail, the six pages, dialogs, shared widgets).
+- Linux runner: 1024 by 768 default size, 420 by 420 minimum, the application
+  title, a header bar that carries the navigation toggle and takes its colours
+  from Dart, and the `gosh/window` channel for the page title.
+- Tests: 77 Dart tests in `just flutter-check`, of which 8 are bridge integration
+  tests that refuse to run without a scratch `GOSHAIM_HOME`. Golden baselines for
+  each page, the condensed layout and two dialogs live in `flutter/test/goldens/`.
+
+What the checks showed:
+
+- The libcosmic GUI and the Flutter build were run side by side on the same
+  scratch home. The Library matches in layout, colour and type (captures in
+  `docs/flutter/parity/`). Two fixes came from that comparison: the selected
+  navigation label is drawn in the accent, and the condensed layout keeps
+  buttons at their natural width.
+- Input automation could not reach either window from this host. Pages other
+  than Library were checked by widget tests and golden renders only.
+- Both `flutter build linux` modes build, and the release bundle launches and
+  shows the page title.
+
+Open items: the cut-over and its decisions (application ID, binary name, AGENTS.md
+wording, the About page's COSMIC wording, removal of the libcosmic GUI), the
+translation catalogs, the Flatpak manifest for the Flutter build, the portal
+colour-scheme query, and the x86-64 run in CI, which is blocked by the account
+billing lock. Each is listed in `docs/flutter/PARITY.md`, section 5.
