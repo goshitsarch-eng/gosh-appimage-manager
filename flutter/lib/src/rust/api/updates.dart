@@ -9,7 +9,14 @@ import 'dto.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `failure_dto`, `percent`
+// These functions are ignored because they are not marked as `pub`: `failure_dto`, `percent`, `report_apply_event`
+
+/// Check one app's update source for "Check for update" on its Detail page.
+/// It reports what the source offers and never downloads or applies anything:
+/// the installed file and its version stay as they are. Applying is the
+/// separate Update action. A check is not listed on the Tasks page.
+Future<UpdateCheckDto> checkOneUpdate({required String uuid}) =>
+    RustLib.instance.api.crateApiUpdatesCheckOneUpdate(uuid: uuid);
 
 /// Check every app that has an update source. Apps without one are skipped,
 /// and apps that could not be checked are listed as failures.

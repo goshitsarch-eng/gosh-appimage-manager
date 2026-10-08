@@ -202,6 +202,7 @@ void main() {
                 name: 'Beta',
                 manager: 'github',
                 error: 'checksum mismatch',
+                timedOut: false,
               ),
             ],
             skippedRunning: const [],
@@ -230,6 +231,7 @@ void main() {
                 uuid: 'c',
                 name: 'Gamma',
                 manager: 'static',
+                timedOut: false,
                 error: 'timed out',
               ),
             ],
@@ -319,36 +321,6 @@ void main() {
 
       expect(model.status?.text, 'Enter 1–32768 MB (default 8192)');
       expect(core.calls, isNot(contains('saveSettings')));
-    });
-
-    test(
-      'the unsafe fallback needs a confirmation before it is saved',
-      () async {
-        final core = FakeCore();
-        final model = modelWith(core);
-
-        await model.requestUnsafeFallback(true);
-        expect(model.dialog, isA<UnsafeExtractDialog>());
-        expect(core.calls, isNot(contains('saveSettings')));
-
-        await model.confirmUnsafeFallback();
-
-        expect(core.lastPatch?.unsafeExtractionFallback, isTrue);
-        expect(
-          model.status?.text,
-          'Unsafe extraction fallback on; each file still needs confirming',
-        );
-      },
-    );
-
-    test('turning the unsafe fallback off needs no confirmation', () async {
-      final core = FakeCore();
-      final model = modelWith(core);
-
-      await model.requestUnsafeFallback(false);
-
-      expect(model.dialog, isNull);
-      expect(core.lastPatch?.unsafeExtractionFallback, isFalse);
     });
   });
 
@@ -485,9 +457,9 @@ void main() {
 
     expect(model.visibleLibrary.map((a) => a.name), ['Alpha', 'Mid', 'zeta']);
 
-    // Versions compare as text, as the original's sort does: "10.0" < "2.0".
+    // Versions compare by their numbers: 1.0 < 2.0 < 10.0 (R6-06).
     model.setSort(SortOrder.version);
-    expect(model.visibleLibrary.map((a) => a.name), ['Mid', 'Alpha', 'zeta']);
+    expect(model.visibleLibrary.map((a) => a.name), ['Mid', 'zeta', 'Alpha']);
 
     model.setSort(SortOrder.updatesFirst);
     model.updates = [fakeOffer(uuid: 'c', name: 'Mid')];

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:gosh_appimage_flutter/src/rust/api/settings.dart';
 import 'package:gosh_appimage_flutter/state/app_model.dart';
-import 'package:gosh_appimage_flutter/theme/cosmic_theme.dart';
+import 'package:gosh_appimage_flutter/theme/app_theme.dart';
 import 'package:gosh_appimage_flutter/ui/shell.dart';
 
 /// The application root. The saved appearance picks light, dark, or the
@@ -26,12 +26,12 @@ class GoshApp extends StatelessWidget {
           title: 'Gosh AppImage Manager',
           debugShowCheckedModeBanner: false,
           themeMode: mode,
-          theme: cosmicThemeData(CosmicPalette.light),
-          darkTheme: cosmicThemeData(CosmicPalette.dark),
+          theme: appThemeData(AppPalette.light),
+          darkTheme: appThemeData(AppPalette.dark),
           builder: (context, child) {
             final dark = Theme.of(context).brightness == Brightness.dark;
-            return CosmicScope(
-              palette: dark ? CosmicPalette.dark : CosmicPalette.light,
+            return AppScope(
+              palette: dark ? AppPalette.dark : AppPalette.light,
               child: child!,
             );
           },

@@ -74,7 +74,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => 1921690632;
+  int get rustContentHash => 1502905828;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -108,6 +108,8 @@ abstract class RustLibApi extends BaseApi {
 
   Future<bool> crateApiSystemCancelTask({required String opId});
 
+  Future<UpdateCheckDto> crateApiUpdatesCheckOneUpdate({required String uuid});
+
   Future<UpdateScanDto> crateApiUpdatesCheckUpdates({required String opId});
 
   Future<void> crateApiSystemClearFinishedTasks();
@@ -117,6 +119,7 @@ abstract class RustLibApi extends BaseApi {
   Future<InspectDto> crateApiInspectInspectPath({
     required String opId,
     required String path,
+    required bool confirmUnsafe,
   });
 
   Future<OutcomeDto> crateApiIntegrateIntegrateApp({
@@ -125,6 +128,7 @@ abstract class RustLibApi extends BaseApi {
     required ConflictChoice conflict,
     required String replaceUuid,
     required bool moveSource,
+    required bool confirmUnsafe,
   });
 
   Future<void> crateApiLibraryLaunchApp({required String uuid});
@@ -360,6 +364,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "cancel_task", argNames: ["opId"]);
 
   @override
+  Future<UpdateCheckDto> crateApiUpdatesCheckOneUpdate({required String uuid}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(uuid, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 7,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_update_check_dto,
+          decodeErrorData: sse_decode_core_error,
+        ),
+        constMeta: kCrateApiUpdatesCheckOneUpdateConstMeta,
+        argValues: [uuid],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUpdatesCheckOneUpdateConstMeta =>
+      const TaskConstMeta(debugName: "check_one_update", argNames: ["uuid"]);
+
+  @override
   Future<UpdateScanDto> crateApiUpdatesCheckUpdates({required String opId}) {
     return handler.executeNormal(
       NormalTask(
@@ -369,7 +401,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 8,
             port: port_,
           );
         },
@@ -396,7 +428,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 8,
+            funcId: 9,
             port: port_,
           );
         },
@@ -424,7 +456,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 10,
             port: port_,
           );
         },
@@ -446,6 +478,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<InspectDto> crateApiInspectInspectPath({
     required String opId,
     required String path,
+    required bool confirmUnsafe,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -453,10 +486,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(opId, serializer);
           sse_encode_String(path, serializer);
+          sse_encode_bool(confirmUnsafe, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 10,
+            funcId: 11,
             port: port_,
           );
         },
@@ -465,7 +499,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_core_error,
         ),
         constMeta: kCrateApiInspectInspectPathConstMeta,
-        argValues: [opId, path],
+        argValues: [opId, path, confirmUnsafe],
         apiImpl: this,
       ),
     );
@@ -473,7 +507,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiInspectInspectPathConstMeta => const TaskConstMeta(
     debugName: "inspect_path",
-    argNames: ["opId", "path"],
+    argNames: ["opId", "path", "confirmUnsafe"],
   );
 
   @override
@@ -483,6 +517,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required ConflictChoice conflict,
     required String replaceUuid,
     required bool moveSource,
+    required bool confirmUnsafe,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -493,10 +528,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_conflict_choice(conflict, serializer);
           sse_encode_String(replaceUuid, serializer);
           sse_encode_bool(moveSource, serializer);
+          sse_encode_bool(confirmUnsafe, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 11,
+            funcId: 12,
             port: port_,
           );
         },
@@ -505,7 +541,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_core_error,
         ),
         constMeta: kCrateApiIntegrateIntegrateAppConstMeta,
-        argValues: [opId, sourcePath, conflict, replaceUuid, moveSource],
+        argValues: [
+          opId,
+          sourcePath,
+          conflict,
+          replaceUuid,
+          moveSource,
+          confirmUnsafe,
+        ],
         apiImpl: this,
       ),
     );
@@ -520,6 +563,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "conflict",
           "replaceUuid",
           "moveSource",
+          "confirmUnsafe",
         ],
       );
 
@@ -533,7 +577,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 12,
+            funcId: 13,
             port: port_,
           );
         },
@@ -560,7 +604,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 13,
+            funcId: 14,
             port: port_,
           );
         },
@@ -587,7 +631,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 15,
             port: port_,
           );
         },
@@ -614,7 +658,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 15,
+            funcId: 16,
             port: port_,
           );
         },
@@ -646,7 +690,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 16,
+            funcId: 17,
             port: port_,
           );
         },
@@ -683,7 +727,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 17,
+            funcId: 18,
             port: port_,
           );
         },
@@ -713,7 +757,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 18,
+            funcId: 19,
             port: port_,
           );
         },
@@ -747,7 +791,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 19,
+            funcId: 20,
             port: port_,
           );
         },
@@ -780,7 +824,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 20,
+            funcId: 21,
             port: port_,
           );
         },
@@ -808,7 +852,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 21,
+            funcId: 22,
             port: port_,
           );
         },
@@ -842,7 +886,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 22,
+            funcId: 23,
             port: port_,
           );
         },
@@ -872,7 +916,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 23,
+            funcId: 24,
             port: port_,
           );
         },
@@ -903,7 +947,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 24,
+            funcId: 25,
             port: port_,
           );
         },
@@ -931,8 +975,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   AppDto dco_decode_app_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 34)
-      throw Exception('unexpected arr length: expect 34 but see ${arr.length}');
+    if (arr.length != 36)
+      throw Exception('unexpected arr length: expect 36 but see ${arr.length}');
     return AppDto(
       uuid: dco_decode_String(arr[0]),
       name: dco_decode_String(arr[1]),
@@ -968,6 +1012,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       mimeTypes: dco_decode_list_String(arr[31]),
       startupWmClass: dco_decode_String(arr[32]),
       actionNames: dco_decode_list_String(arr[33]),
+      integratedAt: dco_decode_i_64(arr[34]),
+      integratedFolder: dco_decode_String(arr[35]),
     );
   }
 
@@ -1097,8 +1143,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   InspectDto dco_decode_inspect_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 34)
-      throw Exception('unexpected arr length: expect 34 but see ${arr.length}');
+    if (arr.length != 35)
+      throw Exception('unexpected arr length: expect 35 but see ${arr.length}');
     return InspectDto(
       path: dco_decode_String(arr[0]),
       sizeBytes: dco_decode_i_64(arr[1]),
@@ -1134,6 +1180,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       plannedTarget: dco_decode_String(arr[31]),
       extractorUsed: dco_decode_String(arr[32]),
       usedUnsafeFallback: dco_decode_bool(arr[33]),
+      fallbackPending: dco_decode_bool(arr[34]),
     );
   }
 
@@ -1255,8 +1302,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   OutcomeDto dco_decode_outcome_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 10)
-      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
+    if (arr.length != 11)
+      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
     return OutcomeDto(
       ok: dco_decode_bool(arr[0]),
       partial: dco_decode_bool(arr[1]),
@@ -1268,6 +1315,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       sourceRemoved: dco_decode_bool(arr[7]),
       conflictUuid: dco_decode_String(arr[8]),
       conflictName: dco_decode_String(arr[9]),
+      fallbackPending: dco_decode_bool(arr[10]),
     );
   }
 
@@ -1315,8 +1363,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskDto dco_decode_task_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 9)
-      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
+    if (arr.length != 18)
+      throw Exception('unexpected arr length: expect 18 but see ${arr.length}');
     return TaskDto(
       id: dco_decode_String(arr[0]),
       kind: dco_decode_task_kind_dto(arr[1]),
@@ -1327,6 +1375,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       statusText: dco_decode_String(arr[6]),
       error: dco_decode_String(arr[7]),
       retryable: dco_decode_bool(arr[8]),
+      startedAt: dco_decode_i_64(arr[9]),
+      finishedAt: dco_decode_i_64(arr[10]),
+      fromVersion: dco_decode_String(arr[11]),
+      toVersion: dco_decode_String(arr[12]),
+      phaseIndex: dco_decode_i_32(arr[13]),
+      phase: dco_decode_String(arr[14]),
+      bytesDone: dco_decode_i_64(arr[15]),
+      bytesTotal: dco_decode_i_64(arr[16]),
+      permanent: dco_decode_bool(arr[17]),
     );
   }
 
@@ -1355,16 +1412,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  UpdateCheckDto dco_decode_update_check_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    return UpdateCheckDto(
+      uuid: dco_decode_String(arr[0]),
+      currentVersion: dco_decode_String(arr[1]),
+      availableVersion: dco_decode_String(arr[2]),
+      downloadSize: dco_decode_i_64(arr[3]),
+      reducedVerification: dco_decode_bool(arr[4]),
+      error: dco_decode_String(arr[5]),
+      timedOut: dco_decode_bool(arr[6]),
+    );
+  }
+
+  @protected
   UpdateFailureDto dco_decode_update_failure_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
     return UpdateFailureDto(
       uuid: dco_decode_String(arr[0]),
       name: dco_decode_String(arr[1]),
       manager: dco_decode_String(arr[2]),
       error: dco_decode_String(arr[3]),
+      timedOut: dco_decode_bool(arr[4]),
     );
   }
 
@@ -1449,6 +1524,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_mimeTypes = sse_decode_list_String(deserializer);
     var var_startupWmClass = sse_decode_String(deserializer);
     var var_actionNames = sse_decode_list_String(deserializer);
+    var var_integratedAt = sse_decode_i_64(deserializer);
+    var var_integratedFolder = sse_decode_String(deserializer);
     return AppDto(
       uuid: var_uuid,
       name: var_name,
@@ -1484,6 +1561,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       mimeTypes: var_mimeTypes,
       startupWmClass: var_startupWmClass,
       actionNames: var_actionNames,
+      integratedAt: var_integratedAt,
+      integratedFolder: var_integratedFolder,
     );
   }
 
@@ -1654,6 +1733,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_plannedTarget = sse_decode_String(deserializer);
     var var_extractorUsed = sse_decode_String(deserializer);
     var var_usedUnsafeFallback = sse_decode_bool(deserializer);
+    var var_fallbackPending = sse_decode_bool(deserializer);
     return InspectDto(
       path: var_path,
       sizeBytes: var_sizeBytes,
@@ -1689,6 +1769,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       plannedTarget: var_plannedTarget,
       extractorUsed: var_extractorUsed,
       usedUnsafeFallback: var_usedUnsafeFallback,
+      fallbackPending: var_fallbackPending,
     );
   }
 
@@ -1900,6 +1981,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_sourceRemoved = sse_decode_bool(deserializer);
     var var_conflictUuid = sse_decode_String(deserializer);
     var var_conflictName = sse_decode_String(deserializer);
+    var var_fallbackPending = sse_decode_bool(deserializer);
     return OutcomeDto(
       ok: var_ok,
       partial: var_partial,
@@ -1911,6 +1993,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       sourceRemoved: var_sourceRemoved,
       conflictUuid: var_conflictUuid,
       conflictName: var_conflictName,
+      fallbackPending: var_fallbackPending,
     );
   }
 
@@ -1986,6 +2069,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_statusText = sse_decode_String(deserializer);
     var var_error = sse_decode_String(deserializer);
     var var_retryable = sse_decode_bool(deserializer);
+    var var_startedAt = sse_decode_i_64(deserializer);
+    var var_finishedAt = sse_decode_i_64(deserializer);
+    var var_fromVersion = sse_decode_String(deserializer);
+    var var_toVersion = sse_decode_String(deserializer);
+    var var_phaseIndex = sse_decode_i_32(deserializer);
+    var var_phase = sse_decode_String(deserializer);
+    var var_bytesDone = sse_decode_i_64(deserializer);
+    var var_bytesTotal = sse_decode_i_64(deserializer);
+    var var_permanent = sse_decode_bool(deserializer);
     return TaskDto(
       id: var_id,
       kind: var_kind,
@@ -1996,6 +2088,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       statusText: var_statusText,
       error: var_error,
       retryable: var_retryable,
+      startedAt: var_startedAt,
+      finishedAt: var_finishedAt,
+      fromVersion: var_fromVersion,
+      toVersion: var_toVersion,
+      phaseIndex: var_phaseIndex,
+      phase: var_phase,
+      bytesDone: var_bytesDone,
+      bytesTotal: var_bytesTotal,
+      permanent: var_permanent,
     );
   }
 
@@ -2025,17 +2126,40 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  UpdateCheckDto sse_decode_update_check_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_uuid = sse_decode_String(deserializer);
+    var var_currentVersion = sse_decode_String(deserializer);
+    var var_availableVersion = sse_decode_String(deserializer);
+    var var_downloadSize = sse_decode_i_64(deserializer);
+    var var_reducedVerification = sse_decode_bool(deserializer);
+    var var_error = sse_decode_String(deserializer);
+    var var_timedOut = sse_decode_bool(deserializer);
+    return UpdateCheckDto(
+      uuid: var_uuid,
+      currentVersion: var_currentVersion,
+      availableVersion: var_availableVersion,
+      downloadSize: var_downloadSize,
+      reducedVerification: var_reducedVerification,
+      error: var_error,
+      timedOut: var_timedOut,
+    );
+  }
+
+  @protected
   UpdateFailureDto sse_decode_update_failure_dto(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_uuid = sse_decode_String(deserializer);
     var var_name = sse_decode_String(deserializer);
     var var_manager = sse_decode_String(deserializer);
     var var_error = sse_decode_String(deserializer);
+    var var_timedOut = sse_decode_bool(deserializer);
     return UpdateFailureDto(
       uuid: var_uuid,
       name: var_name,
       manager: var_manager,
       error: var_error,
+      timedOut: var_timedOut,
     );
   }
 
@@ -2130,6 +2254,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_list_String(self.mimeTypes, serializer);
     sse_encode_String(self.startupWmClass, serializer);
     sse_encode_list_String(self.actionNames, serializer);
+    sse_encode_i_64(self.integratedAt, serializer);
+    sse_encode_String(self.integratedFolder, serializer);
   }
 
   @protected
@@ -2286,6 +2412,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.plannedTarget, serializer);
     sse_encode_String(self.extractorUsed, serializer);
     sse_encode_bool(self.usedUnsafeFallback, serializer);
+    sse_encode_bool(self.fallbackPending, serializer);
   }
 
   @protected
@@ -2484,6 +2611,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.sourceRemoved, serializer);
     sse_encode_String(self.conflictUuid, serializer);
     sse_encode_String(self.conflictName, serializer);
+    sse_encode_bool(self.fallbackPending, serializer);
   }
 
   @protected
@@ -2531,6 +2659,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.statusText, serializer);
     sse_encode_String(self.error, serializer);
     sse_encode_bool(self.retryable, serializer);
+    sse_encode_i_64(self.startedAt, serializer);
+    sse_encode_i_64(self.finishedAt, serializer);
+    sse_encode_String(self.fromVersion, serializer);
+    sse_encode_String(self.toVersion, serializer);
+    sse_encode_i_32(self.phaseIndex, serializer);
+    sse_encode_String(self.phase, serializer);
+    sse_encode_i_64(self.bytesDone, serializer);
+    sse_encode_i_64(self.bytesTotal, serializer);
+    sse_encode_bool(self.permanent, serializer);
   }
 
   @protected
@@ -2557,6 +2694,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_update_check_dto(
+    UpdateCheckDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.uuid, serializer);
+    sse_encode_String(self.currentVersion, serializer);
+    sse_encode_String(self.availableVersion, serializer);
+    sse_encode_i_64(self.downloadSize, serializer);
+    sse_encode_bool(self.reducedVerification, serializer);
+    sse_encode_String(self.error, serializer);
+    sse_encode_bool(self.timedOut, serializer);
+  }
+
+  @protected
   void sse_encode_update_failure_dto(
     UpdateFailureDto self,
     SseSerializer serializer,
@@ -2566,6 +2718,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.name, serializer);
     sse_encode_String(self.manager, serializer);
     sse_encode_String(self.error, serializer);
+    sse_encode_bool(self.timedOut, serializer);
   }
 
   @protected

@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `begin`, `cancel_flag`, `cancel_operation`, `classify`, `complete`, `controller`, `finish`, `guard`, `new`, `operations`, `panic_message`, `progress`, `task_id_of`, `tasks_guard`, `with_tasks`
+// These functions are ignored because they are not marked as `pub`: `begin`, `cancel_flag`, `cancel_operation`, `classify`, `complete`, `controller`, `finish`, `guard`, `is_timeout`, `named`, `new`, `operations`, `panic_message`, `phase`, `progress`, `set_permanent`, `task_id_of`, `tasks_guard`, `versions`, `with_tasks`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `OperationGuard`, `Operation`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `clone`, `drop`, `eq`, `fmt`, `fmt`, `fmt`
 
@@ -45,6 +45,10 @@ enum ErrorKind {
   permission,
   corruptData,
   network,
+
+  /// A network operation ran out of time. Kept apart from `Network` because
+  /// the Updates page says the status is unknown rather than failed.
+  timeout,
   process,
   failure,
   internal,

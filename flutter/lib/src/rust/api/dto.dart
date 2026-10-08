@@ -7,8 +7,8 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `failure_fields`, `from_core`, `from_core`, `from_core`, `from_core`, `from_core`, `from_integrate`, `from_removal`, `hex_string`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `failure_fields`, `from_core`, `from_core`, `from_core`, `from_core`, `from_core`, `from_core`, `from_integrate`, `from_removal`, `hex_string`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// One AppImage the manager tracks, as shown on the Library and Details pages.
 class AppDto {
@@ -47,6 +47,14 @@ class AppDto {
   final String startupWmClass;
   final List<String> actionNames;
 
+  /// Unix seconds of the first integration or adoption. Zero when the core
+  /// never recorded it (an entry from before the column existed).
+  final PlatformInt64 integratedAt;
+
+  /// The folder the AppImage was integrated from. Empty when the core never
+  /// recorded it, as for an adoption or an entry from before the column.
+  final String integratedFolder;
+
   const AppDto({
     required this.uuid,
     required this.name,
@@ -82,6 +90,8 @@ class AppDto {
     required this.mimeTypes,
     required this.startupWmClass,
     required this.actionNames,
+    required this.integratedAt,
+    required this.integratedFolder,
   });
 
   @override
@@ -119,7 +129,9 @@ class AppDto {
       categories.hashCode ^
       mimeTypes.hashCode ^
       startupWmClass.hashCode ^
-      actionNames.hashCode;
+      actionNames.hashCode ^
+      integratedAt.hashCode ^
+      integratedFolder.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -159,7 +171,9 @@ class AppDto {
           categories == other.categories &&
           mimeTypes == other.mimeTypes &&
           startupWmClass == other.startupWmClass &&
-          actionNames == other.actionNames;
+          actionNames == other.actionNames &&
+          integratedAt == other.integratedAt &&
+          integratedFolder == other.integratedFolder;
 }
 
 /// The outcome of "update all": applied, failed and skipped apps by name.
@@ -293,6 +307,9 @@ class InspectDto {
   final String extractorUsed;
   final bool usedUnsafeFallback;
 
+  /// The fallback is needed for this file and was not confirmed. Nothing was run.
+  final bool fallbackPending;
+
   const InspectDto({
     required this.path,
     required this.sizeBytes,
@@ -328,6 +345,7 @@ class InspectDto {
     required this.plannedTarget,
     required this.extractorUsed,
     required this.usedUnsafeFallback,
+    required this.fallbackPending,
   });
 
   @override
@@ -365,7 +383,8 @@ class InspectDto {
       canReplace.hashCode ^
       plannedTarget.hashCode ^
       extractorUsed.hashCode ^
-      usedUnsafeFallback.hashCode;
+      usedUnsafeFallback.hashCode ^
+      fallbackPending.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -405,7 +424,8 @@ class InspectDto {
           canReplace == other.canReplace &&
           plannedTarget == other.plannedTarget &&
           extractorUsed == other.extractorUsed &&
-          usedUnsafeFallback == other.usedUnsafeFallback;
+          usedUnsafeFallback == other.usedUnsafeFallback &&
+          fallbackPending == other.fallbackPending;
 }
 
 class KeyValueDto {
@@ -443,6 +463,9 @@ class OutcomeDto {
   final String conflictUuid;
   final String conflictName;
 
+  /// The file needs the unsafe fallback, not yet confirmed. Nothing was installed.
+  final bool fallbackPending;
+
   const OutcomeDto({
     required this.ok,
     required this.partial,
@@ -454,6 +477,7 @@ class OutcomeDto {
     required this.sourceRemoved,
     required this.conflictUuid,
     required this.conflictName,
+    required this.fallbackPending,
   });
 
   @override
@@ -467,7 +491,8 @@ class OutcomeDto {
       rolledBack.hashCode ^
       sourceRemoved.hashCode ^
       conflictUuid.hashCode ^
-      conflictName.hashCode;
+      conflictName.hashCode ^
+      fallbackPending.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -483,7 +508,8 @@ class OutcomeDto {
           rolledBack == other.rolledBack &&
           sourceRemoved == other.sourceRemoved &&
           conflictUuid == other.conflictUuid &&
-          conflictName == other.conflictName;
+          conflictName == other.conflictName &&
+          fallbackPending == other.fallbackPending;
 }
 
 class TaskDto {
@@ -497,6 +523,27 @@ class TaskDto {
   final String error;
   final bool retryable;
 
+  /// Unix seconds when the task began, and when it ended (0 while running).
+  final PlatformInt64 startedAt;
+  final PlatformInt64 finishedAt;
+
+  /// The versions the task moves between. An integration sets only
+  /// `to_version`; a removal sets only `from_version`. Empty when unknown.
+  final String fromVersion;
+  final String toVersion;
+
+  /// The update stage (1 Download, 2 Verify, 3 Swap in), or 0 when none.
+  final int phaseIndex;
+  final String phase;
+
+  /// Bytes moved in the current stage, and the total (0 when unknown).
+  final PlatformInt64 bytesDone;
+  final PlatformInt64 bytesTotal;
+
+  /// True for a removal that deleted the AppImage permanently. False for a
+  /// Trash removal and for every other task.
+  final bool permanent;
+
   const TaskDto({
     required this.id,
     required this.kind,
@@ -507,6 +554,15 @@ class TaskDto {
     required this.statusText,
     required this.error,
     required this.retryable,
+    required this.startedAt,
+    required this.finishedAt,
+    required this.fromVersion,
+    required this.toVersion,
+    required this.phaseIndex,
+    required this.phase,
+    required this.bytesDone,
+    required this.bytesTotal,
+    required this.permanent,
   });
 
   @override
@@ -519,7 +575,16 @@ class TaskDto {
       progress.hashCode ^
       statusText.hashCode ^
       error.hashCode ^
-      retryable.hashCode;
+      retryable.hashCode ^
+      startedAt.hashCode ^
+      finishedAt.hashCode ^
+      fromVersion.hashCode ^
+      toVersion.hashCode ^
+      phaseIndex.hashCode ^
+      phase.hashCode ^
+      bytesDone.hashCode ^
+      bytesTotal.hashCode ^
+      permanent.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -534,7 +599,16 @@ class TaskDto {
           progress == other.progress &&
           statusText == other.statusText &&
           error == other.error &&
-          retryable == other.retryable;
+          retryable == other.retryable &&
+          startedAt == other.startedAt &&
+          finishedAt == other.finishedAt &&
+          fromVersion == other.fromVersion &&
+          toVersion == other.toVersion &&
+          phaseIndex == other.phaseIndex &&
+          phase == other.phase &&
+          bytesDone == other.bytesDone &&
+          bytesTotal == other.bytesTotal &&
+          permanent == other.permanent;
 }
 
 enum TaskKindDto {
@@ -549,22 +623,80 @@ enum TaskKindDto {
 
 enum TaskStateDto { queued, running, cancelling, succeeded, failed, cancelled }
 
+/// The result of "Check for update" on one app. It reports what the source
+/// offers. It never downloads or applies anything.
+class UpdateCheckDto {
+  final String uuid;
+  final String currentVersion;
+
+  /// The newer version the source offers, or empty when there is none.
+  final String availableVersion;
+  final PlatformInt64 downloadSize;
+  final bool reducedVerification;
+
+  /// Why the check did not complete. Empty when it did.
+  final String error;
+  final bool timedOut;
+
+  const UpdateCheckDto({
+    required this.uuid,
+    required this.currentVersion,
+    required this.availableVersion,
+    required this.downloadSize,
+    required this.reducedVerification,
+    required this.error,
+    required this.timedOut,
+  });
+
+  @override
+  int get hashCode =>
+      uuid.hashCode ^
+      currentVersion.hashCode ^
+      availableVersion.hashCode ^
+      downloadSize.hashCode ^
+      reducedVerification.hashCode ^
+      error.hashCode ^
+      timedOut.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UpdateCheckDto &&
+          runtimeType == other.runtimeType &&
+          uuid == other.uuid &&
+          currentVersion == other.currentVersion &&
+          availableVersion == other.availableVersion &&
+          downloadSize == other.downloadSize &&
+          reducedVerification == other.reducedVerification &&
+          error == other.error &&
+          timedOut == other.timedOut;
+}
+
 class UpdateFailureDto {
   final String uuid;
   final String name;
   final String manager;
   final String error;
 
+  /// The source did not answer in time. The status is unknown, not "up to
+  /// date", and the Updates page says so.
+  final bool timedOut;
+
   const UpdateFailureDto({
     required this.uuid,
     required this.name,
     required this.manager,
     required this.error,
+    required this.timedOut,
   });
 
   @override
   int get hashCode =>
-      uuid.hashCode ^ name.hashCode ^ manager.hashCode ^ error.hashCode;
+      uuid.hashCode ^
+      name.hashCode ^
+      manager.hashCode ^
+      error.hashCode ^
+      timedOut.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -574,7 +706,8 @@ class UpdateFailureDto {
           uuid == other.uuid &&
           name == other.name &&
           manager == other.manager &&
-          error == other.error;
+          error == other.error &&
+          timedOut == other.timedOut;
 }
 
 class UpdateOfferDto {

@@ -207,4 +207,113 @@ void main() {
     },
     skip: _skipReason,
   );
+
+  // Background checks, the login entry, the unsafe fallback and the integration
+  // date, against the real core in the scratch home. The default is checked
+  // first, before any test changes the settings.
+  test(
+    'background checks start off in a fresh home (the owner default)',
+    () async {
+      final settings = await core.loadSettings();
+      expect(settings.backgroundUpdateChecks, isFalse);
+      expect(settings.autostartEnabled, isFalse);
+    },
+    skip: _skipReason,
+  );
+
+  test('the login check is refused while background checks are off', () async {
+    await expectLater(
+      core.setAutostart(enabled: true),
+      throwsA(
+        isA<CoreError>().having(
+          (e) => e.message,
+          'message',
+          contains('Check in the background'),
+        ),
+      ),
+    );
+    expect((await core.loadSettings()).autostartEnabled, isFalse);
+  }, skip: _skipReason);
+
+  test('turning background checks on stores it, and the login check can then be added', () async {
+    final on = await core.saveSettings(
+      patch: const SettingsPatchDto(backgroundUpdateChecks: true),
+    );
+    expect(on.backgroundUpdateChecks, isTrue);
+    await core.setAutostart(enabled: true);
+    expect((await core.loadSettings()).autostartEnabled, isTrue);
+  }, skip: _skipReason);
+
+  test(
+    'turning background checks off removes the login entry and stores off',
+    () async {
+      final off = await core.saveSettings(
+        patch: const SettingsPatchDto(backgroundUpdateChecks: false),
+      );
+      expect(off.backgroundUpdateChecks, isFalse);
+      expect(
+        off.autostartEnabled,
+        isFalse,
+        reason: 'the login entry is removed before the setting is stored',
+      );
+    },
+    skip: _skipReason,
+  );
+
+  test('the unsafe extraction fallback is off by default, and a saved-on value reads back on', () async {
+    // Checked first: no test before this one has changed the setting.
+    expect((await core.loadSettings()).unsafeExtractionFallback, isFalse);
+    final on = await core.saveSettings(
+      patch: const SettingsPatchDto(unsafeExtractionFallback: true),
+    );
+    expect(on.unsafeExtractionFallback, isTrue);
+    expect((await core.loadSettings()).unsafeExtractionFallback, isTrue);
+    // Put the default back, so the tests after this one start from it.
+    await core.saveSettings(
+      patch: const SettingsPatchDto(unsafeExtractionFallback: false),
+    );
+    expect((await core.loadSettings()).unsafeExtractionFallback, isFalse);
+  }, skip: _skipReason);
+
+  test('an integration records its date and source folder, and checking an app changes nothing installed', () async {
+    final file = _writeFixture(
+      scratch,
+      name: 'Dated-app-2.0.0-aarch64.AppImage',
+    );
+    final before = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final outcome = await core.integrateApp(
+      opId: 'it-integrate-dated',
+      sourcePath: file.path,
+      conflict: ConflictChoice.automatic,
+      replaceUuid: '',
+      moveSource: false,
+    );
+    expect(outcome.ok, isTrue, reason: outcome.message);
+    final app = outcome.app!;
+    expect(app.integratedAt, greaterThanOrEqualTo(before));
+    expect(app.integratedAt, lessThanOrEqualTo(before + 120));
+    expect(
+      app.integratedFolder,
+      scratch.path,
+      reason: 'the folder the source was in is recorded',
+    );
+    final bytesBefore = await File(app.managedPath).readAsBytes();
+
+    // This app has no update source, so the check cannot succeed. It must say
+    // so, and it must not download, replace or re-version the installed file.
+    final checked = await core.checkOneUpdate(uuid: app.uuid);
+    expect(checked.error, isNotEmpty);
+    expect(checked.availableVersion, isEmpty);
+    expect(await File(app.managedPath).readAsBytes(), bytesBefore);
+    final listed = (await core.listLibrary()).apps.firstWhere(
+      (candidate) => candidate.uuid == app.uuid,
+    );
+    expect(listed.version, app.version);
+
+    await core.removeApp(
+      opId: 'it-remove-dated',
+      uuid: app.uuid,
+      permanent: true,
+    );
+  }, skip: _skipReason);
 }

@@ -1,5 +1,5 @@
 name: gosh_appimage_flutter
-description: "A new Flutter project."
+description: "Gosh AppImage Manager: the Flutter front end on the Rust core."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -40,6 +40,7 @@ dependencies:
   file_selector: ^1.1.0
   path: ^1.9.1
   desktop_drop: ^0.8.4
+  flutter_svg: ^2.3.0
 
 dev_dependencies:
   flutter_test:
@@ -64,6 +65,10 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  # The mockup's own icons, copied from its markup (17 SVG files).
+  assets:
+    - assets/icons/
 
   # To add assets to your application, add an assets section, like this:
   # assets:
@@ -96,14 +101,24 @@ flutter:
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
 
+  # The mockup's faces: Onest for the interface and IBM Plex Mono for paths,
+  # versions and counts. Both are SIL OFL 1.1 (assets/fonts/OFL.txt).
   fonts:
-    - family: FiraSans
+    - family: Onest
       fonts:
-        - asset: assets/fonts/FiraSans-Regular.ttf
+        - asset: assets/fonts/Onest-Regular.ttf
           weight: 400
-        - asset: assets/fonts/FiraSans-Medium.ttf
+        - asset: assets/fonts/Onest-Medium.ttf
           weight: 500
-        - asset: assets/fonts/FiraSans-SemiBold.ttf
+        - asset: assets/fonts/Onest-SemiBold.ttf
           weight: 600
-        - asset: assets/fonts/FiraSans-Bold.ttf
+        - asset: assets/fonts/Onest-Bold.ttf
           weight: 700
+    - family: IBM Plex Mono
+      fonts:
+        - asset: assets/fonts/IBMPlexMono-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/IBMPlexMono-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/IBMPlexMono-SemiBold.ttf
+          weight: 600

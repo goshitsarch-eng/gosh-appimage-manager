@@ -9,7 +9,7 @@ import 'dto.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `conflict_candidate`
+// These functions are ignored because they are not marked as `pub`: `conflict_candidate`, `integrate_request`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `eq`, `fmt`
 
 /// Integrate one file. `replace_uuid` is used only with `Replace`. With
@@ -20,12 +20,14 @@ Future<OutcomeDto> integrateApp({
   required ConflictChoice conflict,
   required String replaceUuid,
   required bool moveSource,
+  required bool confirmUnsafe,
 }) => RustLib.instance.api.crateApiIntegrateIntegrateApp(
   opId: opId,
   sourcePath: sourcePath,
   conflict: conflict,
   replaceUuid: replaceUuid,
   moveSource: moveSource,
+  confirmUnsafe: confirmUnsafe,
 );
 
 /// How to resolve a name conflict. `Automatic` means the caller has not chosen;

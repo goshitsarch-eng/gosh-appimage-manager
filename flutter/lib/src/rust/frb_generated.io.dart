@@ -158,6 +158,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void dco_decode_unit(dynamic raw);
 
   @protected
+  UpdateCheckDto dco_decode_update_check_dto(dynamic raw);
+
+  @protected
   UpdateFailureDto dco_decode_update_failure_dto(dynamic raw);
 
   @protected
@@ -306,6 +309,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_decode_unit(SseDeserializer deserializer);
+
+  @protected
+  UpdateCheckDto sse_decode_update_check_dto(SseDeserializer deserializer);
 
   @protected
   UpdateFailureDto sse_decode_update_failure_dto(SseDeserializer deserializer);
@@ -492,6 +498,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_update_check_dto(
+    UpdateCheckDto self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_update_failure_dto(

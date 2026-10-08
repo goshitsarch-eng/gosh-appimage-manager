@@ -8,6 +8,8 @@ import 'dto.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
+// These functions are ignored because they are not marked as `pub`: `task_list`
+
 /// The bridge's own version. Synchronous, so it doubles as a cheap round-trip check.
 String bridgeVersion() => RustLib.instance.api.crateApiSystemBridgeVersion();
 

@@ -46,15 +46,21 @@ abstract interface class CoreApi {
     required String uuid,
     required bool permanent,
   });
-  Future<InspectDto> inspectPath({required String opId, required String path});
+  Future<InspectDto> inspectPath({
+    required String opId,
+    required String path,
+    bool confirmUnsafe = false,
+  });
   Future<OutcomeDto> integrateApp({
     required String opId,
     required String sourcePath,
     required ConflictChoice conflict,
     required String replaceUuid,
     required bool moveSource,
+    bool confirmUnsafe = false,
   });
   Future<UpdateScanDto> checkUpdates({required String opId});
+  Future<UpdateCheckDto> checkOneUpdate({required String uuid});
   Future<OutcomeDto> applyUpdate({
     required String opId,
     required String uuid,
@@ -127,7 +133,8 @@ class BridgeCore implements CoreApi {
   Future<InspectDto> inspectPath({
     required String opId,
     required String path,
-  }) => rust.inspectPath(opId: opId, path: path);
+    bool confirmUnsafe = false,
+  }) => rust.inspectPath(opId: opId, path: path, confirmUnsafe: confirmUnsafe);
 
   @override
   Future<OutcomeDto> integrateApp({
@@ -136,17 +143,23 @@ class BridgeCore implements CoreApi {
     required ConflictChoice conflict,
     required String replaceUuid,
     required bool moveSource,
+    bool confirmUnsafe = false,
   }) => rust.integrateApp(
     opId: opId,
     sourcePath: sourcePath,
     conflict: conflict,
     replaceUuid: replaceUuid,
     moveSource: moveSource,
+    confirmUnsafe: confirmUnsafe,
   );
 
   @override
   Future<UpdateScanDto> checkUpdates({required String opId}) =>
       rust.checkUpdates(opId: opId);
+
+  @override
+  Future<UpdateCheckDto> checkOneUpdate({required String uuid}) =>
+      rust.checkOneUpdate(uuid: uuid);
 
   @override
   Future<OutcomeDto> applyUpdate({
