@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:gosh_appimage_flutter/app.dart';
 import 'package:gosh_appimage_flutter/core/core_api.dart';
@@ -12,4 +14,7 @@ Future<void> main(List<String> args) async {
   final model = AppModel(core: const BridgeCore());
   runApp(GoshApp(model: model));
   await model.start(args);
+  // Quiet maintenance once the first screen is up: apps without an icon get
+  // another look at their file. It never delays or interrupts the window.
+  unawaited(model.healIcons());
 }

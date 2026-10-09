@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'dart:async';
 
 import 'package:gosh_appimage_flutter/core/core_api.dart';
@@ -83,6 +85,8 @@ InspectDto fakeInspect({
   String sha256 = '',
   List<String> categories = const [],
   String iconName = '',
+  String iconFormat = '',
+  Uint8List? iconBytes,
   bool architectureSupported = true,
   bool fallbackPending = false,
 
@@ -102,8 +106,8 @@ InspectDto fakeInspect({
   version: version,
   comment: '',
   iconName: iconName,
-  iconFormat: '',
-  iconBytes: null,
+  iconFormat: iconFormat,
+  iconBytes: iconBytes,
   categories: categories,
   mimeTypes: const [],
   terminal: false,
@@ -552,6 +556,16 @@ class FakeCore implements CoreApi {
     _record('listLibrary');
     _maybeFail('listLibrary');
     return library;
+  }
+
+  /// How many records the core says it changed when asked to heal icons.
+  int healedIcons = 0;
+
+  @override
+  Future<int> healLibraryIcons() async {
+    _record('healLibraryIcons');
+    _maybeFail('healLibraryIcons');
+    return healedIcons;
   }
 
   @override

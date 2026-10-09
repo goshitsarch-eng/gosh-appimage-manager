@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "gosh-appimage-manager"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "hex",
  "notify-rust",

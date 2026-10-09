@@ -47,6 +47,39 @@ fn exec_line(body: &str) -> Option<&str> {
     body.lines().find_map(|line| line.strip_prefix("Exec="))
 }
 
+/// Whether a record is one that was made from a path alone and never read: an
+/// adoption from before adoption read the file. A file that has been read has
+/// an architecture.
+fn never_read(app: &crate::types::InstalledApp) -> bool {
+    matches!(app.architecture, crate::types::Architecture::Unknown) && app.sha256.is_empty()
+}
+
+/// Copy what an inspection read from the file onto its record. The icon is
+/// placed separately (`AppController::sync_icon`).
+fn apply_file_metadata(
+    app: &mut crate::types::InstalledApp,
+    inspected: &crate::types::InspectionResult,
+) {
+    if !inspected.metadata.name.is_empty() {
+        app.name = inspected.metadata.name.clone();
+    }
+    app.version = inspected.metadata.version.clone();
+    app.comment = inspected.metadata.comment.clone();
+    app.website = inspected.metadata.website.clone();
+    app.terminal = inspected.metadata.terminal;
+    app.categories = inspected.metadata.categories.clone();
+    app.mime_types = inspected.metadata.mime_types.clone();
+    app.startup_wm_class = inspected.metadata.startup_wm_class.clone();
+    app.default_arguments = inspected.metadata.exec_arguments.clone();
+    app.embedded_update = inspected.update_info.raw.clone();
+    if !inspected.identity.sha256.is_empty() {
+        app.sha256 = inspected.identity.sha256.clone();
+    }
+    app.size = inspected.identity.size;
+    app.app_type = inspected.app_type;
+    app.architecture = inspected.architecture;
+}
+
 impl AppController {
     pub fn new() -> Result<Self, String> {
         Self::with_seams(
@@ -205,8 +238,27 @@ impl AppController {
     /// Borrow-safe facade: the library reads settings while the registry is
     /// mutated, which the two `&self`/`&mut self` accessors cannot express.
     pub fn adopt_external(&mut self, path: &str) -> Result<crate::types::InstalledApp, String> {
+        self.adopt_external_with(path, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// As `adopt_external`, and read the file once it is registered.
+    ///
+    /// A registry row made from a path knows only the file's name: no version,
+    /// no icon, no architecture, and none of the update information the file
+    /// carries. Adopted apps showed a letter in place of their icon, and "No
+    /// update method was found" when checked, because nothing ever opened the
+    /// file. Reading is best effort and never undoes the adoption: a file that
+    /// cannot be read keeps its row, as before, and a refresh can try again.
+    /// Nothing is written to the user's menu or icon theme.
+    pub fn adopt_external_with(
+        &mut self,
+        path: &str,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<crate::types::InstalledApp, String> {
         let library = AppImageLibrary::new(&self.settings);
-        library.adopt(&mut self.registry, path)
+        let app = library.adopt(&mut self.registry, path)?;
+        let _ = self.refresh_metadata(&app.uuid, cancel);
+        Ok(self.registry.by_uuid(&app.uuid).unwrap_or(app))
     }
 
     /// Discover AppImages in the managed folder, plus external ones when the
@@ -257,22 +309,12 @@ impl AppController {
             });
         }
         let mut updated = app.clone();
-        if !inspected.metadata.name.is_empty() {
-            updated.name = inspected.metadata.name.clone();
-        }
-        updated.version = inspected.metadata.version.clone();
-        updated.comment = inspected.metadata.comment.clone();
-        updated.website = inspected.metadata.website.clone();
-        updated.terminal = inspected.metadata.terminal;
-        updated.categories = inspected.metadata.categories.clone();
-        updated.mime_types = inspected.metadata.mime_types.clone();
-        updated.startup_wm_class = inspected.metadata.startup_wm_class.clone();
-        updated.default_arguments = inspected.metadata.exec_arguments.clone();
-        updated.embedded_update = inspected.update_info.raw.clone();
-        updated.sha256 = inspected.identity.sha256.clone();
-        updated.size = inspected.identity.size;
-        updated.app_type = inspected.app_type;
-        updated.architecture = inspected.architecture;
+        apply_file_metadata(&mut updated, &inspected);
+        // This used to discard the icon the inspection had staged, so a refresh
+        // could never give an app its icon.
+        // A failure to keep the icon is not a failure to refresh: the rest of the
+        // record is saved, and the old icon, if any, stays in place.
+        let _ = self.sync_icon(&mut updated, &inspected);
         // Rewrite the entry we own so the refreshed name and version show up.
         if !updated.desktop_path.is_empty() {
             let body = desktop::build_desktop_file(
@@ -280,16 +322,149 @@ impl AppController {
                 &updated.managed_path,
                 self.settings.terminal_omit_suffix(),
             );
-            crate::safe_fs::atomic_write(
+            if let Err(error) = crate::safe_fs::atomic_write(
                 std::path::Path::new(&updated.desktop_path),
                 body.as_bytes(),
                 0o644,
-            )?;
+            ) {
+                inspected.discard_staging();
+                return Err(error);
+            }
         }
         inspected.discard_staging();
         let name = updated.name.clone();
         self.registry.upsert(updated)?;
         Ok(name)
+    }
+
+    /// Install the icon an inspection staged as `app`'s own, and point the
+    /// record at it. Where it goes depends on who owns the menu entry: an app we
+    /// integrated keeps its icon in the user's icon theme beside its entry;
+    /// an adopted one has no entry of ours, so its icon stays in our data
+    /// folder. An inspection that found no icon leaves the record as it was.
+    fn sync_icon(
+        &self,
+        app: &mut crate::types::InstalledApp,
+        inspected: &crate::types::InspectionResult,
+    ) -> Result<(), String> {
+        let staged = &inspected.metadata.extracted_icon_path;
+        if staged.is_empty() {
+            return Ok(());
+        }
+        let dir = if app.desktop_path.is_empty() {
+            self.settings.app_icons_dir()
+        } else {
+            self.settings.icons_dir().join("256x256/apps")
+        };
+        let installed = desktop::install_icon(
+            &dir,
+            &app.uuid,
+            std::path::Path::new(staged),
+            &inspected.metadata.icon_format,
+        )?;
+        let installed = installed.to_string_lossy().into_owned();
+        // An icon of another format from an earlier read is ours to replace:
+        // only when it sits in one of our two icon folders and its name carries
+        // this app's id.
+        let old = std::path::Path::new(&app.icon_path);
+        let ours = old.parent().is_some_and(|folder| {
+            folder == self.settings.app_icons_dir()
+                || folder == self.settings.icons_dir().join("256x256/apps")
+        });
+        if !app.icon_path.is_empty()
+            && app.icon_path != installed
+            && ours
+            && app.icon_path.contains(&app.uuid)
+        {
+            let _ = fs::remove_file(old);
+        }
+        app.icon_path = installed;
+        Ok(())
+    }
+
+    /// Apps whose icon file is not there: the record names none, or names one
+    /// that no longer exists.
+    pub fn apps_missing_icons(&self) -> Vec<crate::types::InstalledApp> {
+        self.registry
+            .apps()
+            .into_iter()
+            .filter(|app| {
+                (app.icon_path.is_empty() || !std::path::Path::new(&app.icon_path).is_file())
+                    && std::path::Path::new(&app.managed_path).is_file()
+            })
+            .collect()
+    }
+
+    /// Give one app that has no icon file another look at its AppImage.
+    ///
+    /// For an app never read (an adoption from before adoption read the file) the
+    /// whole record is filled in; for one already read, only the icon is added.
+    /// The slow part, reading the file, runs first; the registry is then opened
+    /// afresh and only this app's metadata and icon are written, so an edit made
+    /// in the meantime is not overwritten. Returns whether the record changed.
+    pub fn heal_icon(
+        &mut self,
+        uuid: &str,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<bool, String> {
+        let before = self
+            .registry
+            .by_uuid(uuid)
+            .ok_or_else(|| "No installed app with that id".to_string())?;
+        // Hashing reads the whole file, which for an AppImage of a few hundred
+        // megabytes is not something to repeat at every start for an app that
+        // simply has no icon. Only a record never read needs the hash.
+        let options = crate::types::InspectOptions {
+            compute_hash: never_read(&before),
+            max_bytes: self.settings.max_appimage_bytes(),
+            ..Default::default()
+        };
+        let inspected = self.inspect_with(&before.managed_path, &options, cancel, Some(uuid));
+        if !inspected.magic_valid {
+            inspected.discard_staging();
+            return Err(inspected.error);
+        }
+        let result = (|| {
+            self.registry = ManagedRegistry::open(&self.settings.registry_path())?;
+            let Some(mut app) = self.registry.by_uuid(uuid) else {
+                return Ok(false);
+            };
+            let original_icon = app.icon_path.clone();
+            let had_icon_file =
+                !original_icon.is_empty() && std::path::Path::new(&original_icon).is_file();
+            if never_read(&app) {
+                apply_file_metadata(&mut app, &inspected);
+            }
+            self.sync_icon(&mut app, &inspected)?;
+            // A record that names the same path is still changed if the file at
+            // that path was missing and has been put back: the Library has to
+            // look again to show it.
+            let icon_restored = !had_icon_file && std::path::Path::new(&app.icon_path).is_file();
+            let changed = never_read(&before) || app.icon_path != original_icon || icon_restored;
+            if !changed {
+                return Ok(false);
+            }
+            // This runs without anyone asking, so the menu entry is rewritten only
+            // when it is still the one this app wrote: its ownership markers
+            // verify and carry this app's id. A file someone replaced it with is
+            // left exactly as it is; the icon and the record are still saved.
+            let entry = std::path::Path::new(&app.desktop_path);
+            if !app.desktop_path.is_empty() && entry.is_file() {
+                let ownership = desktop::verify_ownership(entry);
+                if ownership.owned && ownership.uuid == app.uuid {
+                    let body = desktop::build_desktop_file(
+                        &app,
+                        &app.managed_path,
+                        self.settings.terminal_omit_suffix(),
+                    );
+                    crate::safe_fs::atomic_write(entry, body.as_bytes(), 0o644)?;
+                }
+            }
+            self.registry.upsert(app)?;
+            Ok(true)
+        })();
+        inspected.discard_staging();
+        result
     }
 
     /// Replace an app's argument list and environment, then rewrite its entry.

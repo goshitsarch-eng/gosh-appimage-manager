@@ -45,6 +45,8 @@ the tail of its output. `SKIP_FLATPAK=1` skips the Flatpak stage.
 - Keep mutations transactional: stage, verify, atomically replace, keep
   rollback material until success.
 - Keep the safety contract in `AGENTS.md`; it is the project's review bar.
+- Record a change a user would notice under `## [Unreleased]` in `CHANGELOG.md`,
+  in plain words: what was wrong or new, not which function changed.
 - If `Cargo.lock` changes, regenerate `packaging/cargo-sources.json`
   (`just vendor /path/to/flatpak-builder-tools`) so the Flatpak build stays
   offline-capable.
@@ -57,6 +59,7 @@ interface uses them yet.
 ## Docs worth knowing
 
 - `README.md` — what the app does, the CLI reference, and build steps.
+- `CHANGELOG.md` — what changed in each release.
 - `docs/RELEASING.md` — how releases are cut.
 - `docs/verification.md` — the evidence record for the current build.
 - `docs/flutter/` — the Flutter front end: architecture and status.

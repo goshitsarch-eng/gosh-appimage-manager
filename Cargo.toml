@@ -1,6 +1,6 @@
 [package]
 name = "gosh-appimage-manager"
-version = "3.0.0"
+version = "3.0.1"
 edition = "2021"
 description = "Gosh AppImage Manager — inspect, integrate, update and remove AppImages. Made by Gosh."
 license = "GPL-3.0-or-later"

@@ -162,28 +162,50 @@ pub fn stream_to_file_reporting<R: Read>(
     Ok(total)
 }
 
-/// Resolve `host` and pin the request to a single address.
+/// Resolve `host` to the addresses a request may use, and pin the request to them.
 ///
 /// Resolution is the point where a guard actually bites: `url_guard::validate`
 /// can only inspect the literal host string, and any name at all may resolve
-/// to loopback, link-local or RFC1918 space. Checking the address we are about
-/// to connect to closes that gap, and pinning it means the address cannot be
+/// to loopback, link-local or RFC1918 space. Checking the addresses we are about
+/// to connect to closes that gap, and pinning them means the answer cannot be
 /// swapped between the check and the connection (DNS rebinding).
-fn pinned_ip(host: &str, port: u16, allow_private: bool) -> Result<std::net::IpAddr, String> {
-    let addrs = (host, port)
+///
+/// Every public address is kept, not just the first. The resolver usually puts
+/// an IPv6 address first, and a machine with no IPv6 route then failed every
+/// request to a dual-stack host ("Network is unreachable") when the IPv4 address
+/// beside it would have worked. The connector tries the rest in turn.
+fn pinned_addrs(
+    host: &str,
+    port: u16,
+    allow_private: bool,
+) -> Result<Vec<std::net::SocketAddr>, String> {
+    let resolved = (host, port)
         .to_socket_addrs()
         .map_err(|e| format!("DNS resolution failed for {host}: {e}"))?;
-    let ip = addrs
-        .map(|a| a.ip())
-        .next()
-        .ok_or_else(|| format!("DNS resolution failed for {host}: no addresses"))?;
-    if !allow_private && url_guard::is_local_ip(&ip) {
-        return Err(format!(
-            "URL rejected: {host} resolves to a local-network address ({ip}); \
-             local-network destinations need an explicit opt-in"
-        ));
+    let mut usable: Vec<std::net::SocketAddr> = Vec::new();
+    let mut refused: Option<std::net::IpAddr> = None;
+    for addr in resolved {
+        if !allow_private && url_guard::is_local_ip(&addr.ip()) {
+            refused.get_or_insert(addr.ip());
+        } else if !usable.contains(&addr) {
+            usable.push(addr);
+        }
     }
-    Ok(ip)
+    if usable.is_empty() {
+        return Err(match refused {
+            Some(ip) => format!(
+                "URL rejected: {host} resolves to a local-network address ({ip}); \
+                 local-network destinations need an explicit opt-in"
+            ),
+            None => format!("DNS resolution failed for {host}: no addresses"),
+        });
+    }
+    Ok(usable)
+}
+
+/// The first address `pinned_addrs` allows, for callers that make one connection.
+fn pinned_ip(host: &str, port: u16, allow_private: bool) -> Result<std::net::IpAddr, String> {
+    pinned_addrs(host, port, allow_private).map(|addrs| addrs[0].ip())
 }
 
 /// Redirect policy that validates every hop *before* it is followed.
@@ -216,22 +238,74 @@ fn redirect_policy(allow_private: bool) -> reqwest::redirect::Policy {
     })
 }
 
+/// Trust anchors from the machine, added to the bundled Mozilla roots.
+///
+/// The client carries its own copy of the public roots and, by itself, trusts
+/// nothing else. On a network whose proxy re-signs TLS with a company or
+/// sandbox certificate, every request then failed with "invalid peer
+/// certificate: UnknownIssuer", although every other program on the machine
+/// worked. The bundle named by `SSL_CERT_FILE`, or else the distribution's own,
+/// is added so the machine's trust decisions apply here too. It is read once,
+/// bounded, and a file that is missing or unreadable adds nothing.
+fn system_roots() -> &'static [reqwest::Certificate] {
+    static ROOTS: std::sync::OnceLock<Vec<reqwest::Certificate>> = std::sync::OnceLock::new();
+    ROOTS.get_or_init(|| {
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(file) = std::env::var_os("SSL_CERT_FILE") {
+            candidates.push(file.into());
+        }
+        candidates.extend(
+            [
+                "/etc/ssl/certs/ca-certificates.crt",
+                "/etc/pki/tls/certs/ca-bundle.crt",
+                "/etc/ssl/ca-bundle.pem",
+                "/etc/ssl/cert.pem",
+            ]
+            .map(std::path::PathBuf::from),
+        );
+        for path in candidates {
+            let Ok(bytes) = crate::safe_fs::read_bounded(&path, 8 * 1024 * 1024) else {
+                continue;
+            };
+            if let Ok(certs) = reqwest::Certificate::from_pem_bundle(&bytes) {
+                if !certs.is_empty() {
+                    return certs;
+                }
+            }
+        }
+        Vec::new()
+    })
+}
+
 fn client_for_with(
     host: &str,
     port: u16,
     allow_private: bool,
 ) -> Result<reqwest::blocking::Client, String> {
-    let ip = pinned_ip(host, port, allow_private)?;
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_millis(limits::NETWORK_TIMEOUT_MS))
-        .connect_timeout(Duration::from_millis(10_000))
-        // Pin this host to the single resolved address for the request.
-        .resolve(host, std::net::SocketAddr::new(ip, port))
-        .redirect(redirect_policy(allow_private))
-        .user_agent(format!("{}/{}", limits::EXECUTABLE_NAME, limits::VERSION))
-        .build()
-        .map_err(|e| format!("Cannot build network client: {e}"))?;
-    Ok(client)
+    let addrs = pinned_addrs(host, port, allow_private)?;
+    let build = |with_system_roots: bool| {
+        let mut builder = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(limits::NETWORK_TIMEOUT_MS))
+            .connect_timeout(Duration::from_millis(10_000))
+            // Pin this host to its resolved addresses for the request.
+            .resolve_to_addrs(host, &addrs)
+            .redirect(redirect_policy(allow_private))
+            .user_agent(format!("{}/{}", limits::EXECUTABLE_NAME, limits::VERSION));
+        if with_system_roots {
+            for root in system_roots() {
+                builder = builder.add_root_certificate(root.clone());
+            }
+        }
+        builder.build()
+    };
+    // A bundle with one unusable certificate must not take the network down:
+    // fall back to the bundled roots alone.
+    let built = match build(true) {
+        Ok(client) => Ok(client),
+        Err(_) if !system_roots().is_empty() => build(false),
+        Err(error) => Err(error),
+    };
+    built.map_err(|e| format!("Cannot build network client: {e}"))
 }
 
 fn host_port(url: &url::Url) -> Result<(String, u16), String> {
@@ -282,8 +356,8 @@ fn guard_final_url(requested: &url::Url, final_url: &url::Url) -> Result<(), Str
 /// How long a cached client keeps its pinned address before re-resolving.
 const CLIENT_CACHE_TTL: Duration = Duration::from_secs(60);
 
-/// Clients keyed by destination and local-network policy, with the instant
-/// each was built so its pinned address can be refreshed.
+/// Clients keyed by destination and local-network policy, with the instant each
+/// was built so its pinned address can be refreshed.
 type ClientCache = HashMap<(String, u16, bool), (std::time::Instant, reqwest::blocking::Client)>;
 
 pub struct ReqwestClient {
@@ -335,6 +409,79 @@ impl ReqwestClient {
     }
 }
 
+/// A transport failure with its cause. reqwest's own text is "error sending
+/// request for url (...)", which hides whether the name did not resolve, the
+/// connection was refused, the certificate was bad or the request timed out.
+/// The cause is what the person can act on, and a timeout has to say so for the
+/// Updates page to report an unknown status instead of a failure.
+fn transport_error(context: &str, error: &reqwest::Error) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(err) = current {
+        let mut text = err.to_string();
+        // The URL repeats what the caller already knows.
+        if let Some(at) = text.find(" for url (") {
+            text.truncate(at);
+        }
+        if !text.is_empty() && parts.last() != Some(&text) {
+            parts.push(text);
+        }
+        current = err.source();
+    }
+    let mut detail = parts.join(": ");
+    if error.is_timeout() && !detail.contains("timed out") {
+        detail.push_str(": timed out");
+    }
+    format!("{context}: {detail}")
+}
+
+/// The failure for a response that was not a success. A forge that has run out
+/// of its request allowance answers 403 or 429, which reads like "not allowed"
+/// unless it says what happened.
+fn status_error(response: &reqwest::blocking::Response) -> String {
+    let status = response.status();
+    let headers = response.headers();
+    let limited = matches!(status.as_u16(), 403 | 429)
+        && (headers
+            .get("x-ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.trim() == "0")
+            || headers.contains_key(reqwest::header::RETRY_AFTER));
+    if limited {
+        format!("Network request failed: HTTP {status} (rate limit reached)")
+    } else {
+        format!("Network request failed: HTTP {status}")
+    }
+}
+
+/// Whether a HEAD that failed is worth retrying as a one-byte ranged GET. Many
+/// servers and object stores refuse or mishandle HEAD while serving GET.
+fn head_refused(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 400 | 403 | 405 | 501)
+}
+
+/// The size a ranged probe's response reports: the total in `Content-Range`
+/// (`bytes 0-0/12345`), else the `Content-Length` of a full answer.
+fn probe_size(response: &reqwest::blocking::Response) -> Option<u64> {
+    let headers = response.headers();
+    if let Some(total) = headers
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.rsplit('/').next())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        return Some(total);
+    }
+    // A 206 answers with the length of the part, which says nothing of the file.
+    if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        return None;
+    }
+    headers
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+}
+
 impl NetworkClient for ReqwestClient {
     fn get(
         &self,
@@ -354,12 +501,11 @@ impl NetworkClient for ReqwestClient {
         }
         let response = request
             .send()
-            .map_err(|e| format!("Network request failed: {e}"))?;
+            .map_err(|e| transport_error("Network request failed", &e))?;
         let final_url = response.url().to_string();
         guard_final_url(&checked.url, response.url())?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(format!("Network request failed: HTTP {status}"));
+        if !response.status().is_success() {
+            return Err(status_error(&response));
         }
         let body = read_bounded(response, limits::MAX_JSON_BODY_BYTES, "Response body")?;
         Ok(FetchResult { body, final_url })
@@ -375,19 +521,30 @@ impl NetworkClient for ReqwestClient {
         let response = client
             .head(checked.url.clone())
             .send()
-            .map_err(|e| format!("Network request failed: {e}"))?;
+            .map_err(|e| transport_error("Network request failed", &e))?;
         guard_final_url(&checked.url, response.url())?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "Network request failed: HTTP {}",
-                response.status()
-            ));
+        if response.status().is_success() {
+            return Ok(response
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok()));
         }
-        Ok(response
-            .headers()
-            .get(reqwest::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok()))
+        if !head_refused(response.status()) {
+            return Err(status_error(&response));
+        }
+        // The server will not answer HEAD. Ask for the first byte instead; the
+        // size is in the headers, and the body is never read.
+        let ranged = client
+            .get(checked.url.clone())
+            .header(reqwest::header::RANGE, "bytes=0-0")
+            .send()
+            .map_err(|e| transport_error("Network request failed", &e))?;
+        guard_final_url(&checked.url, ranged.url())?;
+        if !ranged.status().is_success() {
+            return Err(status_error(&ranged));
+        }
+        Ok(probe_size(&ranged))
     }
 
     fn download_bounded(&self, url: &str, max_bytes: u64, local: Local) -> Result<Vec<u8>, String> {
@@ -400,13 +557,10 @@ impl NetworkClient for ReqwestClient {
         let response = client
             .get(checked.url.clone())
             .send()
-            .map_err(|e| format!("Network request failed: {e}"))?;
+            .map_err(|e| transport_error("Network request failed", &e))?;
         guard_final_url(&checked.url, response.url())?;
         if !response.status().is_success() {
-            return Err(format!(
-                "Network request failed: HTTP {}",
-                response.status()
-            ));
+            return Err(status_error(&response));
         }
         let cap = max_bytes.min(64 * 1024 * 1024 * 1024) as usize;
         read_bounded(response, cap, "Download")
@@ -431,13 +585,10 @@ impl NetworkClient for ReqwestClient {
         let response = client
             .get(checked.url.clone())
             .send()
-            .map_err(|e| format!("Network request failed: {e}"))?;
+            .map_err(|e| transport_error("Network request failed", &e))?;
         guard_final_url(&checked.url, response.url())?;
         if !response.status().is_success() {
-            return Err(format!(
-                "Network request failed: HTTP {}",
-                response.status()
-            ));
+            return Err(status_error(&response));
         }
         let expected = response.content_length().unwrap_or(0);
         stream_to_file_reporting(response, dest, max_bytes, cancel, expected, progress)
@@ -486,12 +637,20 @@ struct FtpControl {
 
 impl FtpControl {
     fn connect(host: &str, port: u16, local: Local) -> Result<Self, String> {
-        let stream = std::net::TcpStream::connect_timeout(
-            &pinned_ip(host, port, local.allowed())
-                .map(|ip| std::net::SocketAddr::new(ip, port))?,
-            Duration::from_millis(10_000),
-        )
-        .map_err(|e| format!("FTP connection failed: {e}"))?;
+        // Try each address the name resolved to, so an unreachable IPv6 address
+        // listed first does not hide a working IPv4 one.
+        let mut last_error = String::new();
+        let mut connected = None;
+        for addr in pinned_addrs(host, port, local.allowed())? {
+            match std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(10_000)) {
+                Ok(stream) => {
+                    connected = Some(stream);
+                    break;
+                }
+                Err(e) => last_error = e.to_string(),
+            }
+        }
+        let stream = connected.ok_or_else(|| format!("FTP connection failed: {last_error}"))?;
         stream
             .set_read_timeout(Some(Duration::from_millis(limits::NETWORK_TIMEOUT_MS)))
             .map_err(|e| format!("FTP connection failed: {e}"))?;

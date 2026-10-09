@@ -213,3 +213,37 @@ AppImage executed by the unsafe fallback (the fallback is tested with stand-in
 programs, and a read-only probe of a real third-party type-2 AppImage was run
 earlier); live pointer and keyboard input to the window.
 
+
+## 10. Icons and updates fix, release 3.0.1 (2026-10-09)
+
+Recorded in full in `docs/qa/FIX-2026-10-09-icons-and-updates.md`: the causes, how
+each was reproduced before the fix, and what was run after. Host: x86_64 Linux,
+rustc and cargo 1.97.0, Flutter 3.47.6, `squashfs-tools` 4.6.1 (the version the
+Flatpak builds).
+
+| Gate | Result |
+|---|---|
+| `cargo test` (root) | 332 passed, 0 failed (275 before) |
+| `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` (root and `bridge/`) | pass |
+| `cd bridge`: `cargo test` | 23 passed, 0 failed (20 before) |
+| `flutter_rust_bridge_codegen generate` (2.13.0), run twice | the second run changes nothing |
+| `dart format --set-exit-if-changed`, `flutter analyze` | clean |
+| `flutter test` | 374 passed, 1 failed (359 and the same 1 before) |
+| `flutter build linux --release`, `tools/gui-smoke.sh` | PASS: window found, stayed up 10 s, stopped cleanly |
+| `scripts/check-version.sh v3.0.1` | passes; the same script refuses `v3.0.0` |
+| `appstreamcli validate --pedantic --no-net`, `desktop-file-validate` | the one pedantic note it already gave (`cid-contains-uppercase-letter`); desktop file clean |
+| `gosh-appimage-manager --version` | `3.0.1` |
+
+The one Flutter failure is `pages_golden_test.dart: 02 Empty library`, a 6-pixel
+(0.00 %) anti-aliasing difference that fails the same way on the untouched tree on
+this host. The earlier rounds ran on aarch64, where it passed.
+
+Run with real tools rather than seams: real AppImages (ELF header, `.upd_info`
+section, `mksquashfs` payload) through the real `unsquashfs`; the built CLI
+adopting four of them; the release GUI under Xvfb against a registry blanked to
+what an older build leaves; and a local HTTPS server (own CA, trusted through
+`SSL_CERT_FILE`) against the original code and this tree.
+
+Not verified here: a live GitHub release (api.github.com is blocked by this
+session's egress policy); a Flatpak build or any aarch64 run; an IPv6-first
+resolver order. DwarFS AppImages are unchanged (still metadata-less).

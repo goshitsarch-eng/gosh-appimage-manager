@@ -52,6 +52,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="3.0.1" date="2026-10-09">
+      <description>
+        <p>Fixes icons and updates that did not work on real AppImages.</p>
+        <ul>
+          <li>App icons are found in more AppImages, including ones whose icon is reached through a symlink or lives only in the theme folders, and SVG icons are drawn. Adopted apps now get their icon, version and update information from the file.</li>
+          <li>Updates work for AppImages that carry the usual gh-releases-zsync update information, compare versions properly, and explain failures.</li>
+          <li>Update checks trust the system certificate bundle and try every address a server name resolves to.</li>
+        </ul>
+      </description>
+    </release>
     <release version="3.0.0" date="2026-09-06">
       <description>
         <p>Native Rust rewrite. Made by Gosh. Full Gear Lever workflow parity with System/Light/Dark mode and multi-arch Flatpak.</p>

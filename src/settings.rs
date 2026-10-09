@@ -277,6 +277,13 @@ impl SettingsStore {
         self.dirs.app_data_dir()
     }
 
+    /// Where the icon of an app with no menu entry of ours is kept. Adopting a
+    /// file registers it and writes nothing to the user's menu or icon theme, so
+    /// its icon lives in this app's own data folder.
+    pub fn app_icons_dir(&self) -> PathBuf {
+        self.dirs.app_data_dir().join("icons")
+    }
+
     pub fn cache_dir(&self) -> PathBuf {
         self.dirs.cache_home.join("gosh-appimage-manager")
     }

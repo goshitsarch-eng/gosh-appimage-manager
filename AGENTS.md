@@ -6,7 +6,7 @@ Executable and repository: gosh-appimage-manager
 Public project identity: Gosh-Its-Arch
 License: GPL-3.0-or-later
 
-- This is an original Rust core with a Flutter GUI, version 3.0.0. No Qt/KF/Kirigami/CMake runtime deps.
+- This is an original Rust core with a Flutter GUI, version 3.0.1. No Qt/KF/Kirigami/CMake runtime deps.
 - Gear Lever is a GPLv3 behavioral reference. Do not copy its Python/GTK source, UI assets, icon, screenshots, or branding.
 - Treat every AppImage, desktop file, icon, update descriptor, URL, archive entry, and process output as untrusted.
 - Never execute an AppImage to inspect metadata by default. The unsafe legacy extraction fallback must be opt-in, clearly warned, and disabled by default.

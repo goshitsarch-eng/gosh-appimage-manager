@@ -616,6 +616,26 @@ class AppModel extends ChangeNotifier {
     _notify();
   }
 
+  /// Gives apps that have no icon file another look at their AppImage, and
+  /// shows what that finds. Quiet: it sets no status and reports no error,
+  /// because an icon that cannot be found is only a letter tile. An app adopted
+  /// before adoption read the file, or integrated before icons were found in
+  /// every layout, gets its icon here without the person doing anything.
+  Future<void> healIcons() async {
+    try {
+      final changed = await core.healLibraryIcons();
+      if (changed <= 0) {
+        return;
+      }
+      final loaded = await core.listLibrary();
+      library = loaded.apps;
+      discovered = loaded.discovered;
+      _notify();
+    } on CoreError {
+      // The letter tiles stay; a refresh from an app's page can try again.
+    }
+  }
+
   Future<void> loadLibrary() async {
     loadingLibrary = true;
     _notify();

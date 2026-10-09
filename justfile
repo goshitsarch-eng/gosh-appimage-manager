@@ -1,4 +1,4 @@
-# Recipes for Gosh AppImage Manager 3.0.0 (Rust core with a Flutter GUI).
+# Recipes for Gosh AppImage Manager 3.0.1 (Rust core with a Flutter GUI).
 # Run `just <recipe>`.
 
 # Debug build of the Rust core and launcher (the GUI lives in flutter/)

@@ -5,7 +5,8 @@ the work, a Flutter GUI is the desktop app, and one `gosh-appimage-manager`
 binary provides a scriptable CLI and starts that GUI.
 
 - Application ID: `com.goshapps.AppImageManager`
-- Version 3.0.0 · GPL-3.0-or-later · by Gosh Apps / Gosh-Its-Arch
+- Version 3.0.1 · GPL-3.0-or-later · by Gosh Apps / Gosh-Its-Arch
+- What changed in each release: [CHANGELOG.md](CHANGELOG.md)
 
 ## AI-assisted development
 
@@ -97,11 +98,24 @@ shows the full record — path, desktop ID, SHA-256, type, architecture,
 size, update manager, provenance — plus argument and environment editors,
 the update-source editor, and permanent delete.
 
+**Adopt.** An AppImage already in your managed folder (or found through a
+desktop entry, when discovery is on) is listed for adoption. Adopting reads
+the file the same safe way Inspect does: the app takes the name, version,
+icon and update information the AppImage carries. Nothing is written to your
+menu or icon theme; the icon is kept in the manager's own data folder.
+Apps that were adopted by an earlier build, or that have lost their icon
+file, get it back the next time the app starts. **Refresh metadata** on an
+app's page does the same on demand.
+
 **Update.** Updates → Check now lists offers; Update per row or Update all.
 An app needs an update source: either one embedded in the AppImage or one
-set on its Details page. A source with no published checksum is marked
-"reduced verification". A running app blocks its update unless you confirm
-the override.
+set on its Details page. The embedded `gh-releases-zsync` form (the one most
+AppImages use) is read as a GitHub source: its pattern names the `.zsync`
+control file, and the manager downloads the AppImage next to it, for your
+CPU architecture. A release tag such as `v2.1.0` and a file that says `2.1.0`
+are the same version, and an older release is never offered. A source with no
+published checksum is marked "reduced verification". A running app blocks its
+update unless you confirm the override.
 
 **Keyboard shortcuts.** Ctrl+O browse a file · Ctrl+R or F5 refresh the
 library · Ctrl+F check for updates · Esc dismiss a dialog.
@@ -125,7 +139,7 @@ library · Ctrl+F check for updates · Esc dismiss a dialog.
 ## CLI
 
 The same executable doubles as a CLI; commands never start the GUI.
-`--version` prints `3.0.0`. `--help` (or `-h`) prints usage.
+`--version` prints `3.0.1`. `--help` (or `-h`) prints usage.
 
 ```
 gosh-appimage-manager --integrate <path> [--keep-both|--replace] [--replace-uuid UUID|--target PATH] [--yes] [--allow-unsafe]
@@ -209,6 +223,7 @@ fixtures and prints `SELF_TEST_OK`.
 | Settings | `~/.config/gosh-appimage-manager/settings.json` (mode 0600) |
 | Generated desktop entries | `~/.local/share/applications/gosh-appimage-<uuid>.desktop` |
 | Installed icons | `~/.local/share/icons/hicolor/256x256/apps/` |
+| Icons of adopted apps | `~/.local/share/gosh-appimage-manager/icons/` |
 | Login checks entry | `~/.config/autostart/com.goshapps.AppImageManager-updates.desktop` |
 
 `HOME`, `GOSHAIM_HOME`, and `GOSHAIM_XDG_{DATA,CONFIG,CACHE}_HOME` relocate
@@ -291,6 +306,16 @@ where they are.
 - Downloads are staged, validated as AppImages, checked against an
   advertised SHA-256 when one exists, refused on architecture mismatch,
   then swapped in atomically. Rollback material is kept until success.
+- Icons are read from the AppImage the way everything else is: by asking the
+  extractor for one named member at a time, never running the file. A symlink
+  such as `.DirIcon` is resolved by name inside the archive's own listing
+  (never on your disk), and a file is accepted as an icon only if its content
+  is a PNG, SVG or XPM. SVG icons are drawn by the GUI's vector reader, which
+  loads nothing the file points to.
+- HTTPS trusts the bundled public roots plus your system's bundle
+  (`SSL_CERT_FILE`, else the distribution's own), so a network that re-signs
+  traffic with a certificate your machine already trusts does not break
+  update checks.
 - Running apps block updates unless `--force` / "Update anyway" is
   confirmed. Inside the Flatpak, running-detection asks the host through
   `flatpak-spawn`; if that probe fails it falls back to the sandbox's own
@@ -328,6 +353,11 @@ where they are.
   with credentials are rejected.
 - Static and FTP sources without a `version` key report "no version
   information" rather than guessing.
+- XPM icons are kept for the desktop but the GUI cannot draw them; those apps
+  show their letter tile.
+- A release that is rebuilt under the same tag (a "continuous" build) is
+  recognised as an update only when the source publishes a SHA-256 for the
+  file and the installed file's differs.
 
 ## Attribution
 

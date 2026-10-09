@@ -1,4 +1,4 @@
-// Gosh AppImage Manager 3.0.0 — core library. Made by Gosh.
+// Gosh AppImage Manager 3.0.1 — core library. Made by Gosh.
 // GPL-3.0-or-later. Opening an AppImage never integrates or executes it.
 
 pub mod cancel;
@@ -28,5 +28,6 @@ pub mod types;
 pub mod updates_service;
 pub mod updates_sources;
 pub mod url_guard;
+pub mod versions;
 
 pub mod cli;
