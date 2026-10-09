@@ -361,6 +361,49 @@ pub fn verify_ownership(desktop_path: &Path) -> DesktopOwnership {
     ownership
 }
 
+/// The file extension an installed icon gets. The desktop reads an icon by its
+/// name, so a format it would not recognise under the name is not installed
+/// under it: an XPM stays `.xpm` rather than being mislabelled `.png`.
+pub fn icon_extension(format: &str) -> &'static str {
+    match format {
+        "svg" => "svg",
+        "xpm" => "xpm",
+        _ => "png",
+    }
+}
+
+/// Install `source` into `dir` as `gosh-appimage-<uuid>.<ext>`: staged next to
+/// the final name and renamed over it, so a reader never sees half an icon.
+/// The name carries the app's id, which is what lets removal prove the file is
+/// ours. Returns the installed path.
+pub fn install_icon(
+    dir: &Path,
+    uuid: &str,
+    source: &Path,
+    format: &str,
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(dir).map_err(|e| format!("Cannot create icons dir: {e}"))?;
+    let final_icon = dir.join(format!("gosh-appimage-{uuid}.{}", icon_extension(format)));
+    let staged = crate::safe_fs::sibling_temp(&final_icon, ".gosh-icon-");
+    crate::safe_fs::copy_bounded(
+        source,
+        &staged,
+        limits::MAX_ICON_BYTES,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .map_err(|e| format!("Cannot stage icon: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&staged, fs::Permissions::from_mode(0o644));
+    }
+    if let Err(e) = fs::rename(&staged, &final_icon) {
+        let _ = fs::remove_file(&staged);
+        return Err(format!("Cannot install icon: {e}"));
+    }
+    Ok(final_icon)
+}
+
 /// Install (stage + rename) a desktop file and icon; returns final paths.
 pub fn install_files(
     applications_dir: &Path,
@@ -388,28 +431,7 @@ pub fn install_files(
 
     let mut icon_path = PathBuf::new();
     if let Some(source) = icon_source {
-        let ext = match icon_ext {
-            "svg" => "svg",
-            _ => "png",
-        };
-        let dir = icons_dir.join("256x256/apps");
-        fs::create_dir_all(&dir).map_err(|e| format!("Cannot create icons dir: {e}"))?;
-        let final_icon = dir.join(format!("gosh-appimage-{uuid}.{ext}"));
-        let staged = crate::safe_fs::sibling_temp(&final_icon, ".gosh-icon-");
-        crate::safe_fs::copy_bounded(
-            source,
-            &staged,
-            limits::MAX_ICON_BYTES,
-            &std::sync::atomic::AtomicBool::new(false),
-        )
-        .map_err(|e| format!("Cannot stage icon: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&staged, fs::Permissions::from_mode(0o644));
-        }
-        fs::rename(&staged, &final_icon).map_err(|e| format!("Cannot install icon: {e}"))?;
-        icon_path = final_icon;
+        icon_path = install_icon(&icons_dir.join("256x256/apps"), uuid, source, icon_ext)?;
     }
     Ok((desktop_path, icon_path))
 }

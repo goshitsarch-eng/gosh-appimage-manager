@@ -1,7 +1,9 @@
 //! Library operations: the list, one app's details, launch, reveal, arguments
 //! and environment, update sources, adopt, metadata refresh, and removal.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Mutex, OnceLock};
 
 use goshaim_core::controller::AppController;
 use goshaim_core::types::{EnvPair, InstalledApp, RemovalMode, RemovalRequest, TaskKind};
@@ -147,12 +149,14 @@ pub fn unset_update_source(uuid: String) -> Result<AppDto, CoreError> {
     })
 }
 
-/// Register an external AppImage. Nothing on disk changes.
+/// Register an external AppImage and read what the file says about itself: its
+/// name, version, icon and update information. Its menu entry and the user's
+/// icon theme are not touched; the icon is kept in the manager's own folder.
 pub fn adopt_path(op_id: String, path: String) -> Result<AppDto, CoreError> {
     guard(move || {
         let op = OperationGuard::begin(&op_id, TaskKind::Adopt, "Adopting", &path);
         let mut controller = controller()?;
-        match controller.adopt_external(&path) {
+        match controller.adopt_external_with(&path, op.cancel_flag()) {
             Ok(app) => {
                 op.finish(Ok(()));
                 Ok(AppDto::from_core(&app, false))
@@ -165,7 +169,52 @@ pub fn adopt_path(op_id: String, path: String) -> Result<AppDto, CoreError> {
     })
 }
 
-/// Re-read the app's metadata and rewrite its menu entry.
+/// The apps this process has already tried to give an icon, so each is looked
+/// at once however often the Library asks.
+fn icon_attempts() -> &'static Mutex<HashSet<String>> {
+    static ATTEMPTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    ATTEMPTED.get_or_init(Default::default)
+}
+
+/// Give the apps that have no icon file another look at their AppImage, and
+/// return how many records changed.
+///
+/// Apps adopted before adoption read the file, and apps integrated before icons
+/// were found in every layout, have none; opening the file again gives it to
+/// them. It is quiet maintenance, not a task on the Tasks page, and each app is
+/// tried once per run. An app whose file cannot be read is left as it is.
+pub fn heal_library_icons() -> Result<i64, CoreError> {
+    guard(|| {
+        let mut controller = controller()?;
+        Ok(heal_icons_on(&mut controller, icon_attempts()))
+    })
+}
+
+/// The body of `heal_library_icons`, run on a controller and an attempt log the
+/// caller provides, so a test can run it on scratch seams.
+fn heal_icons_on(controller: &mut AppController, attempts: &Mutex<HashSet<String>>) -> i64 {
+    let never_cancelled = AtomicBool::new(false);
+    let mut changed = 0;
+    for app in controller.apps_missing_icons() {
+        let first_try = attempts
+            .lock()
+            .map(|mut seen| seen.insert(format!("{}\n{}", app.uuid, app.managed_path)))
+            .unwrap_or(false);
+        if !first_try {
+            continue;
+        }
+        if controller
+            .heal_icon(&app.uuid, &never_cancelled)
+            .unwrap_or(false)
+        {
+            changed += 1;
+        }
+    }
+    changed
+}
+
+/// Re-read the app's metadata, icon and update information, and rewrite its
+/// menu entry.
 pub fn refresh_metadata(op_id: String, uuid: String) -> Result<AppDto, CoreError> {
     guard(move || {
         let op = OperationGuard::begin(
@@ -508,5 +557,111 @@ mod update_source_tests {
             "the refusal keeps the full command: {}",
             error.message
         );
+    }
+}
+
+#[cfg(test)]
+mod heal_tests {
+    use std::collections::HashSet;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    use goshaim_core::controller::AppController;
+    use goshaim_core::network::ReqwestClient;
+    use goshaim_core::process::SystemRunner;
+    use goshaim_core::proctable::SysTable;
+    use goshaim_core::settings::Dirs;
+    use goshaim_core::trash::FakeTrash;
+
+    use super::heal_icons_on;
+
+    /// A scratch home for one test, removed when the test ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("gosh-heal-{label}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).expect("a scratch home");
+            Self(root)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn controller_in(root: &Path) -> AppController {
+        AppController::with_seams(
+            Box::new(SystemRunner::new()),
+            Box::new(ReqwestClient::new()),
+            Box::new(SysTable::new()),
+            Box::new(FakeTrash::new()),
+            Dirs::under(root),
+        )
+        .expect("a controller rooted in the scratch home")
+    }
+
+    /// An adopted row for a file that is not an AppImage: it has no icon, and
+    /// reading it can give none.
+    fn row_for_an_unreadable_file(controller: &mut AppController, root: &Path) -> String {
+        let folder = root.join("AppImages");
+        fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("Broken.AppImage");
+        fs::write(&file, b"not an elf").unwrap();
+        controller
+            .registry_mut()
+            .adopt_external("Broken".into(), file.to_string_lossy().into_owned(), false)
+            .expect("the row is added")
+            .uuid
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_not_an_error_and_not_counted() {
+        let scratch = Scratch::new("unreadable");
+        let mut controller = controller_in(&scratch.0);
+        let uuid = row_for_an_unreadable_file(&mut controller, &scratch.0);
+        let attempts = Mutex::new(HashSet::new());
+
+        assert_eq!(heal_icons_on(&mut controller, &attempts), 0);
+
+        // The row is exactly as it was.
+        let row = controller.registry().by_uuid(&uuid).unwrap();
+        assert!(row.icon_path.is_empty());
+        assert_eq!(row.name, "Broken");
+    }
+
+    #[test]
+    fn each_app_is_tried_once_however_often_the_library_asks() {
+        let scratch = Scratch::new("once");
+        let mut controller = controller_in(&scratch.0);
+        row_for_an_unreadable_file(&mut controller, &scratch.0);
+        let attempts = Mutex::new(HashSet::new());
+
+        heal_icons_on(&mut controller, &attempts);
+        assert_eq!(attempts.lock().unwrap().len(), 1, "the app was tried");
+
+        // A second pass finds the same app missing its icon and skips it.
+        let before = attempts.lock().unwrap().clone();
+        assert_eq!(controller.apps_missing_icons().len(), 1);
+        heal_icons_on(&mut controller, &attempts);
+        assert_eq!(*attempts.lock().unwrap(), before);
+    }
+
+    #[test]
+    fn an_app_whose_file_is_gone_is_not_tried_at_all() {
+        let scratch = Scratch::new("gone");
+        let mut controller = controller_in(&scratch.0);
+        let uuid = row_for_an_unreadable_file(&mut controller, &scratch.0);
+        let row = controller.registry().by_uuid(&uuid).unwrap();
+        fs::remove_file(&row.managed_path).unwrap();
+        let attempts = Mutex::new(HashSet::new());
+
+        assert_eq!(heal_icons_on(&mut controller, &attempts), 0);
+        assert!(attempts.lock().unwrap().is_empty());
     }
 }

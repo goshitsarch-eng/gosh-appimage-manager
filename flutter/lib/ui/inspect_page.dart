@@ -198,7 +198,6 @@ class _MetadataCard extends StatelessWidget {
     final name = inspect.name.isEmpty ? '(unknown)' : inspect.name;
     final version = inspect.version;
     final initial = name.substring(0, 1).toUpperCase();
-    final tile = palette.tileFor(initial);
     final sourceLabel = result == null || result.embeddedUpdate.isEmpty
         ? '(none embedded)'
         : result.embeddedUpdate;
@@ -217,22 +216,15 @@ class _MetadataCard extends StatelessWidget {
             ),
             child: Row(
               children: [
-                Container(
-                  width: 52,
-                  height: 52,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: tile.background,
-                    borderRadius: BorderRadius.circular(AppRadius.tileLarge),
-                  ),
-                  child: Text(
-                    initial,
-                    style: AppType.sans(
-                      22,
-                      weight: FontWeight.w600,
-                      color: tile.foreground,
-                    ),
-                  ),
+                // The AppImage's own icon when it has one; otherwise the letter.
+                AppIconTile(
+                  letter: initial,
+                  iconPath: '',
+                  iconBytes: result?.iconBytes,
+                  iconFormat: result?.iconFormat ?? '',
+                  size: 52,
+                  fontSize: 22,
+                  radius: AppRadius.tileLarge,
                 ),
                 const SizedBox(width: 16),
                 Expanded(

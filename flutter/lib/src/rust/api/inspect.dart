@@ -9,7 +9,7 @@ import 'dto.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `inspect_options`, `read_icon`
+// These functions are ignored because they are not marked as `pub`: `inspect_on`, `inspect_options`, `read_icon`
 
 /// Inspect one AppImage. A file that cannot be read or parsed comes back with
 /// `error` set; only an empty path is an error of the call itself.

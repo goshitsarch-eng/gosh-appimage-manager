@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1502905828;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 377317134;
 
 // Section: executor
 
@@ -372,6 +372,38 @@ fn wire__crate__api__library__get_app_impl(
             move |context| {
                 transform_result_sse::<_, crate::api::common::CoreError>((move || {
                     let output_ok = crate::api::library::get_app(api_uuid)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__library__heal_library_icons_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "heal_library_icons",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, crate::api::common::CoreError>((move || {
+                    let output_ok = crate::api::library::heal_library_icons()?;
                     std::result::Result::Ok(output_ok)
                 })())
             }
@@ -1685,31 +1717,32 @@ fn pde_ffi_dispatcher_primary_impl(
         8 => wire__crate__api__updates__check_updates_impl(port, ptr, rust_vec_len, data_len),
         9 => wire__crate__api__system__clear_finished_tasks_impl(port, ptr, rust_vec_len, data_len),
         10 => wire__crate__api__library__get_app_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__inspect__inspect_path_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__integrate__integrate_app_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__library__launch_app_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__library__list_library_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__system__list_tasks_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__settings__load_settings_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__library__refresh_metadata_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__library__remove_app_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__library__reveal_app_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__library__save_arguments_and_environment_impl(
+        11 => wire__crate__api__library__heal_library_icons_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__inspect__inspect_path_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__integrate__integrate_app_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__library__launch_app_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__library__list_library_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__system__list_tasks_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__settings__load_settings_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__library__refresh_metadata_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__library__remove_app_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__library__reveal_app_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__library__save_arguments_and_environment_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        21 => wire__crate__api__settings__save_settings_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__settings__set_autostart_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__library__set_update_source_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__settings__settings_patch_dto_default_impl(
+        22 => wire__crate__api__settings__save_settings_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__settings__set_autostart_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__library__set_update_source_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__settings__settings_patch_dto_default_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        25 => {
+        26 => {
             wire__crate__api__library__unset_update_source_impl(port, ptr, rust_vec_len, data_len)
         }
         _ => unreachable!(),

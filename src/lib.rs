@@ -28,5 +28,6 @@ pub mod types;
 pub mod updates_service;
 pub mod updates_sources;
 pub mod url_guard;
+pub mod versions;
 
 pub mod cli;

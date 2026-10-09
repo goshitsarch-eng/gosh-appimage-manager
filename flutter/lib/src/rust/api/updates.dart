@@ -9,7 +9,7 @@ import 'dto.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `failure_dto`, `percent`, `report_apply_event`
+// These functions are ignored because they are not marked as `pub`: `apply_update_on`, `check_updates_on`, `failure_dto`, `percent`, `report_apply_event`
 
 /// Check one app's update source for "Check for update" on its Detail page.
 /// It reports what the source offers and never downloads or applies anything:

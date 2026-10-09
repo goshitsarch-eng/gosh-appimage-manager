@@ -128,7 +128,10 @@ impl UpdateSource for StaticSource {
         "Static file"
     }
     fn handles_embedded(&self, hint: &str) -> bool {
-        hint == "static" || hint == "zsync" || hint.contains("zsync") || hint.contains("bintray")
+        // Only the plain forms. This used to accept any hint that contained
+        // "zsync", which also claimed "gh-releases-zsync" -- the form nearly
+        // every AppImage uses -- and failed its check with "needs a url".
+        hint == "static" || hint == "zsync" || hint.contains("bintray")
     }
     fn config_from_embedded(&self, fields: &BTreeMap<String, String>) -> Config {
         let mut config = Config::new();
@@ -142,7 +145,11 @@ impl UpdateSource for StaticSource {
         if url.is_empty() {
             return Err("Static source needs a url".to_string());
         }
-        url_guard::validate(&url, false, false).map(|_| ())
+        // A source the user created may reach their own network when they say so
+        // (`allow_local_network=true`). This used to refuse every local address
+        // whatever the config said, so the opt-in the check honours could never
+        // be saved.
+        url_guard::validate(&url, false, Local::from_config(config).allowed()).map(|_| ())
     }
     fn check(
         &self,
@@ -174,10 +181,17 @@ impl UpdateSource for StaticSource {
                 Err(e) => return UpdateCheckResult::fail(self.name(), e),
             };
             let control = parse_zsync_control(&body);
-            let download = control
-                .get("download_url")
-                .cloned()
-                .unwrap_or_else(|| url.trim_end_matches(".zsync").to_string());
+            // A control file names its target relative to itself (`URL:
+            // App-x86_64.AppImage`), which is how zsync writes it. It was taken
+            // as written, so the check failed on an address with no host.
+            let download = match control.get("download_url") {
+                Some(named) => url::Url::parse(&url)
+                    .ok()
+                    .and_then(|base| base.join(named).ok())
+                    .map(String::from)
+                    .unwrap_or_else(|| named.clone()),
+                None => url.trim_end_matches(".zsync").to_string(),
+            };
             if let Err(e) = url_guard::validate(&download, false, local.allowed()) {
                 return UpdateCheckResult::fail(self.name(), e);
             }
@@ -343,7 +357,9 @@ impl UpdateSource for GithubSource {
         "GitHub releases"
     }
     fn handles_embedded(&self, hint: &str) -> bool {
-        hint.contains("github") || hint == "gh-releases-zsync"
+        // `gh-releases-zsync` and `gh-releases-direct` are the AppImage
+        // specification's two GitHub forms.
+        hint.contains("github") || hint.starts_with("gh-releases")
     }
     fn config_from_embedded(&self, fields: &BTreeMap<String, String>) -> Config {
         let mut config = Config::new();
@@ -404,19 +420,42 @@ impl UpdateSource for GithubSource {
         }
         let user = get_str(config, "username");
         let repo = get_str(config, "repo");
-        let filename = get_str(config, "filename");
-        let api = format!(
-            "https://api.github.com/repos/{}/{}/releases/latest",
-            pct(&user),
-            pct(&repo)
-        );
+        let filename = release_asset_pattern(&get_str(config, "filename")).to_string();
+        let release = get_str(config, "release");
+        // `latest` is the newest published release. Any other value names a
+        // tag, which is how a project keeps one moving "continuous" release.
+        let named = !release.is_empty() && !release.eq_ignore_ascii_case("latest");
+        let api = if named {
+            format!(
+                "https://api.github.com/repos/{}/{}/releases/tags/{}",
+                pct(&user),
+                pct(&repo),
+                pct(&release)
+            )
+        } else {
+            format!(
+                "https://api.github.com/repos/{}/{}/releases/latest",
+                pct(&user),
+                pct(&repo)
+            )
+        };
         let headers = [(
             "Accept".to_string(),
             "application/vnd.github+json".to_string(),
         )];
         let body = match network.get(&api, &headers, Local::from_config(config)) {
             Ok(result) => result.body,
-            Err(e) => return UpdateCheckResult::fail(self.name(), e),
+            Err(e) => {
+                let what = if named {
+                    format!("release tagged {release}")
+                } else {
+                    "published release".to_string()
+                };
+                return UpdateCheckResult::fail(
+                    self.name(),
+                    explain_github_error(&e, &user, &repo, &what),
+                );
+            }
         };
         let json = match parse_json_body(&body) {
             Ok(json) => json,
@@ -428,7 +467,8 @@ impl UpdateSource for GithubSource {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        let mut picked: Option<UpdateCheckResult> = None;
+        let mut candidates: Vec<(&serde_json::Value, String, String)> = Vec::new();
+        let mut matched_but_refused = false;
         for asset in &assets {
             let name = json_string(asset, "name");
             if !asset_matches(&name, &filename) {
@@ -438,47 +478,147 @@ impl UpdateSource for GithubSource {
             if download.is_empty() {
                 continue;
             }
-            if url_guard::validate(&download, false, false).is_err() {
+            if url_guard::validate(&download, false, false).is_err()
+                || !github_asset_host_allowed(&download)
+            {
+                matched_but_refused = true;
                 continue;
             }
-            if !github_asset_host_allowed(&download) {
-                continue;
-            }
-            picked = Some(UpdateCheckResult {
-                ok: true,
-                available: true,
-                version: version.clone(),
-                url: download,
-                size: json_i64(asset, &["size"]),
-                digest: json_string(asset, "digest"),
-                manager: self.name().to_string(),
-                ..Default::default()
-            });
-            break;
+            candidates.push((asset, name, download));
         }
-        match picked {
-            Some(mut result) => {
-                if result.version.is_empty() {
-                    result.available = false;
-                    result.error = "No version information in update metadata".to_string();
-                }
-                result
-            }
-            None => {
-                // Distinguish "no asset matched" from "matched but forbidden".
-                for asset in &assets {
-                    let name = json_string(asset, "name");
-                    if asset_matches(&name, &filename) {
-                        return UpdateCheckResult::fail(
-                            self.name(),
-                            "GitHub asset host is not allowed".to_string(),
-                        );
-                    }
-                }
-                UpdateCheckResult::fail(self.name(), "No matching GitHub asset".to_string())
-            }
+        if candidates.is_empty() {
+            return UpdateCheckResult::fail(
+                self.name(),
+                if matched_but_refused {
+                    "GitHub asset host is not allowed".to_string()
+                } else {
+                    format!(
+                        "No GitHub asset named {filename} in {}. The release lists {} file(s).",
+                        if version.is_empty() {
+                            "the release"
+                        } else {
+                            &version
+                        },
+                        assets.len()
+                    )
+                },
+            );
+        }
+        // A pattern that does not name an architecture matches the release's
+        // builds for every one. Drop the ones for another architecture, so the
+        // download is not wasted on a file this install cannot run.
+        let names: Vec<&str> = candidates
+            .iter()
+            .map(|(_, name, _)| name.as_str())
+            .collect();
+        let Some(choice) = pick_for_architecture(&names, app.architecture) else {
+            return UpdateCheckResult::fail(
+                self.name(),
+                format!(
+                    "The release has no {} build matching {filename}.",
+                    crate::types::architecture_name(app.architecture)
+                ),
+            );
+        };
+        let (asset, _, download) = &candidates[choice];
+        let mut result = UpdateCheckResult {
+            ok: true,
+            available: true,
+            version: version.clone(),
+            url: download.clone(),
+            size: json_i64(asset, &["size"]),
+            digest: json_string(asset, "digest"),
+            manager: self.name().to_string(),
+            ..Default::default()
+        };
+        if result.version.is_empty() {
+            result.available = false;
+            result.error = "No version information in update metadata".to_string();
+        }
+        result
+    }
+}
+
+/// An asset pattern as the release lists it. An AppImage's embedded update
+/// string names the build's `.zsync` control file (`App-*x86_64.AppImage.zsync`),
+/// but the file to download is the AppImage beside it.
+fn release_asset_pattern(pattern: &str) -> &str {
+    let trimmed = pattern.trim();
+    match trimmed.len().checked_sub(".zsync".len()) {
+        Some(cut)
+            if trimmed.is_char_boundary(cut) && trimmed[cut..].eq_ignore_ascii_case(".zsync") =>
+        {
+            &trimmed[..cut]
+        }
+        _ => trimmed,
+    }
+}
+
+/// The CPU architecture an asset's name says it is for, when it says one.
+fn architecture_of_name(name: &str) -> Option<crate::types::Architecture> {
+    use crate::types::Architecture;
+    let lower = name.to_ascii_lowercase();
+    let has = |tokens: &[&str]| tokens.iter().any(|token| lower.contains(token));
+    if has(&["x86_64", "x86-64", "amd64", "x64"]) {
+        Some(Architecture::X86_64)
+    } else if has(&["aarch64", "arm64"]) {
+        Some(Architecture::AArch64)
+    } else if has(&["armhf", "armv7", "armv6", "armel"]) {
+        Some(Architecture::Arm)
+    } else if has(&["i386", "i686", "ia32"]) {
+        Some(Architecture::I386)
+    } else {
+        None
+    }
+}
+
+/// The index of the best asset among `names` for an install of `architecture`:
+/// one built for it first, then one that does not say, never one built for
+/// another. `None` when every candidate is for another architecture. With the
+/// architecture unknown, the first candidate stands.
+fn pick_for_architecture(
+    names: &[&str],
+    architecture: crate::types::Architecture,
+) -> Option<usize> {
+    if names.is_empty() {
+        return None;
+    }
+    if matches!(architecture, crate::types::Architecture::Unknown) {
+        return Some(0);
+    }
+    let mut unlabeled = None;
+    for (index, name) in names.iter().enumerate() {
+        match architecture_of_name(name) {
+            Some(found) if found == architecture => return Some(index),
+            None if unlabeled.is_none() => unlabeled = Some(index),
+            _ => {}
         }
     }
+    unlabeled
+}
+
+/// Say what a failed GitHub request means for the person reading it.
+fn explain_github_error(error: &str, user: &str, repo: &str, what: &str) -> String {
+    if error.contains("HTTP 404") {
+        return format!(
+            "GitHub has no {what} for {user}/{repo} (HTTP 404). Check the repository name, \
+             that it is public, and that it publishes releases."
+        );
+    }
+    if error.contains("rate limit") {
+        return format!(
+            "GitHub's request limit was reached while checking {user}/{repo}. \
+             Try again in a little while."
+        );
+    }
+    if error.contains("HTTP 403") {
+        return format!(
+            "GitHub refused the request for {user}/{repo} (HTTP 403). The hourly limit for \
+             requests without an account may be used up, or a network policy may block \
+             api.github.com. Try again in a little while."
+        );
+    }
+    error.to_string()
 }
 
 fn asset_matches(asset_name: &str, wanted: &str) -> bool {
@@ -609,7 +749,10 @@ impl UpdateSource for GitlabSource {
         if host.contains('/') || host.contains(':') || host.is_empty() {
             return Err("GitLab host is not valid".to_string());
         }
-        if host != "gitlab.com" && is_private_hostname(&host) {
+        if host != "gitlab.com"
+            && is_private_hostname(&host)
+            && !Local::from_config(config).allowed()
+        {
             return Err("Private GitLab hosts require explicit opt-in".to_string());
         }
         Ok(())
@@ -828,7 +971,7 @@ fn forgejo_check(
     }
     let owner = get_str(config, "owner");
     let repo = get_str(config, "repo");
-    let filename = get_str(config, "filename");
+    let filename = release_asset_pattern(&get_str(config, "filename")).to_string();
     let api = format!(
         "https://{}/api/v1/repos/{}/{}/releases?limit=1",
         host,
@@ -1051,15 +1194,25 @@ impl UpdateSourceFactory {
 
     /// Guess the manager from an embedded update string.
     pub fn detect_embedded(raw: &str) -> Option<Box<dyn UpdateSource>> {
-        let hint = raw.split('|').next().unwrap_or_default().to_lowercase();
-        for name in Self::names() {
+        let hint = raw
+            .split('|')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_lowercase();
+        // The forge sources are asked before the plain file sources: a hint such
+        // as "gh-releases-zsync" names GitHub, whatever else it also mentions.
+        // `names()` keeps its own order, which the CLI and self-test list.
+        for name in ["github", "gitlab", "codeberg", "forgejo", "ftp", "static"] {
             if let Some(source) = Self::by_name(name) {
-                if source.handles_embedded(&hint) || source.handles_embedded(raw) {
+                if source.handles_embedded(&hint) {
                     return Some(source);
                 }
             }
         }
-        // Substring fallback mirrors the C++ heuristic.
+        // Substring fallback mirrors the C++ heuristic, for the forges only. The
+        // plain-file forms are named by their hint above; a string that merely
+        // mentions "zsync" (`pling-v1-zsync`) is not one of them.
         let lower = raw.to_lowercase();
         for (key, name) in [
             ("github", "github"),
@@ -1067,8 +1220,6 @@ impl UpdateSourceFactory {
             ("codeberg", "codeberg"),
             ("forgejo", "forgejo"),
             ("ftp", "ftp"),
-            ("zsync", "static"),
-            ("bintray", "static"),
         ] {
             if lower.contains(key) {
                 return Self::by_name(name);

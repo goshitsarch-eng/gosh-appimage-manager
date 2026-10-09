@@ -23,6 +23,7 @@ use crate::types::{
     ApplyEvent, InstalledApp, IntegrateResult, UpdateFailPoint, UpdateOffer, UpdatePhase,
 };
 use crate::updates_sources::{Config, UpdateCheckResult, UpdateSourceFactory};
+use crate::versions;
 
 /// One app whose update check could not complete.
 #[derive(Debug, Clone, Default)]
@@ -81,6 +82,31 @@ pub fn parse_expected_sha256(digest: &str) -> Option<String> {
     Some(hex_part.to_ascii_lowercase())
 }
 
+/// Whether a completed check offers `app` something to install.
+///
+/// One answer for the update list, the single-app check and the apply itself, so
+/// the three can never disagree about whether an update exists.
+///
+/// A newer release is an update. So is a file rebuilt under the tag the app
+/// already has (a project's moving "continuous" release), but only when the
+/// source advertises a SHA-256 and the installed file's differs: with no digest
+/// on either side there is nothing to tell the two files apart, and nothing is
+/// guessed.
+pub fn offers_update(app: &InstalledApp, checked: &UpdateCheckResult) -> bool {
+    if !(checked.ok && checked.available && !checked.url.is_empty() && !checked.version.is_empty())
+    {
+        return false;
+    }
+    if versions::is_update(&app.version, &checked.version) {
+        return true;
+    }
+    if !versions::same(&app.version, &checked.version) || app.sha256.is_empty() {
+        return false;
+    }
+    parse_expected_sha256(&checked.digest)
+        .is_some_and(|published| published != hex::encode(&app.sha256))
+}
+
 pub struct UpdateService<'a> {
     settings: &'a SettingsStore,
     network: Arc<dyn NetworkClient>,
@@ -121,10 +147,20 @@ impl<'a> UpdateService<'a> {
             return Ok((source, config));
         }
         if app.embedded_update.is_empty() {
-            return Err("No update method was found".to_string());
+            return Err(
+                "This AppImage carries no update information and no update source is set. \
+                 Set one on the app's page."
+                    .to_string(),
+            );
         }
-        let source = UpdateSourceFactory::detect_embedded(&app.embedded_update)
-            .ok_or_else(|| "No update method was found".to_string())?;
+        let source =
+            UpdateSourceFactory::detect_embedded(&app.embedded_update).ok_or_else(|| {
+                let kind = app.embedded_update.split('|').next().unwrap_or_default();
+                format!(
+                    "This AppImage's update information ({kind}) is not a kind this \
+                     version can use. Set an update source on the app's page."
+                )
+            })?;
         let fields = parse_upd_info(app.embedded_update.as_bytes()).fields;
         let config = source.config_from_embedded(&fields);
         source.validate_config(&config)?;
@@ -216,10 +252,7 @@ impl<'a> UpdateService<'a> {
                 });
                 continue;
             }
-            if !checked.available || checked.url.is_empty() {
-                continue;
-            }
-            if checked.version.is_empty() || checked.version == app.version {
+            if !offers_update(&app, &checked) {
                 continue;
             }
             let running = {
@@ -296,7 +329,7 @@ impl<'a> UpdateService<'a> {
             result.error = "No version information in update metadata".to_string();
             return result;
         }
-        if checked.version == app.version {
+        if !offers_update(app, &checked) {
             result.error = format!("Already at the latest version ({})", app.version);
             return result;
         }
@@ -483,7 +516,9 @@ impl<'a> UpdateService<'a> {
         // Rollback renames are never skipped for the same reason.
         let snapshot = registry.snapshot();
         let mut updated = app.clone();
-        updated.version = checked.version.clone();
+        // Recorded as the AppImage itself would name it: a tag of "v2.1.0" is
+        // version 2.1.0, as the desktop entry of that release says.
+        updated.version = versions::normalize(&checked.version).to_string();
         updated.available_version.clear();
         updated.available_url.clear();
         updated.available_size = 0;

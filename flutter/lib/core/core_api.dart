@@ -26,6 +26,10 @@ export 'package:gosh_appimage_flutter/src/rust/api/settings.dart'
 /// without the native library. [BridgeCore] is the real implementation.
 abstract interface class CoreApi {
   Future<LibraryDto> listLibrary();
+
+  /// Gives apps that have no icon file another look at their AppImage, and
+  /// returns how many records changed. Quiet maintenance, not a task.
+  Future<int> healLibraryIcons();
   Future<void> launchApp({required String uuid});
   Future<void> revealApp({required String uuid});
   Future<AppDto> saveArgumentsAndEnvironment({
@@ -83,6 +87,10 @@ class BridgeCore implements CoreApi {
 
   @override
   Future<LibraryDto> listLibrary() => rust.listLibrary();
+
+  @override
+  Future<int> healLibraryIcons() async =>
+      (await rust.healLibraryIcons()).toInt();
 
   @override
   Future<void> launchApp({required String uuid}) => rust.launchApp(uuid: uuid);

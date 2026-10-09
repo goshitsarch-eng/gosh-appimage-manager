@@ -546,10 +546,7 @@ impl<'a> IntegrationService<'a> {
     /// Where an icon with this extension will be installed. Known before the
     /// copy happens, so the desktop entry can name it.
     fn icon_destination(&self, uuid: &str, ext: &str) -> PathBuf {
-        let ext = match ext {
-            "svg" => "svg",
-            _ => "png",
-        };
+        let ext = desktop::icon_extension(ext);
         self.settings
             .icons_dir()
             .join("256x256/apps")

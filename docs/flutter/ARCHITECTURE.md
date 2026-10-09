@@ -108,6 +108,24 @@ drop shadow belong to the presentation board; a native window is rectangular.
   The same migration adds `integrated_folder`, the folder the AppImage was
   integrated from, which the integration writes in the row's own statement and
   `AppDto` carries to the Detail page.
+- An app's icon is read from its AppImage by the core, never by running it: the
+  icon the desktop entry names, then `.DirIcon` (a symlink in nearly every real
+  AppImage, resolved by name inside the archive's own listing), then the theme
+  folders by size. Each candidate is judged by its content (PNG, SVG, XPM). The
+  core installs it: beside the menu entry in the icon theme for an integrated
+  app, and in `~/.local/share/gosh-appimage-manager/icons/` for an adopted one,
+  because adoption writes nothing to the user's menu or icon theme. The file name
+  carries the app's id, which is how removal proves it is ours. The GUI draws the
+  file with the image decoder, or with `flutter_svg` for an SVG, and shows the
+  letter tile for anything it cannot draw. After start, `heal_library_icons`
+  gives apps with no icon file another look, once per app per run, and the model
+  reloads the Library if any changed (`AppModel.healIcons`).
+- Adoption reads the file as Inspect does, so an adopted app has the name,
+  version, architecture, checksum and update string the AppImage carries. An
+  embedded `gh-releases-zsync` string selects the GitHub source; its pattern names
+  the `.zsync` control file, and the AppImage beside it is what is downloaded.
+  Whether a release is an update is one predicate, `offers_update`, used by the
+  list, the single check, the apply and the bridge.
 - "Check for update" on the Detail page calls `check_one_update`. It reports
   what the source offers and never downloads or applies. Applying is the
   Update action, which the core refuses while the app runs unless forced.

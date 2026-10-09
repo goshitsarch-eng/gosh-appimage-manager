@@ -412,3 +412,104 @@ pub fn ran_self_extraction(log: &RunLog) -> bool {
         .iter()
         .any(|args| args.iter().any(|a| a == "--appimage-extract"))
 }
+
+/// One member of a test AppImage's payload.
+pub enum Member<'a> {
+    File(&'a str, &'a [u8]),
+    /// A symbolic link, as `.DirIcon` is in nearly every real AppImage.
+    Link(&'a str, &'a str),
+}
+
+/// Whether the tool that builds a squashfs image is installed.
+pub fn mksquashfs_on_path() -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|dir| dir.join("mksquashfs").is_file())
+    })
+}
+
+/// A valid 8x8 PNG (checked chunk by chunk: lengths and CRCs), small enough to
+/// read and large enough for a decoder to accept.
+pub const TINY_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08, 0x08, 0x06, 0x00, 0x00, 0x00, 0xc4, 0x0f, 0xbe,
+    0x8b, 0x00, 0x00, 0x00, 0x19, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x30, 0x89, 0x39, 0xf1,
+    0x1f, 0x1f, 0x66, 0x20, 0x5a, 0x01, 0x3a, 0x18, 0x08, 0x05, 0x64, 0xfb, 0x02, 0x00, 0x8b, 0x56,
+    0xb0, 0x11, 0x0f, 0xd7, 0x91, 0x68, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42,
+    0x60, 0x82,
+];
+
+/// A small SVG, as a scalable app icon.
+pub const TINY_SVG: &[u8] =
+    b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\">\
+<rect width=\"64\" height=\"64\" fill=\"#2a6\"/></svg>\n";
+
+/// Build an AppImage-shaped file -- an ELF header carrying the Type-2 magic and
+/// an `.upd_info` section, then a real squashfs payload made by `mksquashfs` --
+/// and return its path. Nothing here is ever executed. `upd_info` is the
+/// embedded update string, as appimagetool writes it.
+pub fn real_appimage(
+    dir: &Path,
+    file_name: &str,
+    upd_info: Option<&str>,
+    members: &[Member],
+) -> PathBuf {
+    use std::os::unix::fs::symlink;
+    let tree = tempfile::tempdir().expect("payload tree");
+    for member in members {
+        match member {
+            Member::File(name, bytes) => {
+                let target = tree.path().join(name);
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::write(target, bytes).unwrap();
+            }
+            Member::Link(name, to) => {
+                let target = tree.path().join(name);
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                symlink(to, target).unwrap();
+            }
+        }
+    }
+    let image = dir.join(format!("{file_name}.sqsh"));
+    let status = std::process::Command::new("mksquashfs")
+        .arg(tree.path())
+        .arg(&image)
+        .args([
+            "-noappend",
+            "-quiet",
+            "-no-progress",
+            "-root-owned",
+            "-comp",
+            "gzip",
+        ])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("mksquashfs runs");
+    assert!(status.success(), "mksquashfs failed");
+    let payload = std::fs::read(&image).unwrap();
+    let _ = std::fs::remove_file(&image);
+
+    // ELF header (64) + one section header (64) + a 1 KiB `.upd_info` section.
+    let mut bytes = elf_layout(64, &[(1, 128, 1024)], &[]);
+    let mut section = vec![0u8; 1024];
+    if let Some(text) = upd_info {
+        section[..text.len()].copy_from_slice(text.as_bytes());
+    }
+    bytes.extend_from_slice(&section);
+    bytes.extend_from_slice(&payload);
+    let path = dir.join(file_name);
+    std::fs::write(&path, &bytes).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+/// A desktop entry for a test AppImage; `icon` is the whole `Icon=` line or "".
+pub fn desktop_entry(name: &str, version: &str, icon_line: &str) -> String {
+    format!(
+        "[Desktop Entry]\nType=Application\nName={name}\nExec=AppRun %U\n{icon_line}\n\
+         X-AppImage-Version={version}\nCategories=Utility;\n"
+    )
+}

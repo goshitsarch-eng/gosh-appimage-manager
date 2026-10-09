@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -786,12 +787,16 @@ class StatusDot extends StatelessWidget {
   );
 }
 
-/// The letter tile that stands in for an app's icon.
 /// An app's tile: the app's own icon when its AppImage has one, otherwise its
-/// letter tile. The icon file is untrusted. It is read only by Flutter's image
-/// decoder, decoded no larger than the tile needs, and shown only once it has
-/// decoded. A file that is missing, unreadable or not an image shows the letter
-/// with no error (owner decision).
+/// letter tile. The icon file is untrusted. A raster icon is read only by
+/// Flutter's image decoder, decoded no larger than the tile needs; an SVG is
+/// drawn by flutter_svg, which parses it into vector paths and never loads
+/// anything the file points to. Either is shown only once it has decoded. A
+/// file that is missing, unreadable or not an image shows the letter with no
+/// error (owner decision).
+///
+/// Many AppImages ship an SVG icon, and the image decoder cannot read one, so
+/// those apps showed a letter in place of their icon.
 class AppIconTile extends StatelessWidget {
   const AppIconTile({
     super.key,
@@ -800,6 +805,8 @@ class AppIconTile extends StatelessWidget {
     required this.size,
     required this.fontSize,
     this.radius = AppRadius.tile,
+    this.iconBytes,
+    this.iconFormat = '',
   });
 
   final String letter;
@@ -810,6 +817,18 @@ class AppIconTile extends StatelessWidget {
   final double fontSize;
   final double radius;
 
+  /// The icon's bytes, for a file that is inspected and not yet installed: the
+  /// Inspect page has no file of ours to point at. [iconFormat] says which
+  /// reader to use, as the extension does for [iconPath].
+  final Uint8List? iconBytes;
+  final String iconFormat;
+
+  /// Whether the icon is an SVG. The core names an installed icon for its
+  /// content, so the extension says which reader to use.
+  bool get _isSvg => iconBytes != null
+      ? iconFormat.toLowerCase() == 'svg'
+      : iconPath.toLowerCase().endsWith('.svg');
+
   @override
   Widget build(BuildContext context) {
     final letterTile = AppLetterTile(
@@ -818,27 +837,65 @@ class AppIconTile extends StatelessWidget {
       fontSize: fontSize,
       radius: radius,
     );
-    if (iconPath.isEmpty) {
+    final bytes = iconBytes;
+    final hasBytes = bytes != null && bytes.isNotEmpty;
+    if (iconPath.isEmpty && !hasBytes) {
       return letterTile;
     }
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(radius),
-      child: Image.file(
-        File(iconPath),
-        width: size,
-        height: size,
-        fit: BoxFit.contain,
-        filterQuality: FilterQuality.medium,
-        cacheWidth: (size * 2).round(),
-        cacheHeight: (size * 2).round(),
-        frameBuilder: (context, child, frame, wasSynchronouslyLoaded) =>
-            frame == null ? letterTile : child,
-        errorBuilder: (context, error, stackTrace) => letterTile,
-      ),
-    );
+    Widget placeholder(BuildContext context) => letterTile;
+    Widget failed(BuildContext context, Object error, StackTrace? stack) =>
+        letterTile;
+    final Widget icon;
+    if (_isSvg) {
+      icon = hasBytes
+          ? SvgPicture.memory(
+              bytes,
+              width: size,
+              height: size,
+              fit: BoxFit.contain,
+              placeholderBuilder: placeholder,
+              errorBuilder: failed,
+            )
+          : SvgPicture.file(
+              File(iconPath),
+              width: size,
+              height: size,
+              fit: BoxFit.contain,
+              placeholderBuilder: placeholder,
+              errorBuilder: failed,
+            );
+    } else {
+      // The width alone bounds the decode and keeps the icon's shape; giving
+      // both dimensions stretched a non-square icon to a square.
+      Widget shown(BuildContext context, Widget child, int? frame, bool sync) =>
+          frame == null && !sync ? letterTile : child;
+      icon = hasBytes
+          ? Image.memory(
+              bytes,
+              width: size,
+              height: size,
+              fit: BoxFit.contain,
+              filterQuality: FilterQuality.medium,
+              cacheWidth: (size * 2).round(),
+              frameBuilder: shown,
+              errorBuilder: failed,
+            )
+          : Image.file(
+              File(iconPath),
+              width: size,
+              height: size,
+              fit: BoxFit.contain,
+              filterQuality: FilterQuality.medium,
+              cacheWidth: (size * 2).round(),
+              frameBuilder: shown,
+              errorBuilder: failed,
+            );
+    }
+    return ClipRRect(borderRadius: BorderRadius.circular(radius), child: icon);
   }
 }
 
+/// The letter tile that stands in for an app's icon.
 class AppLetterTile extends StatelessWidget {
   const AppLetterTile({
     super.key,

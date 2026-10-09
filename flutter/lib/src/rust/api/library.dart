@@ -9,7 +9,7 @@ import 'dto.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `find_app`, `remove_with`
+// These functions are ignored because they are not marked as `pub`: `find_app`, `heal_icons_on`, `icon_attempts`, `remove_with`, `set_update_source_on`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`
 
 /// The registered apps, which of them are running, and what discovery finds.
@@ -54,11 +54,24 @@ Future<AppDto> setUpdateSource({
 Future<AppDto> unsetUpdateSource({required String uuid}) =>
     RustLib.instance.api.crateApiLibraryUnsetUpdateSource(uuid: uuid);
 
-/// Register an external AppImage. Nothing on disk changes.
+/// Register an external AppImage and read what the file says about itself: its
+/// name, version, icon and update information. Its menu entry and the user's
+/// icon theme are not touched; the icon is kept in the manager's own folder.
 Future<AppDto> adoptPath({required String opId, required String path}) =>
     RustLib.instance.api.crateApiLibraryAdoptPath(opId: opId, path: path);
 
-/// Re-read the app's metadata and rewrite its menu entry.
+/// Give the apps that have no icon file another look at their AppImage, and
+/// return how many records changed.
+///
+/// Apps adopted before adoption read the file, and apps integrated before icons
+/// were found in every layout, have none; opening the file again gives it to
+/// them. It is quiet maintenance, not a task on the Tasks page, and each app is
+/// tried once per run. An app whose file cannot be read is left as it is.
+Future<PlatformInt64> healLibraryIcons() =>
+    RustLib.instance.api.crateApiLibraryHealLibraryIcons();
+
+/// Re-read the app's metadata, icon and update information, and rewrite its
+/// menu entry.
 Future<AppDto> refreshMetadata({required String opId, required String uuid}) =>
     RustLib.instance.api.crateApiLibraryRefreshMetadata(opId: opId, uuid: uuid);
 

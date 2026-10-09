@@ -344,11 +344,15 @@ impl<'a> AppImageInspector<'a> {
             let entries = self.list_archive(tool, path, offset)?;
             let desktop_member = pick_desktop_member(&entries)
                 .ok_or_else(|| "No desktop entry found in AppImage".to_string())?;
+            // Only the desktop entry is needed to start. The icon is looked for
+            // afterwards, in the archive's listing, so a member the archive does
+            // not hold is never requested of an extractor that would count it
+            // as a failure.
             let staged = self.extract_members(
                 tool,
                 path,
                 &work,
-                &[desktop_member.clone(), ".DirIcon".to_string()],
+                std::slice::from_ref(&desktop_member),
                 offset,
             )?;
             let desktop_bytes = staged.get(&desktop_member).cloned().unwrap_or_default();
@@ -356,60 +360,34 @@ impl<'a> AppImageInspector<'a> {
                 .map_err(|e| format!("Cannot parse desktop entry: {e}"))?;
             let mut metadata = metadata_from_desktop(&file);
 
-            // Icon: prefer the referenced icon, fall back to .DirIcon. The
-            // bytes have to outlive `work`, which is removed on the way out,
-            // so copy the chosen icon into a staging directory the caller
-            // owns. Recording the archive member name here (as this used to)
-            // left a path into a deleted directory, which is why no
+            // The icon's bytes have to outlive `work`, which is removed on the way
+            // out, so the chosen icon is copied into a staging directory the
+            // caller owns. Recording the archive member name here (as this once
+            // did) left a path into a deleted directory, which is why no
             // integrated AppImage ever got an icon.
-            let mut chosen: Option<(String, String)> = None;
-            if !metadata.icon_name.is_empty() {
-                for ext in ["png", "svg", "xpm"] {
-                    let candidate = format!("{}.{}", metadata.icon_name, ext);
-                    if let Some(member) = find_member(&entries, &candidate) {
-                        let got = self.extract_members(
-                            tool,
-                            path,
-                            &work,
-                            std::slice::from_ref(&member),
-                            offset,
-                        )?;
-                        if let Some(bytes) = got.get(&member) {
-                            if (bytes.len() as u64) <= limits::MAX_ICON_BYTES {
-                                chosen = Some((member, ext.to_string()));
-                                break;
-                            }
-                        }
+            let picker = IconPicker {
+                inspector: self,
+                tool,
+                path,
+                work: &work,
+                entries: &entries,
+                offset,
+            };
+            if let Some((source, format)) = picker.pick(&metadata.icon_name) {
+                let stage = safe_fs::private_temp_dir(&work_parent, "icon-")?;
+                let dest = stage.join(format!("icon.{format}"));
+                match safe_fs::copy_bounded(
+                    &source,
+                    &dest,
+                    limits::MAX_ICON_BYTES,
+                    &AtomicBool::new(false),
+                ) {
+                    Ok(_) => {
+                        metadata.extracted_icon_path = dest.to_string_lossy().into_owned();
+                        metadata.icon_format = format.to_string();
                     }
-                }
-            }
-            if chosen.is_none() {
-                if let Some(bytes) = staged.get(".DirIcon") {
-                    if (bytes.len() as u64) <= limits::MAX_ICON_BYTES {
-                        // .DirIcon carries no extension; sniff the content so
-                        // the installed file is named correctly.
-                        chosen = Some((".DirIcon".to_string(), sniff_icon_extension(bytes)));
-                    }
-                }
-            }
-            if let Some((member, ext)) = chosen {
-                let source = work.join(&member);
-                if source.is_file() {
-                    let stage = safe_fs::private_temp_dir(&work_parent, "icon-")?;
-                    let dest = stage.join(format!("icon.{ext}"));
-                    match safe_fs::copy_bounded(
-                        &source,
-                        &dest,
-                        limits::MAX_ICON_BYTES,
-                        &AtomicBool::new(false),
-                    ) {
-                        Ok(_) => {
-                            metadata.extracted_icon_path = dest.to_string_lossy().into_owned();
-                            metadata.icon_format = ext;
-                        }
-                        Err(_) => {
-                            let _ = safe_fs::remove_dir_no_follow(&stage);
-                        }
+                    Err(_) => {
+                        let _ = safe_fs::remove_dir_no_follow(&stage);
                     }
                 }
             }
@@ -898,19 +876,10 @@ fn parse_desktop_actions(file: &desktop::DesktopFile) -> Vec<crate::types::Deskt
 }
 
 /// Identify an icon's format from its leading bytes; `.DirIcon` has no
-/// extension and the file name decides how the desktop reads it.
+/// extension and the file name decides how the desktop reads it. Unreadable
+/// content is called a PNG, as it always was on this (opt-in) path.
 fn sniff_icon_extension(bytes: &[u8]) -> String {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return "png".to_string();
-    }
-    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]);
-    if head.contains("<svg") || head.contains("<?xml") {
-        return "svg".to_string();
-    }
-    if bytes.starts_with(b"/* XPM */") {
-        return "xpm".to_string();
-    }
-    "png".to_string()
+    detect_icon_format(bytes).unwrap_or("png").to_string()
 }
 
 fn parse_listing(tool: &str, stdout: &[u8]) -> Result<Vec<crate::types::ArchiveEntry>, String> {
@@ -954,6 +923,240 @@ fn parse_listing(tool: &str, stdout: &[u8]) -> Result<Vec<crate::types::ArchiveE
     Ok(entries)
 }
 
+/// What one archive member turned out to be once extracted.
+enum Extracted {
+    File(std::path::PathBuf),
+    /// A symbolic link, with the target it names (never followed on disk).
+    Link(String),
+}
+
+/// Chooses the icon of an AppImage from its archive, without running it.
+///
+/// Real AppImages put the icon in three places, and the first two are often the
+/// same file: a top-level `<Icon>.png`/`.svg` that the desktop entry names;
+/// `.DirIcon`, which is almost always a *symlink* to it; and the themed copies
+/// under `usr/share/icons`. The old code looked only for the first and skipped
+/// every symlink, so a `.DirIcon` fallback could never fire, and an app whose
+/// entry named its icon in a way the first lookup missed got no icon at all.
+///
+/// Every candidate is extracted on its own and judged by its content, not its
+/// name. A symlink is resolved inside the archive's own listing -- the target
+/// is another member asked of the extractor, never a path on this machine.
+struct IconPicker<'a> {
+    inspector: &'a AppImageInspector<'a>,
+    tool: &'a str,
+    path: &'a Path,
+    work: &'a Path,
+    entries: &'a [crate::types::ArchiveEntry],
+    offset: Option<u64>,
+}
+
+impl IconPicker<'_> {
+    /// The icon's file in `work` and its format, when the archive holds a usable one.
+    fn pick(&self, icon_name: &str) -> Option<(std::path::PathBuf, &'static str)> {
+        let mut counter = 0u32;
+        for member in self.candidates(icon_name) {
+            if let Some(found) = self.try_member(&member, &mut counter) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// Archive members worth trying, best first.
+    fn candidates(&self, icon_name: &str) -> Vec<String> {
+        let mut members: Vec<String> = Vec::new();
+        let mut push = |member: String| {
+            if !members.contains(&member) {
+                members.push(member);
+            }
+        };
+        let stem = icon_stem(icon_name);
+        if !icon_name.is_empty() {
+            // `Icon=app.png` names the file; `Icon=app` names a stem.
+            let named: Vec<String> = if has_icon_extension(icon_name) {
+                vec![icon_name.to_string()]
+            } else {
+                ["png", "svg", "xpm"]
+                    .iter()
+                    .map(|ext| format!("{icon_name}.{ext}"))
+                    .collect()
+            };
+            for candidate in named {
+                if self.listed(&candidate) {
+                    push(candidate);
+                }
+            }
+        }
+        if self.listed(".DirIcon") {
+            push(".DirIcon".to_string());
+        }
+        if !stem.is_empty() {
+            for member in themed_icon_members(self.entries, stem) {
+                push(member);
+            }
+        }
+        members
+    }
+
+    fn listed(&self, member: &str) -> bool {
+        self.entries.iter().any(|entry| entry.path == member)
+    }
+
+    /// Follow `member` through any links to a file, and accept it only when
+    /// its content is an image the desktop can use.
+    fn try_member(
+        &self,
+        member: &str,
+        counter: &mut u32,
+    ) -> Option<(std::path::PathBuf, &'static str)> {
+        let mut current = member.to_string();
+        for _ in 0..limits::SYMLINK_HOP_LIMIT {
+            if !self.listed(&current) {
+                return None;
+            }
+            match self.extract_one(&current, counter)? {
+                Extracted::File(file) => {
+                    let bytes = safe_fs::read_bounded(&file, limits::MAX_ICON_BYTES).ok()?;
+                    return detect_icon_format(&bytes).map(|format| (file, format));
+                }
+                Extracted::Link(target) => current = resolve_link(&current, &target)?,
+            }
+        }
+        None
+    }
+
+    /// Extract one member into a scratch directory of its own, so candidates
+    /// never accumulate toward the extraction bounds.
+    fn extract_one(&self, member: &str, counter: &mut u32) -> Option<Extracted> {
+        let dest = self.work.join(format!("m{counter}"));
+        *counter += 1;
+        fs::create_dir(&dest).ok()?;
+        self.inspector
+            .extract_members(
+                self.tool,
+                self.path,
+                &dest,
+                std::slice::from_ref(&member.to_string()),
+                self.offset,
+            )
+            .ok()?;
+        let local = dest.join(member);
+        let meta = fs::symlink_metadata(&local).ok()?;
+        if meta.file_type().is_symlink() {
+            let target = fs::read_link(&local).ok()?;
+            Some(Extracted::Link(target.to_string_lossy().into_owned()))
+        } else if meta.is_file() {
+            Some(Extracted::File(local))
+        } else {
+            None
+        }
+    }
+}
+
+/// Whether `name` already ends in an icon file extension.
+fn has_icon_extension(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".png", ".svg", ".xpm"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
+/// An icon name without its file extension.
+fn icon_stem(name: &str) -> &str {
+    if has_icon_extension(name) {
+        &name[..name.len() - 4]
+    } else {
+        name
+    }
+}
+
+/// Where a symlink at `from` that names `target` points, inside the archive.
+/// The target is taken relative to the link's own folder and resolved by name
+/// alone; one that is absolute or climbs out of the archive is refused.
+fn resolve_link(from: &str, target: &str) -> Option<String> {
+    if target.is_empty() || target.starts_with('/') || target.contains('\\') {
+        return None;
+    }
+    let mut parts: Vec<&str> = from.split('/').collect();
+    parts.pop(); // the link's own name
+    for part in target.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            other => parts.push(other),
+        }
+    }
+    let resolved = parts.join("/");
+    safe_fs::valid_archive_member(&resolved).ok()?;
+    if resolved.is_empty() {
+        None
+    } else {
+        Some(resolved)
+    }
+}
+
+/// Icon files for `stem` under the archive's icon folders, best first: a large
+/// raster, then a scalable one, then smaller rasters. The size comes from the
+/// `NNNxNNN` folder a themed icon sits in.
+fn themed_icon_members(entries: &[crate::types::ArchiveEntry], stem: &str) -> Vec<String> {
+    let mut scored: Vec<(u32, String)> = Vec::new();
+    for entry in entries {
+        let path = entry.path.as_str();
+        let Some((dir, file)) = path.rsplit_once('/') else {
+            continue;
+        };
+        let lower_dir = format!("/{}/", dir.to_ascii_lowercase());
+        if !(lower_dir.contains("/icons/") || lower_dir.contains("/pixmaps/")) {
+            continue;
+        }
+        let Some((name, ext)) = file.rsplit_once('.') else {
+            continue;
+        };
+        if name != stem {
+            continue;
+        }
+        let side = dir
+            .split('/')
+            .filter_map(|part| part.split_once('x'))
+            .filter_map(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+            .map(|(w, _)| w)
+            .next();
+        let score = match ext.to_ascii_lowercase().as_str() {
+            "png" => match side {
+                Some(side) if side >= 256 => 30_000u32.saturating_sub(side),
+                Some(side) => side,
+                None => 64,
+            },
+            "svg" => 10_000,
+            "xpm" => 1,
+            _ => continue,
+        };
+        scored.push((score, path.to_string()));
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored.into_iter().take(4).map(|(_, path)| path).collect()
+}
+
+/// The format of an icon's bytes, judged by content. `None` for anything that
+/// is not a PNG, an SVG or an XPM -- a name is never evidence of a format.
+fn detect_icon_format(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("png");
+    }
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(16 * 1024)]);
+    let trimmed = head.trim_start_matches('\u{feff}').trim_start();
+    if trimmed.starts_with("/* XPM */") {
+        return Some("xpm");
+    }
+    if head.to_ascii_lowercase().contains("<svg") {
+        return Some("svg");
+    }
+    None
+}
+
 fn pick_desktop_member(entries: &[crate::types::ArchiveEntry]) -> Option<String> {
     // Prefer top-level *.desktop files.
     for entry in entries {
@@ -964,17 +1167,6 @@ fn pick_desktop_member(entries: &[crate::types::ArchiveEntry]) -> Option<String>
     entries
         .iter()
         .find(|e| e.path.ends_with(".desktop"))
-        .map(|e| e.path.clone())
-}
-
-fn find_member(entries: &[crate::types::ArchiveEntry], name: &str) -> Option<String> {
-    entries
-        .iter()
-        .find(|e| {
-            e.path == name
-                || e.path.ends_with(&format!("/{name}"))
-                || e.path.rsplit('/').next() == Some(name)
-        })
         .map(|e| e.path.clone())
 }
 
@@ -989,7 +1181,7 @@ pub fn parse_upd_info(raw: &[u8]) -> EmbeddedUpdateInfo {
     info.raw = text.clone();
     let parts: Vec<&str> = text.split('|').collect();
     let hint = parts.first().copied().unwrap_or_default().to_lowercase();
-    info.manager_hint = if hint.contains("github") {
+    info.manager_hint = if hint.contains("github") || hint.starts_with("gh-releases") {
         "github".to_string()
     } else if hint.contains("gitlab") {
         "gitlab".to_string()

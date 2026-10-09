@@ -24,6 +24,8 @@ Future<List<TaskDto>> listTasks() =>
 Future<void> clearFinishedTasks() =>
     RustLib.instance.api.crateApiSystemClearFinishedTasks();
 
-/// Ask a running operation to stop. Returns false when it is not running.
+/// Ask a running operation to stop. The argument is the operation's own id or
+/// the task id the Tasks page lists for it. Returns false when no running
+/// operation has that id.
 Future<bool> cancelTask({required String opId}) =>
     RustLib.instance.api.crateApiSystemCancelTask(opId: opId);

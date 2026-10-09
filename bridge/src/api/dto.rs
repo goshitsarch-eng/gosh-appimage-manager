@@ -370,11 +370,7 @@ impl UpdateCheckDto {
         app: &goshaim_core::types::InstalledApp,
         checked: &goshaim_core::updates_sources::UpdateCheckResult,
     ) -> Self {
-        let offered = checked.ok
-            && checked.available
-            && !checked.url.is_empty()
-            && !checked.version.is_empty()
-            && checked.version != app.version;
+        let offered = goshaim_core::updates_service::offers_update(app, checked);
         let error = if checked.ok {
             String::new()
         } else if checked.error.is_empty() {
