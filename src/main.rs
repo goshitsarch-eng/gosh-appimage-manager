@@ -1,4 +1,4 @@
-// Gosh AppImage Manager 3.0.0 — entry point. Made by Gosh.
+// Gosh AppImage Manager 3.0.1 — entry point. Made by Gosh.
 // One binary: the CLI, plus the launcher that starts the Flutter GUI.
 
 use std::io::{IsTerminal, Write};

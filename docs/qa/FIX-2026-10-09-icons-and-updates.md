@@ -1,5 +1,7 @@
 # Icons and updates: fix record (2026-10-09)
 
+Released as 3.0.1; see `CHANGELOG.md`.
+
 Reported: the app does not show the icons of the actual AppImages, and updating
 AppImages never works ("can't find" them, or random errors).
 

@@ -105,7 +105,7 @@ fn autostart_probe_verifies_without_mutating() {
 
 #[test]
 fn version_flag_prints_3_0_0() {
-    assert_eq!(goshaim_core::limits::VERSION, "3.0.0");
+    assert_eq!(goshaim_core::limits::VERSION, "3.0.1");
     let _ = args(&["--version"]);
 }
 

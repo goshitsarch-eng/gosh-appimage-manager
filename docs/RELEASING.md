@@ -7,8 +7,11 @@ Releases are tag-driven. Everything after the tag push is automated.
 ```sh
 # 1. bump the version
 $EDITOR Cargo.toml                                   # version = "X.Y.Z"
-$EDITOR data/com.goshapps.AppImageManager.metainfo.xml  # add <release version="X.Y.Z">
-cargo check   # refresh Cargo.lock
+$EDITOR data/com.goshapps.AppImageManager.metainfo.xml  # add <release version="X.Y.Z"> FIRST
+$EDITOR CHANGELOG.md          # turn [Unreleased] into [X.Y.Z] - date; start a new [Unreleased]
+cargo check                          # refresh Cargo.lock
+(cd bridge && cargo check)           # refresh bridge/Cargo.lock
+scripts/check-version.sh vX.Y.Z      # the same gate CI runs
 git commit -am "release X.Y.Z" && git push
 
 # 2. tag and push the tag
@@ -20,6 +23,23 @@ The tag must be `vX.Y.Z` (or `vX.Y.Z-rc.N` for a pre-release). The
 `release` workflow first runs `scripts/check-version.sh`, which refuses
 to release when the tag disagrees with `Cargo.toml` or the newest
 `<release>` in the metainfo.
+
+## Where the version appears
+
+`Cargo.toml` and the two lockfiles (`Cargo.lock`, `bridge/Cargo.lock`) and the
+newest `<release>` in the metainfo are enforced by the gate. These say the
+current version in prose or comments, and are changed by hand with the bump:
+
+- `README.md` (the version line and the `--version` example)
+- `AGENTS.md`, `AUTHORS`, `justfile` (first line), `docs/flutter/ARCHITECTURE.md`
+- the header comment of `src/lib.rs`, `src/main.rs` and `src/launcher.rs`
+- `tests/test_probes.rs`, which asserts the version the binary reports
+
+Records of what was verified at an earlier version (`docs/verification.md`
+sections for 3.0.0, `docs/qa/`, `docs/release/REPORT.md`) keep the version they
+describe. `flutter/pubspec.yaml` carries the Flutter package's own version and is
+not the product version. The Flutter test fakes use a fixed `3.0.0`, which the
+About-page golden image shows; leave them.
 
 ## What CI does
 

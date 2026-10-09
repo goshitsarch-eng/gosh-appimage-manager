@@ -214,7 +214,7 @@ programs, and a read-only probe of a real third-party type-2 AppImage was run
 earlier); live pointer and keyboard input to the window.
 
 
-## 10. Icons and updates fix (2026-10-09)
+## 10. Icons and updates fix, release 3.0.1 (2026-10-09)
 
 Recorded in full in `docs/qa/FIX-2026-10-09-icons-and-updates.md`: the causes, how
 each was reproduced before the fix, and what was run after. Host: x86_64 Linux,
@@ -230,6 +230,9 @@ Flatpak builds).
 | `dart format --set-exit-if-changed`, `flutter analyze` | clean |
 | `flutter test` | 374 passed, 1 failed (359 and the same 1 before) |
 | `flutter build linux --release`, `tools/gui-smoke.sh` | PASS: window found, stayed up 10 s, stopped cleanly |
+| `scripts/check-version.sh v3.0.1` | passes; the same script refuses `v3.0.0` |
+| `appstreamcli validate --pedantic --no-net`, `desktop-file-validate` | the one pedantic note it already gave (`cid-contains-uppercase-letter`); desktop file clean |
+| `gosh-appimage-manager --version` | `3.0.1` |
 
 The one Flutter failure is `pages_golden_test.dart: 02 Empty library`, a 6-pixel
 (0.00 %) anti-aliasing difference that fails the same way on the untouched tree on

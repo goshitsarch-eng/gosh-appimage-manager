@@ -5,7 +5,8 @@ the work, a Flutter GUI is the desktop app, and one `gosh-appimage-manager`
 binary provides a scriptable CLI and starts that GUI.
 
 - Application ID: `com.goshapps.AppImageManager`
-- Version 3.0.0 · GPL-3.0-or-later · by Gosh Apps / Gosh-Its-Arch
+- Version 3.0.1 · GPL-3.0-or-later · by Gosh Apps / Gosh-Its-Arch
+- What changed in each release: [CHANGELOG.md](CHANGELOG.md)
 
 ## AI-assisted development
 
@@ -138,7 +139,7 @@ library · Ctrl+F check for updates · Esc dismiss a dialog.
 ## CLI
 
 The same executable doubles as a CLI; commands never start the GUI.
-`--version` prints `3.0.0`. `--help` (or `-h`) prints usage.
+`--version` prints `3.0.1`. `--help` (or `-h`) prints usage.
 
 ```
 gosh-appimage-manager --integrate <path> [--keep-both|--replace] [--replace-uuid UUID|--target PATH] [--yes] [--allow-unsafe]

@@ -1,6 +1,6 @@
 # Architecture: Flutter GUI on the Rust core
 
-Gosh AppImage Manager 3.0.0 has one front end, written in Flutter, and one
+Gosh AppImage Manager 3.0.1 has one front end, written in Flutter, and one
 core, written in Rust. The GUI is the only part that is not Rust, and no toolkit other than Flutter is in the tree.
 
 ## The four parts

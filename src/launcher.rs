@@ -1,4 +1,4 @@
-// Gosh AppImage Manager 3.0.0 — GUI launcher. Made by Gosh.
+// Gosh AppImage Manager 3.0.1 — GUI launcher. Made by Gosh.
 // GPL-3.0-or-later.
 //
 // The Rust binary is the one user-facing entry point. A run with no CLI
